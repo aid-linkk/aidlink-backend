@@ -112,15 +112,13 @@ export class DonationService {
               title: true,
             },
           },
-          user: donations.userId
-            ? {
-                select: {
-                  id: true,
-                  username: true,
-                  email: true,
-                },
-              }
-            : undefined,
+          user: {
+            select: {
+              id: true,
+              username: true,
+              email: true,
+            },
+          },
         },
       }),
       prisma.donation.count({ where }),

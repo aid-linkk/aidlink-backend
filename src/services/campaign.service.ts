@@ -148,6 +148,65 @@ export class CampaignService {
     return campaign;
   }
 
+  /**
+   * Validates campaign input fields for update operations.
+   * Enforces business rules for title, description, targetAmount, dates, and imageUrl.
+   */
+  private static validateCampaignUpdateInput(data: Partial<CampaignInput>): void {
+    if (data.title !== undefined) {
+      if (typeof data.title !== 'string' || data.title.trim().length < 3) {
+        throw new AppError('Title must be at least 3 characters long', 400);
+      }
+      if (data.title.trim().length > 200) {
+        throw new AppError('Title must not exceed 200 characters', 400);
+      }
+    }
+
+    if (data.description !== undefined) {
+      if (typeof data.description !== 'string' || data.description.trim().length < 10) {
+        throw new AppError('Description must be at least 10 characters long', 400);
+      }
+      if (data.description.trim().length > 5000) {
+        throw new AppError('Description must not exceed 5000 characters', 400);
+      }
+    }
+
+    if (data.targetAmount !== undefined) {
+      if (typeof data.targetAmount !== 'number' || data.targetAmount <= 0) {
+        throw new AppError('Target amount must be a positive number', 400);
+      }
+    }
+
+    if (data.startDate !== undefined) {
+      const startDate = new Date(data.startDate);
+      if (isNaN(startDate.getTime())) {
+        throw new AppError('Start date must be a valid date', 400);
+      }
+    }
+
+    if (data.endDate !== undefined && data.endDate !== null) {
+      const endDate = new Date(data.endDate);
+      if (isNaN(endDate.getTime())) {
+        throw new AppError('End date must be a valid date', 400);
+      }
+      // Validate endDate is after startDate if both are provided
+      if (data.startDate !== undefined) {
+        const startDate = new Date(data.startDate);
+        if (endDate <= startDate) {
+          throw new AppError('End date must be after start date', 400);
+        }
+      }
+    }
+
+    if (data.imageUrl !== undefined && data.imageUrl !== null && data.imageUrl !== '') {
+      try {
+        new URL(data.imageUrl);
+      } catch {
+        throw new AppError('Image URL must be a valid URL', 400);
+      }
+    }
+  }
+
   static async updateCampaign(id: string, data: Partial<CampaignInput>, userId: string, userRole: Role): Promise<any> {
     const campaign = await prisma.campaign.findUnique({
       where: { id },
@@ -165,6 +224,17 @@ export class CampaignService {
     // Prevent updating if campaign is completed or cancelled
     if (campaign.status === CampaignStatus.COMPLETED || campaign.status === CampaignStatus.CANCELLED) {
       throw new AppError('Cannot update a completed or cancelled campaign', 400);
+    }
+
+    // Validate input fields
+    CampaignService.validateCampaignUpdateInput(data);
+
+    // If endDate is provided without startDate, validate against existing startDate
+    if (data.endDate !== undefined && data.endDate !== null && data.startDate === undefined) {
+      const endDate = new Date(data.endDate);
+      if (endDate <= campaign.startDate) {
+        throw new AppError('End date must be after start date', 400);
+      }
     }
 
     const updated = await prisma.campaign.update({
@@ -196,8 +266,13 @@ export class CampaignService {
       throw new AppError('Can only delete draft campaigns', 400);
     }
 
-    await prisma.campaign.delete({
-      where: { id },
+    // Delete campaign and dependent records transactionally
+    await prisma.$transaction(async (tx) => {
+      await tx.milestone.deleteMany({ where: { campaignId: id } });
+      await tx.beneficiaryAssignment.deleteMany({ where: { campaignId: id } });
+      await tx.distribution.deleteMany({ where: { campaignId: id } });
+      await tx.donation.deleteMany({ where: { campaignId: id } });
+      await tx.campaign.delete({ where: { id } });
     });
 
     logger.info(`Campaign deleted: ${id} by user ${userId}`);
@@ -227,6 +302,28 @@ export class CampaignService {
     return updated;
   }
 
+  /**
+   * Validates milestone input fields.
+   * Enforces presence of title/description and valid numeric constraints.
+   */
+  private static validateMilestoneInput(data: any): void {
+    if (!data.title || typeof data.title !== 'string' || data.title.trim().length === 0) {
+      throw new AppError('Milestone title is required', 400);
+    }
+
+    if (!data.description || typeof data.description !== 'string' || data.description.trim().length === 0) {
+      throw new AppError('Milestone description is required', 400);
+    }
+
+    if (data.targetAmount === undefined || data.targetAmount === null || typeof data.targetAmount !== 'number' || data.targetAmount <= 0) {
+      throw new AppError('Milestone target amount must be a positive number', 400);
+    }
+
+    if (data.order === undefined || data.order === null || typeof data.order !== 'number' || data.order < 0 || !Number.isInteger(data.order)) {
+      throw new AppError('Milestone order must be a non-negative integer', 400);
+    }
+  }
+
   static async addMilestone(campaignId: string, data: any, userId: string, userRole: Role): Promise<any> {
     const campaign = await prisma.campaign.findUnique({
       where: { id: campaignId },
@@ -241,9 +338,15 @@ export class CampaignService {
       throw new AppError('You do not have permission to add milestones to this campaign', 403);
     }
 
+    // Validate milestone input
+    CampaignService.validateMilestoneInput(data);
+
     const milestone = await prisma.milestone.create({
       data: {
-        ...data,
+        title: data.title,
+        description: data.description,
+        targetAmount: data.targetAmount,
+        order: data.order,
         campaignId,
       },
     });
@@ -251,6 +354,30 @@ export class CampaignService {
     logger.info(`Milestone added to campaign ${campaignId} by user ${userId}`);
 
     return milestone;
+  }
+
+  /**
+   * Validates beneficiary assignment input fields.
+   * Enforces non-negative amounts and valid priority.
+   */
+  private static validateAssignmentInput(data: any): void {
+    if (data.assignedAmount !== undefined) {
+      if (typeof data.assignedAmount !== 'number' || data.assignedAmount < 0) {
+        throw new AppError('Assigned amount must be a non-negative number', 400);
+      }
+    }
+
+    if (data.allocatedAmount !== undefined) {
+      if (typeof data.allocatedAmount !== 'number' || data.allocatedAmount < 0) {
+        throw new AppError('Allocated amount must be a non-negative number', 400);
+      }
+    }
+
+    if (data.priority !== undefined) {
+      if (typeof data.priority !== 'number' || !Number.isInteger(data.priority) || data.priority < 0) {
+        throw new AppError('Priority must be a non-negative integer', 400);
+      }
+    }
   }
 
   static async assignBeneficiary(campaignId: string, beneficiaryId: string, data: any, userId: string, userRole: Role): Promise<any> {
@@ -275,6 +402,9 @@ export class CampaignService {
       throw new AppError('Beneficiary not found', 404);
     }
 
+    // Validate assignment input
+    CampaignService.validateAssignmentInput(data);
+
     const assignment = await prisma.beneficiaryAssignment.upsert({
       where: {
         campaignId_beneficiaryId: {
@@ -282,7 +412,9 @@ export class CampaignService {
           beneficiaryId,
         },
       },
-      update: data,
+      update: {
+        ...data,
+      },
       create: {
         campaignId,
         beneficiaryId,
@@ -334,6 +466,10 @@ export class CampaignService {
       },
     });
 
+    const targetAmount = Number(campaign.targetAmount) || 1;
+    const currentAmount = Number(campaign.currentAmount) || 0;
+    const progress = Number(((currentAmount / targetAmount) * 100).toFixed(2));
+
     return {
       campaignId: campaign.id,
       title: campaign.title,
@@ -344,7 +480,7 @@ export class CampaignService {
       donationCount: campaign._count.donations,
       beneficiaryCount: campaign._count.beneficiaries,
       distributionCount: campaign._count.distributions,
-      progress: Number(((campaign.currentAmount || 0) / (campaign.targetAmount || 1)) * 100).toFixed(2),
+      progress,
     };
   }
 }

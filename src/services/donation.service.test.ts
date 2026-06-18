@@ -83,7 +83,7 @@ describe('DonationService', () => {
       (prisma.donation.findUnique as jest.Mock).mockResolvedValue(mockDonation);
       (prisma.donation.update as jest.Mock).mockResolvedValue(mockUpdated);
 
-      const result = await DonationService.confirmDonation('1', 'tx123', 'user1');
+      const result = await DonationService.confirmDonation('1', 'tx123');
 
       expect(result.status).toBe('CONFIRMED');
       expect(result.blockchainTxHash).toBe('tx123');
@@ -98,7 +98,7 @@ describe('DonationService', () => {
 
       (prisma.donation.findUnique as jest.Mock).mockResolvedValue(mockDonation);
 
-      await expect(DonationService.confirmDonation('1', 'tx123', 'user1')).rejects.toThrow('Donation already confirmed');
+      await expect(DonationService.confirmDonation('1', 'tx123')).rejects.toThrow('Donation already confirmed');
     });
   });
 
@@ -112,7 +112,7 @@ describe('DonationService', () => {
       (prisma.donation.findMany as jest.Mock).mockResolvedValue(mockDonations);
       (prisma.donation.count as jest.Mock).mockResolvedValue(2);
 
-      const result = await DonationService.getDonations({
+      const result = await DonationService.getDonations({}, {
         page: 1,
         limit: 10,
         sortBy: 'createdAt',
