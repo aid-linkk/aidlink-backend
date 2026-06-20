@@ -3,6 +3,7 @@ import { CampaignInput, CampaignFilters, PaginatedResponse } from '../types';
 import { CampaignStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
+import { ModerationService } from './moderation.service';
 
 export class CampaignService {
   static async createCampaign(data: CampaignInput, userId: string, organizationId: string): Promise<any> {
@@ -145,7 +146,11 @@ export class CampaignService {
       throw new AppError('Campaign not found', 404);
     }
 
-    return campaign;
+    // Attach moderation context: current suspension summary and whether the
+    // owner can submit an appeal.
+    const { suspensionSummary, canAppeal } = await ModerationService.getModerationView(campaign);
+
+    return { ...campaign, suspensionSummary, canAppeal };
   }
 
   /**
@@ -290,6 +295,16 @@ export class CampaignService {
     // Check permissions
     if (campaign.userId !== userId && userRole !== Role.ADMIN) {
       throw new AppError('You do not have permission to update this campaign status', 403);
+    }
+
+    // Suspension/reinstatement must go through the moderation workflow so that
+    // a suspension record and audit trail are always created. This prevents an
+    // owner from self-reinstating a suspended campaign via this endpoint.
+    if (status === CampaignStatus.SUSPENDED) {
+      throw new AppError('Use the moderation endpoint to suspend a campaign', 400);
+    }
+    if (campaign.status === CampaignStatus.SUSPENDED) {
+      throw new AppError('Suspended campaigns can only be reinstated by an admin or via an approved appeal', 400);
     }
 
     const updated = await prisma.campaign.update({

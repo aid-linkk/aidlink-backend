@@ -1,8 +1,14 @@
 import { Router } from 'express';
 import { AdminController } from '../controllers/admin.controller';
+import { ModerationController } from '../controllers/moderation.controller';
 import { authenticate } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
+import {
+  suspendCampaignSchema,
+  reinstateCampaignSchema,
+  resolveAppealSchema,
+} from '../utils/validation';
 
 const router = Router();
 
@@ -92,6 +98,66 @@ router.get(
   '/health',
   authenticate,
   AdminController.getSystemHealth
+);
+
+// ─── Campaign moderation (Admin) ───────────────────────────────
+
+/**
+ * @route   POST /api/v1/admin/campaigns/:id/suspend
+ * @desc    Suspend a campaign with a recorded reason
+ * @access  Private (Admin)
+ */
+router.post(
+  '/campaigns/:id/suspend',
+  authenticate,
+  validate(suspendCampaignSchema),
+  ModerationController.suspendCampaign
+);
+
+/**
+ * @route   POST /api/v1/admin/campaigns/:id/reinstate
+ * @desc    Reinstate a suspended campaign
+ * @access  Private (Admin)
+ */
+router.post(
+  '/campaigns/:id/reinstate',
+  authenticate,
+  validate(reinstateCampaignSchema),
+  ModerationController.reinstateCampaign
+);
+
+/**
+ * @route   GET /api/v1/admin/campaigns/:id/suspensions
+ * @desc    List suspensions (with appeals) for a campaign
+ * @access  Private (Admin)
+ */
+router.get(
+  '/campaigns/:id/suspensions',
+  authenticate,
+  ModerationController.getSuspensions
+);
+
+/**
+ * @route   GET /api/v1/admin/appeals
+ * @desc    List and filter appeals across campaigns
+ * @access  Private (Admin)
+ */
+router.get(
+  '/appeals',
+  authenticate,
+  ModerationController.listAppeals
+);
+
+/**
+ * @route   POST /api/v1/admin/appeals/:id/resolve
+ * @desc    Approve or deny an appeal
+ * @access  Private (Admin)
+ */
+router.post(
+  '/appeals/:id/resolve',
+  authenticate,
+  validate(resolveAppealSchema),
+  ModerationController.resolveAppeal
 );
 
 export default router;

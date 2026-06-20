@@ -217,4 +217,99 @@ export class NotificationService {
 
     await this.sendNotificationEmail(userId, notification);
   }
+
+  // ─── Moderation templates ──────────────────────────────────────
+
+  static async sendCampaignSuspendedNotification(
+    userId: string,
+    campaignTitle: string,
+    reasonSummary: string,
+    options: { canAppeal?: boolean; evidenceSummary?: string; reviewTimeframe?: string; metadata?: any } = {}
+  ): Promise<void> {
+    const {
+      canAppeal = true,
+      evidenceSummary,
+      reviewTimeframe = 'within 5 business days',
+      metadata,
+    } = options;
+
+    const parts = [
+      `Your campaign "${campaignTitle}" has been suspended.`,
+      `Reason: ${reasonSummary}.`,
+    ];
+    if (evidenceSummary) {
+      parts.push(`Supporting information: ${evidenceSummary}.`);
+    }
+    if (canAppeal) {
+      parts.push(
+        `If you believe this is a mistake, you can submit an appeal from your campaign page. ` +
+        `Our team typically reviews appeals ${reviewTimeframe}.`
+      );
+    }
+
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.CAMPAIGN_SUSPENDED,
+      'Campaign Suspended',
+      parts.join(' '),
+      metadata
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  static async sendCampaignReinstatedNotification(
+    userId: string,
+    campaignTitle: string,
+    notes?: string
+  ): Promise<void> {
+    const message = notes
+      ? `Good news — your campaign "${campaignTitle}" has been reinstated and is active again. Note from our team: ${notes}`
+      : `Good news — your campaign "${campaignTitle}" has been reinstated and is active again.`;
+
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.CAMPAIGN_REINSTATED,
+      'Campaign Reinstated',
+      message
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  static async sendAppealResolvedNotification(
+    userId: string,
+    campaignTitle: string,
+    decision: 'APPROVED' | 'DENIED',
+    adminNotes?: string
+  ): Promise<void> {
+    const outcome = decision === 'APPROVED'
+      ? `Your appeal for "${campaignTitle}" was approved and the campaign has been reinstated.`
+      : `Your appeal for "${campaignTitle}" was denied and the campaign remains suspended.`;
+    const message = adminNotes ? `${outcome} Reviewer notes: ${adminNotes}` : outcome;
+
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.APPEAL_UPDATE,
+      'Appeal Update',
+      message
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  static async sendDonorFraudSuspensionNotification(
+    userId: string,
+    campaignTitle: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.SECURITY_ALERT,
+      'Campaign You Supported Was Suspended',
+      `A campaign you donated to, "${campaignTitle}", has been suspended while we review a possible policy or fraud concern. ` +
+      `Distributions are paused during the review. We will keep you informed of any action regarding your donation.`
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
 }

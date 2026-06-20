@@ -69,6 +69,21 @@ export const config = {
   monitoring: {
     healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL || '30000', 10),
   },
+
+  moderation: {
+    // Feature flag: when false, the worker still records reports but never
+    // auto-suspends. Admins can always suspend/reinstate manually.
+    autoSuspendEnabled: process.env.MODERATION_AUTO_SUSPEND_ENABLED === 'true',
+    // Low-verification rule: campaigns whose owner verification score stays
+    // below `verificationScoreThreshold` for `verificationGraceDays` get suspended.
+    verificationScoreThreshold: parseInt(process.env.MODERATION_VERIFICATION_SCORE_THRESHOLD || '40', 10),
+    verificationGraceDays: parseInt(process.env.MODERATION_VERIFICATION_GRACE_DAYS || '7', 10),
+    // Fraud rule: N independent fraud reports within the rolling window.
+    fraudReportThreshold: parseInt(process.env.MODERATION_FRAUD_REPORT_THRESHOLD || '3', 10),
+    fraudReportWindowHours: parseInt(process.env.MODERATION_FRAUD_REPORT_WINDOW_HOURS || '24', 10),
+    // Notify donors when a campaign is suspended for a fraud-related reason.
+    notifyDonorsOnFraudSuspension: process.env.MODERATION_NOTIFY_DONORS_ON_FRAUD !== 'false',
+  },
 };
 
 export default config;

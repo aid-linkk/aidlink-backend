@@ -32,27 +32,27 @@ enum UserStatus {
 }
 
 model User {
-  id                String      @id @default(cuid())
-  email             String      @unique
-  username          String?     @unique
-  passwordHash      String?
-  walletAddress     String?     @unique
-  role              Role        @default(DONOR)
-  status            UserStatus  @default(PENDING_VERIFICATION)
-  emailVerified     Boolean     @default(false)
-  lastLogin         DateTime?
-  createdAt         DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
+  id            String     @id @default(cuid())
+  email         String     @unique
+  username      String?    @unique
+  passwordHash  String?
+  walletAddress String?    @unique
+  role          Role       @default(DONOR)
+  status        UserStatus @default(PENDING_VERIFICATION)
+  emailVerified Boolean    @default(false)
+  lastLogin     DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
 
   // Relations
-  sessions          Session[]
-  organizations     Organization?
-  beneficiary       Beneficiary?
-  donations         Donation[]
-  campaigns         Campaign[]
-  auditLogs         AuditLog[]
-  notifications     Notification[]
-  kycSubmissions    KYCSubmission[]
+  sessions       Session[]
+  organizations  Organization?
+  beneficiary    Beneficiary?
+  donations      Donation[]
+  campaigns      Campaign[]
+  auditLogs      AuditLog[]
+  notifications  Notification[]
+  kycSubmissions KYCSubmission[]
 
   @@index([email])
   @@index([walletAddress])
@@ -70,7 +70,7 @@ model Session {
   expiresAt    DateTime
   createdAt    DateTime @default(now())
 
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([token])
@@ -89,39 +89,39 @@ enum OrganizationStatus {
 }
 
 model Organization {
-  id                String              @id @default(cuid())
-  userId            String              @unique
-  name              String
-  description       String?
-  website           String?
-  logo              String?
+  id                 String             @id @default(cuid())
+  userId             String             @unique
+  name               String
+  description        String?
+  website            String?
+  logo               String?
   registrationNumber String?
-  taxId             String?
-  status            OrganizationStatus  @default(PENDING)
-  verifiedAt        DateTime?
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
+  taxId              String?
+  status             OrganizationStatus @default(PENDING)
+  verifiedAt         DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
 
-  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  campaigns         Campaign[]
-  bankAccounts      BankAccount[]
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaigns    Campaign[]
+  bankAccounts BankAccount[]
 
   @@index([userId])
   @@index([status])
 }
 
 model BankAccount {
-  id               String       @id @default(cuid())
-  organizationId   String
-  bankName         String
-  accountNumber    String
-  routingNumber    String
-  accountType      String
-  isPrimary        Boolean      @default(false)
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  id             String   @id @default(cuid())
+  organizationId String
+  bankName       String
+  accountNumber  String
+  routingNumber  String
+  accountType    String
+  isPrimary      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([organizationId])
 }
@@ -136,31 +136,38 @@ enum CampaignStatus {
   PAUSED
   COMPLETED
   CANCELLED
+  SUSPENDED
+  PENDING_REVIEW
 }
 
 model Campaign {
-  id                String          @id @default(cuid())
-  organizationId    String
-  userId           String
-  title             String
-  description       String          @db.Text
-  imageUrl          String?
-  targetAmount      Decimal         @db.Decimal(20, 8)
-  currentAmount     Decimal         @default(0) @db.Decimal(20, 8)
-  startDate         DateTime
-  endDate           DateTime?
-  status            CampaignStatus  @default(DRAFT)
-  blockchainTxHash  String?         @unique
-  contractAddress   String?
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+  id                 String         @id @default(cuid())
+  organizationId     String
+  userId             String
+  title              String
+  description        String         @db.Text
+  imageUrl           String?
+  targetAmount       Decimal        @db.Decimal(20, 8)
+  currentAmount      Decimal        @default(0) @db.Decimal(20, 8)
+  startDate          DateTime
+  endDate            DateTime?
+  status             CampaignStatus @default(DRAFT)
+  blockchainTxHash   String?        @unique
+  contractAddress    String?
+  suspendedAt        DateTime?
+  suspensionMetadata Json?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  donations         Donation[]
-  beneficiaries     BeneficiaryAssignment[]
-  distributions     Distribution[]
-  milestones        Milestone[]
+  organization  Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  donations     Donation[]
+  beneficiaries BeneficiaryAssignment[]
+  distributions Distribution[]
+  milestones    Milestone[]
+  suspensions   Suspension[]
+  appeals       Appeal[]
+  fraudReports  FraudReport[]
 
   @@index([organizationId])
   @@index([userId])
@@ -170,18 +177,18 @@ model Campaign {
 }
 
 model Milestone {
-  id          String   @id @default(cuid())
-  campaignId  String
-  title       String
-  description String   @db.Text
-  targetAmount Decimal @db.Decimal(20, 8)
-  achieved    Boolean  @default(false)
-  achievedAt  DateTime?
-  order       Int
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String    @id @default(cuid())
+  campaignId   String
+  title        String
+  description  String    @db.Text
+  targetAmount Decimal   @db.Decimal(20, 8)
+  achieved     Boolean   @default(false)
+  achievedAt   DateTime?
+  order        Int
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
-  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId])
 }
@@ -198,23 +205,23 @@ enum DonationStatus {
 }
 
 model Donation {
-  id              String          @id @default(cuid())
-  campaignId      String
-  userId          String?
-  amount          Decimal         @db.Decimal(20, 8)
-  currency        String          @default("XLM")
-  status          DonationStatus  @default(PENDING)
+  id               String         @id @default(cuid())
+  campaignId       String
+  userId           String?
+  amount           Decimal        @db.Decimal(20, 8)
+  currency         String         @default("XLM")
+  status           DonationStatus @default(PENDING)
   blockchainTxHash String?        @unique
-  fromWallet      String?
-  toWallet        String?
-  memo            String?
-  isAnonymous     Boolean         @default(false)
-  donorMessage    String?         @db.Text
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
+  fromWallet       String?
+  toWallet         String?
+  memo             String?
+  isAnonymous      Boolean        @default(false)
+  donorMessage     String?        @db.Text
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
-  campaign        Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  user            User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user     User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([campaignId])
   @@index([userId])
@@ -236,33 +243,33 @@ enum BeneficiaryStatus {
 }
 
 model Beneficiary {
-  id                String              @id @default(cuid())
-  userId            String              @unique
-  firstName         String
-  lastName          String
-  dateOfBirth       DateTime
-  gender            String
-  nationality       String
-  idDocumentType    String
-  idDocumentNumber  String
-  phoneNumber       String
-  address           String              @db.Text
-  city              String
-  country           String
-  coordinates       String?             // JSON: {lat, lng}
-  familySize        Int                 @default(1)
-  needsAssessment   String?             @db.Text
-  status            BeneficiaryStatus   @default(PENDING)
-  verifiedAt        DateTime?
-  verifiedBy        String?
-  riskScore         Int                 @default(0)
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
+  id               String            @id @default(cuid())
+  userId           String            @unique
+  firstName        String
+  lastName         String
+  dateOfBirth      DateTime
+  gender           String
+  nationality      String
+  idDocumentType   String
+  idDocumentNumber String
+  phoneNumber      String
+  address          String            @db.Text
+  city             String
+  country          String
+  coordinates      String? // JSON: {lat, lng}
+  familySize       Int               @default(1)
+  needsAssessment  String?           @db.Text
+  status           BeneficiaryStatus @default(PENDING)
+  verifiedAt       DateTime?
+  verifiedBy       String?
+  riskScore        Int               @default(0)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
 
-  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  assignments       BeneficiaryAssignment[]
-  distributions     Distribution[]
-  kycSubmissions    KYCSubmission[]
+  user           User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignments    BeneficiaryAssignment[]
+  distributions  Distribution[]
+  kycSubmissions KYCSubmission[]
 
   @@index([userId])
   @@index([status])
@@ -272,18 +279,18 @@ model Beneficiary {
 }
 
 model BeneficiaryAssignment {
-  id              String       @id @default(cuid())
+  id              String   @id @default(cuid())
   campaignId      String
   beneficiaryId   String
-  assignedAmount  Decimal      @default(0) @db.Decimal(20, 8)
-  allocatedAmount Decimal      @default(0) @db.Decimal(20, 8)
-  priority        Int          @default(0)
-  notes           String?      @db.Text
-  assignedAt      DateTime     @default(now())
+  assignedAmount  Decimal  @default(0) @db.Decimal(20, 8)
+  allocatedAmount Decimal  @default(0) @db.Decimal(20, 8)
+  priority        Int      @default(0)
+  notes           String?  @db.Text
+  assignedAt      DateTime @default(now())
   assignedBy      String?
 
-  campaign        Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  beneficiary     Beneficiary  @relation(fields: [beneficiaryId], references: [id], onDelete: Cascade)
+  campaign    Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  beneficiary Beneficiary @relation(fields: [beneficiaryId], references: [id], onDelete: Cascade)
 
   @@unique([campaignId, beneficiaryId])
   @@index([campaignId])
@@ -312,24 +319,24 @@ enum DistributionMethod {
 }
 
 model Distribution {
-  id                String              @id @default(cuid())
-  campaignId        String
-  beneficiaryId     String
-  amount            Decimal             @db.Decimal(20, 8)
-  currency          String              @default("XLM")
-  method            DistributionMethod
-  status            DistributionStatus  @default(PENDING)
-  blockchainTxHash  String?             @unique
-  transactionRef    String?
-  proofDocumentUrl  String?
-  notes             String?             @db.Text
-  distributedAt     DateTime?
-  distributedBy     String?
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
+  id               String             @id @default(cuid())
+  campaignId       String
+  beneficiaryId    String
+  amount           Decimal            @db.Decimal(20, 8)
+  currency         String             @default("XLM")
+  method           DistributionMethod
+  status           DistributionStatus @default(PENDING)
+  blockchainTxHash String?            @unique
+  transactionRef   String?
+  proofDocumentUrl String?
+  notes            String?            @db.Text
+  distributedAt    DateTime?
+  distributedBy    String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
-  campaign          Campaign            @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  beneficiary       Beneficiary         @relation(fields: [beneficiaryId], references: [id], onDelete: Cascade)
+  campaign    Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  beneficiary Beneficiary @relation(fields: [beneficiaryId], references: [id], onDelete: Cascade)
 
   @@index([campaignId])
   @@index([beneficiaryId])
@@ -350,25 +357,25 @@ enum KYCStatus {
 }
 
 model KYCSubmission {
-  id              String      @id @default(cuid())
-  userId          String
-  beneficiaryId   String?
-  submissionType  String      // INDIVIDUAL, ORGANIZATION
-  status          KYCStatus   @default(PENDING)
-  documentType    String
-  documentUrl     String
-  selfieUrl       String?
-  additionalDocs  Json?
-  reviewNotes     String?     @db.Text
-  reviewedBy      String?
-  reviewedAt      DateTime?
-  expiresAt       DateTime?
-  fraudScore      Int         @default(0)
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  id             String    @id @default(cuid())
+  userId         String
+  beneficiaryId  String?
+  submissionType String // INDIVIDUAL, ORGANIZATION
+  status         KYCStatus @default(PENDING)
+  documentType   String
+  documentUrl    String
+  selfieUrl      String?
+  additionalDocs Json?
+  reviewNotes    String?   @db.Text
+  reviewedBy     String?
+  reviewedAt     DateTime?
+  expiresAt      DateTime?
+  fraudScore     Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
-  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  beneficiary     Beneficiary? @relation(fields: [beneficiaryId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  beneficiary Beneficiary? @relation(fields: [beneficiaryId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([beneficiaryId])
@@ -388,6 +395,9 @@ enum NotificationType {
   KYC_REJECTED
   SYSTEM_ALERT
   SECURITY_ALERT
+  CAMPAIGN_SUSPENDED
+  CAMPAIGN_REINSTATED
+  APPEAL_UPDATE
 }
 
 enum NotificationStatus {
@@ -397,18 +407,18 @@ enum NotificationStatus {
 }
 
 model Notification {
-  id          String              @id @default(cuid())
-  userId      String
-  type        NotificationType
-  title       String
-  message     String              @db.Text
-  status      NotificationStatus  @default(UNREAD)
-  metadata    Json?
-  sentVia     String[]            @default([])
-  readAt      DateTime?
-  createdAt   DateTime            @default(now())
+  id        String             @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  message   String             @db.Text
+  status    NotificationStatus @default(UNREAD)
+  metadata  Json?
+  sentVia   String[]           @default([])
+  readAt    DateTime?
+  createdAt DateTime           @default(now())
 
-  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([status])
@@ -429,22 +439,22 @@ enum TransactionType {
 }
 
 model BlockchainTransaction {
-  id              String              @id @default(cuid())
-  txHash          String              @unique
+  id              String          @id @default(cuid())
+  txHash          String          @unique
   type            TransactionType
   fromAddress     String?
   toAddress       String?
-  amount          Decimal?            @db.Decimal(20, 8)
+  amount          Decimal?        @db.Decimal(20, 8)
   currency        String?
   contractAddress String?
   functionName    String?
   parameters      Json?
-  status          String              @default("PENDING")
+  status          String          @default("PENDING")
   blockNumber     BigInt?
   timestamp       DateTime?
-  indexed         Boolean             @default(false)
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+  indexed         Boolean         @default(false)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 
   @@index([txHash])
   @@index([type])
@@ -454,15 +464,15 @@ model BlockchainTransaction {
 }
 
 model ContractEvent {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   txHash          String
   contractAddress String
   eventName       String
   parameters      Json
   blockNumber     BigInt?
   timestamp       DateTime?
-  processed       Boolean  @default(false)
-  createdAt       DateTime @default(now())
+  processed       Boolean   @default(false)
+  createdAt       DateTime  @default(now())
 
   @@index([txHash])
   @@index([contractAddress])
@@ -490,21 +500,26 @@ enum AuditAction {
   KYC_REJECTED
   ROLE_CHANGED
   SETTINGS_UPDATED
+  CAMPAIGN_SUSPENDED
+  CAMPAIGN_REINSTATED
+  APPEAL_SUBMITTED
+  APPEAL_RESOLVED
+  FRAUD_REPORTED
 }
 
 model AuditLog {
-  id          String      @id @default(cuid())
-  userId      String?
-  action      AuditAction
-  entityType  String
-  entityId    String?
-  changes     Json?
-  ipAddress   String?
-  userAgent   String?
-  metadata    Json?
-  createdAt   DateTime    @default(now())
+  id         String      @id @default(cuid())
+  userId     String?
+  action     AuditAction
+  entityType String
+  entityId   String?
+  changes    Json?
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json?
+  createdAt  DateTime    @default(now())
 
-  user        User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([action])
@@ -535,22 +550,119 @@ enum JobType {
 }
 
 model QueueJob {
-  id          String      @id @default(cuid())
+  id          String    @id @default(cuid())
   type        JobType
-  status      JobStatus   @default(PENDING)
+  status      JobStatus @default(PENDING)
   payload     Json
   result      Json?
   error       String?
-  priority    Int         @default(0)
-  attempts    Int         @default(0)
-  maxAttempts Int         @default(3)
+  priority    Int       @default(0)
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
   startedAt   DateTime?
   completedAt DateTime?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@index([type])
   @@index([status])
   @@index([priority])
+  @@index([createdAt])
+}
+
+// ============================================
+// CAMPAIGN MODERATION
+// ============================================
+
+enum SuspensionSource {
+  AUTO
+  ADMIN
+}
+
+enum SuspensionReasonCode {
+  LOW_VERIFICATION
+  FRAUD_REPORTS
+  POLICY_VIOLATION
+  MANUAL_REVIEW
+  OTHER
+}
+
+enum AppealStatus {
+  OPEN
+  UNDER_REVIEW
+  APPROVED
+  DENIED
+}
+
+enum FraudReportType {
+  SCAM
+  MISINFORMATION
+  INAPPROPRIATE_CONTENT
+  IMPERSONATION
+  DUPLICATE
+  OTHER
+}
+
+// Immutable record of every campaign suspension. Append-only: rows are never
+// deleted, and a reinstatement is recorded by setting lifted* fields + active=false.
+model Suspension {
+  id         String               @id @default(cuid())
+  campaignId String
+  actorId    String? // null when raised by the system (AUTO)
+  source     SuspensionSource
+  reasonCode SuspensionReasonCode
+  reasonText String?              @db.Text
+  evidence   Json?
+  active     Boolean              @default(true)
+  liftedAt   DateTime?
+  liftedBy   String?
+  liftNotes  String?              @db.Text
+  createdAt  DateTime             @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  appeals  Appeal[]
+
+  @@index([campaignId])
+  @@index([active])
+  @@index([reasonCode])
+  @@index([createdAt])
+}
+
+model Appeal {
+  id              String       @id @default(cuid())
+  suspensionId    String
+  campaignId      String
+  campaignOwnerId String
+  message         String       @db.Text
+  attachments     Json?
+  status          AppealStatus @default(OPEN)
+  adminNotes      String?      @db.Text
+  resolvedBy      String?
+  resolvedAt      DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  suspension Suspension @relation(fields: [suspensionId], references: [id], onDelete: Cascade)
+  campaign   Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([suspensionId])
+  @@index([campaignId])
+  @@index([campaignOwnerId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model FraudReport {
+  id         String          @id @default(cuid())
+  campaignId String
+  reporterId String? // null for anonymous reports
+  type       FraudReportType
+  details    String?         @db.Text
+  createdAt  DateTime        @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([reporterId])
   @@index([createdAt])
 }

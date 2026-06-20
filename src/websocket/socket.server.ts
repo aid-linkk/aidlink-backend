@@ -222,3 +222,19 @@ export const sendDistributionUpdate = async (distributionId: string): Promise<vo
 export const sendNotification = (userId: string, notification: any): void => {
   broadcastToUser(userId, 'notification:new', notification);
 };
+
+// ─── Moderation events ─────────────────────────────────────────
+
+export const sendCampaignSuspended = (campaignId: string, ownerId: string, payload: any): void => {
+  broadcastToCampaign(campaignId, 'campaign:suspended', payload);
+  broadcastToUser(ownerId, 'campaign:suspended', payload);
+};
+
+export const sendCampaignReinstated = (campaignId: string, ownerId: string, payload: any): void => {
+  broadcastToCampaign(campaignId, 'campaign:reinstated', payload);
+  broadcastToUser(ownerId, 'campaign:reinstated', payload);
+};
+
+export const sendAppealUpdate = (ownerId: string, payload: any): void => {
+  broadcastToUser(ownerId, 'appeal:updated', payload);
+};

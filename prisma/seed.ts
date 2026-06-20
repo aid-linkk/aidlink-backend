@@ -127,6 +127,57 @@ async function main() {
 
   console.log('Created test campaign:', campaign.title);
 
+  // Create a suspended campaign to exercise the moderation workflow.
+  const suspendedCampaign = await prisma.campaign.create({
+    data: {
+      organizationId: organization.id,
+      userId: orgUser.id,
+      title: 'Flagged Relief Campaign',
+      description: 'A campaign suspended pending moderation review for demonstration purposes',
+      targetAmount: 50000,
+      currentAmount: 0,
+      startDate: new Date(),
+      status: 'SUSPENDED',
+      suspendedAt: new Date(),
+      suspensionMetadata: {
+        reasonCode: 'FRAUD_REPORTS',
+        source: 'AUTO',
+      },
+    },
+  });
+
+  await prisma.fraudReport.create({
+    data: {
+      campaignId: suspendedCampaign.id,
+      reporterId: donor.id,
+      type: 'SCAM',
+      details: 'Suspected misuse of funds',
+    },
+  });
+
+  const suspension = await prisma.suspension.create({
+    data: {
+      campaignId: suspendedCampaign.id,
+      actorId: null,
+      source: 'AUTO',
+      reasonCode: 'FRAUD_REPORTS',
+      reasonText: 'Multiple independent fraud reports received',
+      active: true,
+    },
+  });
+
+  await prisma.appeal.create({
+    data: {
+      suspensionId: suspension.id,
+      campaignId: suspendedCampaign.id,
+      campaignOwnerId: orgUser.id,
+      message: 'We believe this suspension is in error and request a review.',
+      status: 'OPEN',
+    },
+  });
+
+  console.log('Created suspended demo campaign with suspension and appeal:', suspendedCampaign.title);
+
   console.log('Database seed completed successfully!');
 }
 

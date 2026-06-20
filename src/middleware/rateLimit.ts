@@ -85,3 +85,9 @@ export const notificationLimiter = createRateLimiter(
   'Too many notification requests, please try again later'
 );
 
+export const reportLimiter = createRateLimiter(
+  60 * 60 * 1000, // 1 hour
+  5, // 5 fraud reports per hour
+  'Too many reports submitted, please try again later'
+);
+

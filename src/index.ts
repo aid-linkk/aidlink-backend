@@ -130,6 +130,15 @@ const startServer = async (): Promise<void> => {
       });
     }
 
+    // Start campaign moderation worker + scheduled evaluations (feature-flagged).
+    // Dynamically imported so the BullMQ worker only connects when enabled.
+    if (config.moderation.autoSuspendEnabled) {
+      import('./workers/moderation.worker')
+        .then(({ scheduleModerationEvaluations }) => scheduleModerationEvaluations())
+        .then(() => logger.info('Campaign moderation worker started'))
+        .catch((error) => logger.error('Failed to start moderation worker:', error));
+    }
+
     // Start HTTP server
     httpServer.listen(config.port, () => {
       logger.info(`Server running on port ${config.port} in ${config.env} mode`);

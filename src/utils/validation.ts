@@ -68,6 +68,31 @@ export const kycSubmissionSchema = z.object({
   additionalDocs: z.any().optional(),
 });
 
+export const fraudReportSchema = z.object({
+  type: z.enum(['SCAM', 'MISINFORMATION', 'INAPPROPRIATE_CONTENT', 'IMPERSONATION', 'DUPLICATE', 'OTHER']),
+  details: z.string().max(2000).optional(),
+});
+
+export const appealSchema = z.object({
+  message: z.string().min(10, 'Appeal message must be at least 10 characters').max(5000),
+  attachments: z.array(z.string().url('Each attachment must be a valid URL')).max(10).optional(),
+});
+
+export const suspendCampaignSchema = z.object({
+  reasonCode: z.enum(['LOW_VERIFICATION', 'FRAUD_REPORTS', 'POLICY_VIOLATION', 'MANUAL_REVIEW', 'OTHER']),
+  reasonText: z.string().max(2000).optional(),
+  evidence: z.array(z.string()).max(20).optional(),
+});
+
+export const reinstateCampaignSchema = z.object({
+  adminNotes: z.string().max(2000).optional(),
+});
+
+export const resolveAppealSchema = z.object({
+  decision: z.enum(['APPROVE', 'DENY']),
+  adminNotes: z.string().max(2000).optional(),
+});
+
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type WalletAuthInput = z.infer<typeof walletAuthSchema>;

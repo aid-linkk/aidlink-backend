@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import { CampaignController } from '../controllers/campaign.controller';
+import { ModerationController } from '../controllers/moderation.controller';
 import { authenticate } from '../middleware/auth';
-import { campaignCreateLimiter } from '../middleware/rateLimit';
-import { z } from 'zod';
+import { campaignCreateLimiter, reportLimiter } from '../middleware/rateLimit';
 import { validate } from '../middleware/validation';
-import { campaignSchema } from '../utils/validation';
+import { campaignSchema, fraudReportSchema, appealSchema } from '../utils/validation';
 
 const router = Router();
 
@@ -282,5 +282,89 @@ router.post('/:campaignId/beneficiaries', CampaignController.assignBeneficiary);
  *         description: Campaign statistics retrieved successfully
  */
 router.get('/:id/stats', CampaignController.getCampaignStats);
+
+/**
+ * @swagger
+ * /api/v1/campaigns/{id}/reports:
+ *   post:
+ *     summary: Report a campaign for fraud or policy violation
+ *     tags: [Campaigns, Moderation]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - type
+ *             properties:
+ *               type:
+ *                 type: string
+ *                 enum: [SCAM, MISINFORMATION, INAPPROPRIATE_CONTENT, IMPERSONATION, DUPLICATE, OTHER]
+ *               details:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Report submitted successfully
+ */
+router.post('/:id/reports', reportLimiter, validate(fraudReportSchema), ModerationController.reportCampaign);
+
+/**
+ * @swagger
+ * /api/v1/campaigns/{id}/appeals:
+ *   post:
+ *     summary: Submit an appeal for a suspended campaign (owner only)
+ *     tags: [Campaigns, Moderation]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - message
+ *             properties:
+ *               message:
+ *                 type: string
+ *               attachments:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       201:
+ *         description: Appeal submitted successfully
+ *   get:
+ *     summary: List appeals for a campaign (owner or admin)
+ *     tags: [Campaigns, Moderation]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Appeals retrieved successfully
+ */
+router.post('/:id/appeals', validate(appealSchema), ModerationController.submitAppeal);
+router.get('/:id/appeals', ModerationController.getCampaignAppeals);
 
 export default router;
