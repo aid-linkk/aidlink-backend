@@ -1,5 +1,5 @@
 import { Request } from 'express';
-import { Role, User, DistributionMethod } from '@prisma/client';
+import { Role, DistributionMethod } from '@prisma/client';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -7,6 +7,7 @@ export interface AuthRequest extends Request {
     email: string;
     role: Role;
   };
+  file?: Express.Multer.File;
 }
 
 export interface JWTPayload {

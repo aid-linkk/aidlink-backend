@@ -23,6 +23,7 @@ import adminRoutes from './routes/admin.routes';
 import analyticsRoutes from './routes/analytics.routes';
 import searchRoutes from './routes/search.routes';
 import uploadRoutes from './routes/upload.routes';
+import organizationRoutes from './routes/organization.routes';
 import { sorobanIndexer } from './blockchain/soroban.indexer';
 import { initializeWebSocket } from './websocket/socket.server';
 
@@ -77,6 +78,7 @@ app.use(`/api/${config.apiVersion}/admin`, adminRoutes);
 app.use(`/api/${config.apiVersion}/analytics`, analyticsRoutes);
 app.use(`/api/${config.apiVersion}/search`, searchRoutes);
 app.use(`/api/${config.apiVersion}/upload`, uploadRoutes);
+app.use(`/api/${config.apiVersion}/organizations`, organizationRoutes);
 
 // Swagger documentation
 const swaggerOptions = {
@@ -135,7 +137,7 @@ const startServer = async (): Promise<void> => {
     // Start campaign moderation worker + scheduled evaluations (feature-flagged).
     // Dynamically imported so the BullMQ worker only connects when enabled.
     if (config.moderation.autoSuspendEnabled) {
-      import('./workers/moderation.worker')
+      import('./workers/moderation.worker.js')
         .then(({ scheduleModerationEvaluations }) => scheduleModerationEvaluations())
         .then(() => logger.info('Campaign moderation worker started'))
         .catch((error) => logger.error('Failed to start moderation worker:', error));

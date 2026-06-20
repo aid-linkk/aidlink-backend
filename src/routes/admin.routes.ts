@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { AdminController } from '../controllers/admin.controller';
 import { ModerationController } from '../controllers/moderation.controller';
+import { OrganizationController } from '../controllers/organization.controller';
 import { authenticate } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
@@ -8,6 +9,8 @@ import {
   suspendCampaignSchema,
   reinstateCampaignSchema,
   resolveAppealSchema,
+  organizationReviewSchema,
+  organizationRejectSchema,
 } from '../utils/validation';
 
 const router = Router();
@@ -158,6 +161,29 @@ router.post(
   authenticate,
   validate(resolveAppealSchema),
   ModerationController.resolveAppeal
+);
+
+// ─── Organization verification (Admin) ──────────────────────────
+
+router.post(
+  '/organizations/:id/verification/approve',
+  authenticate,
+  validate(organizationReviewSchema),
+  OrganizationController.approveVerification
+);
+
+router.post(
+  '/organizations/:id/verification/reject',
+  authenticate,
+  validate(organizationRejectSchema),
+  OrganizationController.rejectVerification
+);
+
+router.post(
+  '/organizations/:id/verification/request-more-info',
+  authenticate,
+  validate(organizationRejectSchema),
+  OrganizationController.requestMoreInfo
 );
 
 export default router;

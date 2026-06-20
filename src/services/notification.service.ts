@@ -218,6 +218,116 @@ export class NotificationService {
     await this.sendNotificationEmail(userId, notification);
   }
 
+  // ─── Organization templates ────────────────────────────────────
+
+  static async sendOrganizationProfileUpdatedNotification(
+    userId: string,
+    organizationName: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.ORGANIZATION_PROFILE_UPDATED,
+      'Organization Profile Updated',
+      `Your organization profile for "${organizationName}" was updated successfully.`,
+      { organizationName }
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  static async sendOrganizationVerificationSubmittedNotification(
+    userId: string,
+    organizationName: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.ORGANIZATION_VERIFICATION_SUBMITTED,
+      'Organization Verification Submitted',
+      `Your verification package for "${organizationName}" has been submitted for review.`,
+      { organizationName }
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  static async sendOrganizationVerificationApprovedNotification(
+    userId: string,
+    organizationName: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.ORGANIZATION_VERIFICATION_APPROVED,
+      'Organization Verification Approved',
+      `Your organization "${organizationName}" has been verified.`,
+      { organizationName }
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  static async sendOrganizationVerificationRejectedNotification(
+    userId: string,
+    organizationName: string,
+    reason: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.ORGANIZATION_VERIFICATION_REJECTED,
+      'Organization Verification Rejected',
+      `Your organization "${organizationName}" was not verified. Reason: ${reason}`,
+      { organizationName, reason }
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  static async sendOrganizationVerificationInfoRequestedNotification(
+    userId: string,
+    organizationName: string,
+    reason: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.ORGANIZATION_VERIFICATION_INFO_REQUESTED,
+      'More Information Requested',
+      `Additional information is needed to verify "${organizationName}". ${reason}`,
+      { organizationName, reason }
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  static async sendBankAccountAddedNotification(
+    userId: string,
+    organizationName: string,
+    bankName: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.BANK_ACCOUNT_ADDED,
+      'Bank Account Added',
+      `A bank account at "${bankName}" was added to "${organizationName}" and may require review.`,
+      { organizationName, bankName }
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  static async sendBankAccountReviewRequiredNotification(
+    userId: string,
+    organizationName: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.BANK_ACCOUNT_REVIEW_REQUIRED,
+      'Bank Account Review Required',
+      `A bank account for "${organizationName}" has been submitted for verification review.`,
+      { organizationName }
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
   // ─── Moderation templates ──────────────────────────────────────
 
   static async sendCampaignSuspendedNotification(

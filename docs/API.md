@@ -262,6 +262,139 @@ GET /campaigns/:id/stats
 Authorization: Bearer <access_token>
 ```
 
+### Organizations
+
+#### Create Organization
+
+```http
+POST /organizations
+Authorization: Bearer <access_token>
+```
+
+**Request Body:**
+```json
+{
+  "name": "Relief Partners",
+  "email": "ops@relief.example",
+  "country": "US",
+  "registrationNumber": "REG-123",
+  "representativeContact": {
+    "name": "Taylor Reed",
+    "email": "taylor@relief.example",
+    "phone": "+15555550123"
+  },
+  "website": "https://relief.example",
+  "description": "Regional aid organization",
+  "address": {
+    "line1": "10 Main St",
+    "city": "New York",
+    "country": "US"
+  },
+  "taxId": "TAX-123"
+}
+```
+
+#### List Organizations
+
+```http
+GET /organizations?page=1&limit=20&verificationStatus=PENDING_VERIFICATION&country=US&search=relief
+Authorization: Bearer <access_token>
+```
+
+Admins can list all organizations. Non-admin users receive only their own organization profiles.
+
+#### Get Organization
+
+```http
+GET /organizations/:id
+Authorization: Bearer <access_token>
+```
+
+The response includes organization profile fields, `verificationStatus`, `verificationRequestedAt`, `verifiedAt`, `verificationNotes`, active bank accounts, and verification history.
+
+#### Update Organization
+
+```http
+PUT /organizations/:id
+Authorization: Bearer <access_token>
+```
+
+Owners and admins can update profile, address, contact, legal document, and supporting metadata fields.
+
+#### Archive Organization
+
+```http
+DELETE /organizations/:id
+Authorization: Bearer <access_token>
+```
+
+Archives the organization by setting `deletedAt`, `status=SUSPENDED`, and `verificationStatus=SUSPENDED`.
+
+#### Bank Accounts
+
+```http
+POST /organizations/:id/bank-accounts
+GET /organizations/:id/bank-accounts
+GET /organizations/:id/bank-accounts/:accountId
+PUT /organizations/:id/bank-accounts/:accountId
+DELETE /organizations/:id/bank-accounts/:accountId
+POST /organizations/:id/bank-accounts/:accountId/verify
+Authorization: Bearer <access_token>
+```
+
+**Create Request Body:**
+```json
+{
+  "accountHolderName": "Relief Partners",
+  "accountNumber": "123456789",
+  "routingCode": "021000021",
+  "iban": "US00EXAMPLE123456789",
+  "bankName": "Community Bank",
+  "currency": "USD",
+  "branchCode": "001",
+  "country": "US",
+  "accountType": "CHECKING",
+  "isPrimary": true
+}
+```
+
+Deleting a bank account archives it. Verification requests move the account to `PENDING_VERIFICATION`.
+
+#### Organization Verification
+
+```http
+POST /organizations/:id/verification
+GET /organizations/:id/verification
+Authorization: Bearer <access_token>
+```
+
+**Submit Request Body:**
+```json
+{
+  "registrationDocs": ["https://files.example/registration.pdf"],
+  "taxId": "TAX-123",
+  "representativeId": "https://files.example/representative-id.pdf",
+  "bankVerificationInfo": {
+    "bankAccountId": "bank-account-id",
+    "statementUrl": "https://files.example/statement.pdf"
+  },
+  "notes": "All required documents attached"
+}
+```
+
+Submission moves the organization to `PENDING_VERIFICATION` and writes a verification history event.
+
+#### Admin Organization Verification
+
+```http
+POST /admin/organizations/:id/verification/approve
+POST /admin/organizations/:id/verification/reject
+POST /admin/organizations/:id/verification/request-more-info
+Authorization: Bearer <admin_access_token>
+```
+
+Approve accepts optional `{ "notes": "approved" }`. Reject and request-more-info require `{ "reason": "explanation" }`. Review actions update organization status, verification status, verification notes, history, audit logs, and notification hooks.
+
 ### Donations
 
 #### Create Donation

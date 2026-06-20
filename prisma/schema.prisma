@@ -88,42 +88,103 @@ enum OrganizationStatus {
   REJECTED
 }
 
+enum OrganizationVerificationStatus {
+  UNVERIFIED
+  PENDING_VERIFICATION
+  VERIFIED
+  REJECTED
+  SUSPENDED
+  MORE_INFO_REQUESTED
+}
+
+enum BankAccountVerificationStatus {
+  UNVERIFIED
+  PENDING_VERIFICATION
+  VERIFIED
+  REJECTED
+  ARCHIVED
+}
+
 model Organization {
   id                 String             @id @default(cuid())
   userId             String             @unique
   name               String
+  email              String?
+  country            String?
   description        String?
   website            String?
   logo               String?
   registrationNumber String?
   taxId              String?
+  representativeContact Json?
+  address            Json?
+  legalDocuments     Json?
+  supportingMetadata Json?
   status             OrganizationStatus @default(PENDING)
+  verificationStatus OrganizationVerificationStatus @default(UNVERIFIED)
+  verificationRequestedAt DateTime?
   verifiedAt         DateTime?
+  verificationNotes  String?            @db.Text
+  deletedAt          DateTime?
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
   user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   campaigns    Campaign[]
   bankAccounts BankAccount[]
+  verificationEvents OrganizationVerificationEvent[]
 
   @@index([userId])
   @@index([status])
+  @@index([verificationStatus])
+  @@index([deletedAt])
 }
 
 model BankAccount {
-  id             String   @id @default(cuid())
-  organizationId String
-  bankName       String
-  accountNumber  String
-  routingNumber  String
-  accountType    String
-  isPrimary      Boolean  @default(false)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                 String                        @id @default(cuid())
+  organizationId     String
+  accountHolderName  String?
+  bankName           String
+  accountNumber      String
+  routingNumber      String
+  routingCode        String?
+  iban               String?
+  accountType        String
+  currency           String                        @default("USD")
+  branchCode         String?
+  country            String?
+  verificationStatus BankAccountVerificationStatus @default(UNVERIFIED)
+  verificationNotes  String?                       @db.Text
+  verifiedAt         DateTime?
+  archivedAt         DateTime?
+  isPrimary          Boolean                       @default(false)
+  metadata           Json?
+  createdAt          DateTime                      @default(now())
+  updatedAt          DateTime                      @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([organizationId])
+  @@index([verificationStatus])
+  @@index([archivedAt])
+}
+
+model OrganizationVerificationEvent {
+  id             String                       @id @default(cuid())
+  organizationId String
+  actorId        String?
+  status         OrganizationVerificationStatus
+  reason         String?                      @db.Text
+  evidence       Json?
+  metadata       Json?
+  createdAt      DateTime                     @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([actorId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 // ============================================
@@ -393,6 +454,13 @@ enum NotificationType {
   DISTRIBUTION_SENT
   KYC_APPROVED
   KYC_REJECTED
+  ORGANIZATION_PROFILE_UPDATED
+  ORGANIZATION_VERIFICATION_SUBMITTED
+  ORGANIZATION_VERIFICATION_APPROVED
+  ORGANIZATION_VERIFICATION_REJECTED
+  ORGANIZATION_VERIFICATION_INFO_REQUESTED
+  BANK_ACCOUNT_ADDED
+  BANK_ACCOUNT_REVIEW_REQUIRED
   SYSTEM_ALERT
   SECURITY_ALERT
   CAMPAIGN_SUSPENDED
@@ -498,6 +566,17 @@ enum AuditAction {
   KYC_SUBMITTED
   KYC_APPROVED
   KYC_REJECTED
+  ORGANIZATION_CREATED
+  ORGANIZATION_UPDATED
+  ORGANIZATION_DELETED
+  ORGANIZATION_VERIFICATION_SUBMITTED
+  ORGANIZATION_VERIFICATION_APPROVED
+  ORGANIZATION_VERIFICATION_REJECTED
+  ORGANIZATION_VERIFICATION_INFO_REQUESTED
+  BANK_ACCOUNT_CREATED
+  BANK_ACCOUNT_UPDATED
+  BANK_ACCOUNT_DELETED
+  BANK_ACCOUNT_VERIFICATION_REQUESTED
   ROLE_CHANGED
   SETTINGS_UPDATED
   CAMPAIGN_SUSPENDED

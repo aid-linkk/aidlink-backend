@@ -51,6 +51,65 @@ export const beneficiarySchema = z.object({
   needsAssessment: z.string().optional(),
 });
 
+export const organizationSchema = z.object({
+  userId: z.string().optional(),
+  name: z.string().min(2, 'Organization name must be at least 2 characters'),
+  email: z.string().email('Invalid organization email'),
+  country: z.string().min(2, 'Country is required'),
+  registrationNumber: z.string().min(1, 'Registration number is required'),
+  representativeContact: z.object({
+    name: z.string().min(1, 'Representative name is required'),
+    email: z.string().email('Invalid representative email').optional(),
+    phone: z.string().min(3).optional(),
+  }).passthrough(),
+  website: z.string().url('Invalid website URL').optional(),
+  description: z.string().max(5000).optional(),
+  address: z.any().optional(),
+  taxId: z.string().optional(),
+  legalDocuments: z.any().optional(),
+  supportingMetadata: z.any().optional(),
+});
+
+export const organizationUpdateSchema = organizationSchema.partial().refine(
+  (value) => Object.keys(value).length > 0,
+  'At least one organization field is required'
+);
+
+export const bankAccountSchema = z.object({
+  accountHolderName: z.string().min(1, 'Account holder name is required'),
+  accountNumber: z.string().min(4, 'Account number is required'),
+  routingCode: z.string().min(2, 'Routing code or IBAN is required'),
+  iban: z.string().optional(),
+  bankName: z.string().min(1, 'Bank name is required'),
+  currency: z.string().min(3).max(3),
+  branchCode: z.string().optional(),
+  country: z.string().optional(),
+  accountType: z.string().optional(),
+  isPrimary: z.boolean().optional(),
+  metadata: z.any().optional(),
+});
+
+export const bankAccountUpdateSchema = bankAccountSchema.partial().refine(
+  (value) => Object.keys(value).length > 0,
+  'At least one bank account field is required'
+);
+
+export const organizationVerificationSchema = z.object({
+  registrationDocs: z.array(z.string().min(1)).min(1, 'At least one registration document is required'),
+  taxId: z.string().min(1, 'Tax ID is required'),
+  representativeId: z.string().min(1, 'Representative ID is required'),
+  bankVerificationInfo: z.unknown().refine((value) => value !== undefined, 'Bank verification info is required'),
+  notes: z.string().max(2000).optional(),
+});
+
+export const organizationReviewSchema = z.object({
+  notes: z.string().max(2000).optional(),
+});
+
+export const organizationRejectSchema = z.object({
+  reason: z.string().min(1, 'Reason is required').max(2000),
+});
+
 export const distributionSchema = z.object({
   campaignId: z.string().min(1, 'Campaign ID is required'),
   beneficiaryId: z.string().min(1, 'Beneficiary ID is required'),
@@ -99,5 +158,6 @@ export type WalletAuthInput = z.infer<typeof walletAuthSchema>;
 export type CampaignInput = z.infer<typeof campaignSchema>;
 export type DonationInput = z.infer<typeof donationSchema>;
 export type BeneficiaryInput = z.infer<typeof beneficiarySchema>;
+export type OrganizationInput = z.infer<typeof organizationSchema>;
 export type DistributionInput = z.infer<typeof distributionSchema>;
 export type KYCSubmissionInput = z.infer<typeof kycSubmissionSchema>;
