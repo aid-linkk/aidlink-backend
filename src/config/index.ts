@@ -69,6 +69,26 @@ export const config = {
   monitoring: {
     healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL || '30000', 10),
   },
+
+  storage: {
+    provider: process.env.STORAGE_PROVIDER || 'local',
+    aws: {
+      region: process.env.AWS_REGION || 'us-east-1',
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      bucket: process.env.AWS_S3_BUCKET,
+      baseUrl: process.env.AWS_S3_BASE_URL,
+    },
+    azure: {
+      accountName: process.env.AZURE_STORAGE_ACCOUNT_NAME,
+      accountKey: process.env.AZURE_STORAGE_ACCOUNT_KEY,
+      container: process.env.AZURE_STORAGE_CONTAINER,
+    },
+    local: {
+      uploadDir: process.env.LOCAL_UPLOAD_DIR || 'uploads',
+      baseUrl: process.env.LOCAL_UPLOAD_BASE_URL || `http://localhost:${process.env.PORT || 3000}/uploads`,
+    },
+  },
 };
 
 export default config;
