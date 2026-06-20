@@ -1,39 +1,56 @@
 {
   "compilerOptions": {
+    // Compilation target and standard library
     "target": "ES2022",
-    "module": "commonjs",
     "lib": ["ES2022"],
+
+    // Module system.
+    // "node16" / "node16": the modern Node-compatible pair introduced in TypeScript 4.7.
+    // Because package.json has no "type": "module" field, every .ts file is treated as
+    // CommonJS by Node16 semantics — emitted output is identical to "commonjs", but with
+    // package.json exports/imports field support and no deprecated-resolution warning.
+    // allowSyntheticDefaultImports is implied by esModuleInterop; not listed separately.
+    "module": "node16",
+    "moduleResolution": "node16",
+    "esModuleInterop": true,
+
+    // Output
     "outDir": "./dist",
     "rootDir": "./src",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "moduleResolution": "node",
-    "allowSyntheticDefaultImports": true,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
     "removeComments": true,
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
+    "resolveJsonModule": true,
+
+    // Type safety — all strict checks active
+    "strict": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
+    // noUnusedLocals / noUnusedParameters are off intentionally: many service files use
+    // broad `any` types and partial implementations; enabling these would produce
+    // non-actionable warnings during incremental development.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+
+    // skipLibCheck: false — external type definitions are accurate and free of errors.
+    // Setting this to true would mask real type errors in project code that originate
+    // from mismatches with library types (e.g. jsonwebtoken SignOptions, Prisma input types).
+    // Only change to true if a third-party package ships broken .d.ts files that block CI.
+    "skipLibCheck": false,
+
+    "forceConsistentCasingInFileNames": true,
+
+    // isolatedModules: required by ts-jest when using module: "node16", and a best practice
+    // for modern TypeScript — each file must be a standalone module (no global scripts).
+    "isolatedModules": true,
+
+    // Decorators — required by libraries that use reflect-metadata (e.g. class-validator)
     "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
-    "baseUrl": "./src",
-    "paths": {
-      "@/*": ["./*"],
-      "@config/*": ["./config/*"],
-      "@controllers/*": ["./controllers/*"],
-      "@services/*": ["./services/*"],
-      "@middleware/*": ["./middleware/*"],
-      "@models/*": ["./models/*"],
-      "@utils/*": ["./utils/*"],
-      "@types/*": ["./types/*"],
-      "@workers/*": ["./workers/*"]
-    }
+    "emitDecoratorMetadata": true
+
+    // baseUrl and paths removed: no source file uses the @ aliases.
+    // Jest resolves them independently via moduleNameMapper in jest.config.js.
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]

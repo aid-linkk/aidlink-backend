@@ -1,17 +1,20 @@
 import jwt from 'jsonwebtoken';
+import type { StringValue } from 'ms';
 import { config } from '../config';
 import { JWTPayload } from '../types';
 
 export class JWTUtils {
   static generateAccessToken(payload: JWTPayload): string {
     return jwt.sign(payload, config.jwt.secret, {
-      expiresIn: config.jwt.accessExpiry as string,
+      // config values ("15m", "7d") are valid ms strings; cast required because
+      // @types/jsonwebtoken uses the branded ms.StringValue type for expiresIn.
+      expiresIn: config.jwt.accessExpiry as StringValue,
     });
   }
 
   static generateRefreshToken(payload: JWTPayload): string {
     return jwt.sign(payload, config.jwt.secret, {
-      expiresIn: config.jwt.refreshExpiry as string,
+      expiresIn: config.jwt.refreshExpiry as StringValue,
     });
   }
 

@@ -1,5 +1,5 @@
 import { Request } from 'express';
-import { Role, User } from '@prisma/client';
+import { Role, User, DistributionMethod } from '@prisma/client';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -93,11 +93,17 @@ export interface BeneficiaryInput {
   firstName: string;
   lastName: string;
   dateOfBirth: Date;
+  gender: string;
+  nationality: string;
+  idDocumentType: string;
+  idDocumentNumber: string;
+  phoneNumber: string;
   country: string;
   city: string;
   address: string;
-  phone?: string;
+  familySize?: number;
   needsDescription: string;
+  needsAssessment?: string;
 }
 
 export interface CampaignInput {
@@ -124,5 +130,6 @@ export interface DistributionInput {
   campaignId: string;
   beneficiaryId: string;
   amount: number;
+  method: DistributionMethod;
   description?: string;
 }
