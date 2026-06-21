@@ -4,6 +4,7 @@ import { CampaignStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
 import { ModerationService } from './moderation.service';
+import { WebhookService } from './webhook.service';
 
 export class CampaignService {
   static async createCampaign(data: CampaignInput, userId: string, organizationId: string): Promise<any> {
@@ -356,6 +357,7 @@ export class CampaignService {
     // Validate milestone input
     CampaignService.validateMilestoneInput(data);
 
+    const isAlreadyReached = Number(campaign.currentAmount) >= Number(data.targetAmount);
     const milestone = await prisma.milestone.create({
       data: {
         title: data.title,
@@ -363,10 +365,27 @@ export class CampaignService {
         targetAmount: data.targetAmount,
         order: data.order,
         campaignId,
+        achieved: isAlreadyReached,
+        achievedAt: isAlreadyReached ? new Date() : null,
       },
     });
 
     logger.info(`Milestone added to campaign ${campaignId} by user ${userId}`);
+
+    if (isAlreadyReached) {
+      WebhookService.dispatchEventSafely({
+        type: 'campaign.milestone_reached',
+        resource: { type: 'milestone', id: milestone.id },
+        data: {
+          milestoneId: milestone.id,
+          campaignId,
+          title: milestone.title,
+          targetAmount: milestone.targetAmount,
+          currentAmount: campaign.currentAmount,
+          achievedAt: milestone.achievedAt,
+        },
+      });
+    }
 
     return milestone;
   }

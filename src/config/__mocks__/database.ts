@@ -37,7 +37,26 @@ const prismaMock = {
   },
   milestone: {
     create: jest.fn(),
+    update: jest.fn(),
     deleteMany: jest.fn(),
+  },
+  webhookSubscription: {
+    findUnique: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn(),
+  },
+  webhookEvent: {
+    findUnique: jest.fn(),
+    findMany: jest.fn(),
+    findFirst: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn(),
+  },
+  webhookDeliveryAttempt: {
+    create: jest.fn(),
   },
   organization: {
     findUnique: jest.fn(),

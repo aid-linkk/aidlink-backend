@@ -3,6 +3,7 @@ import { DonationInput, DonationFilters, PaginatedResponse } from '../types';
 import { DonationStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
+import { WebhookService } from './webhook.service';
 
 export class DonationService {
   static async createDonation(data: DonationInput, userId?: string): Promise<any> {
@@ -70,7 +71,69 @@ export class DonationService {
 
     logger.info(`Donation confirmed: ${id} with tx ${txHash}`);
 
+    WebhookService.dispatchEventSafely({
+      type: 'donation.confirmed',
+      resource: { type: 'donation', id: updated.id },
+      data: {
+        donationId: updated.id,
+        campaignId: donation.campaignId,
+        userId: donation.userId,
+        amount: donation.amount,
+        currency: donation.currency,
+        blockchainTxHash: txHash,
+        status: updated.status,
+      },
+    });
+
+    DonationService.markReachedMilestones(donation.campaignId).catch((error) => {
+      logger.error(`Failed to process campaign milestone webhooks for campaign ${donation.campaignId}`, error);
+    });
+
     return updated;
+  }
+
+  private static async markReachedMilestones(campaignId: string): Promise<void> {
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: campaignId },
+      include: {
+        milestones: {
+          where: { achieved: false },
+          orderBy: { order: 'asc' },
+        },
+      },
+    });
+
+    if (!campaign) {
+      return;
+    }
+
+    const currentAmount = Number(campaign.currentAmount);
+    const reachedMilestones = campaign.milestones.filter((milestone: any) => (
+      Number(milestone.targetAmount) <= currentAmount
+    ));
+
+    await Promise.all(reachedMilestones.map(async (milestone: any) => {
+      const achieved = await prisma.milestone.update({
+        where: { id: milestone.id },
+        data: {
+          achieved: true,
+          achievedAt: new Date(),
+        },
+      });
+
+      WebhookService.dispatchEventSafely({
+        type: 'campaign.milestone_reached',
+        resource: { type: 'milestone', id: achieved.id },
+        data: {
+          milestoneId: achieved.id,
+          campaignId,
+          title: achieved.title,
+          targetAmount: achieved.targetAmount,
+          currentAmount: campaign.currentAmount,
+          achievedAt: achieved.achievedAt,
+        },
+      });
+    }));
   }
 
   static async getDonations(filters: DonationFilters, pagination: any): Promise<PaginatedResponse<any>> {

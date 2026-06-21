@@ -12,7 +12,7 @@ import { connectDatabase, disconnectDatabase } from './config/database';
 import { connectRedis, disconnectRedis } from './config/redis';
 import { apiLimiter } from './middleware/rateLimit';
 import { errorHandler, notFoundHandler } from './middleware/error';
-import { requestLogger, errorLogger } from './middleware/requestLogger';
+import { requestLogger } from './middleware/requestLogger';
 import authRoutes from './routes/auth.routes';
 import campaignRoutes from './routes/campaign.routes';
 import beneficiaryRoutes from './routes/beneficiary.routes';
@@ -26,6 +26,7 @@ import uploadRoutes from './routes/upload.routes';
 import organizationRoutes from './routes/organization.routes';
 import { sorobanIndexer } from './blockchain/soroban.indexer';
 import { initializeWebSocket } from './websocket/socket.server';
+import { startWebhookRetryProcessor, stopWebhookRetryProcessor } from './workers/webhook.worker';
 
 const app: Application = express();
 const httpServer = createServer(app);
@@ -143,6 +144,9 @@ const startServer = async (): Promise<void> => {
         .catch((error) => logger.error('Failed to start moderation worker:', error));
     }
 
+    startWebhookRetryProcessor();
+    logger.info('Webhook retry processor started');
+
     // Start HTTP server
     httpServer.listen(config.port, () => {
       logger.info(`Server running on port ${config.port} in ${config.env} mode`);
@@ -162,6 +166,9 @@ const gracefulShutdown = async (signal: string): Promise<void> => {
   try {
     // Stop blockchain indexer
     await sorobanIndexer.stop();
+
+    // Stop webhook retry processor
+    stopWebhookRetryProcessor();
 
     // Disconnect from database
     await disconnectDatabase();

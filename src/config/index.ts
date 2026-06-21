@@ -84,6 +84,14 @@ export const config = {
     // Notify donors when a campaign is suspended for a fraud-related reason.
     notifyDonorsOnFraudSuspension: process.env.MODERATION_NOTIFY_DONORS_ON_FRAUD !== 'false',
   },
+
+  webhooks: {
+    maxAttempts: parseInt(process.env.WEBHOOK_MAX_ATTEMPTS || '3', 10),
+    timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS || '5000', 10),
+    retryBaseDelayMs: parseInt(process.env.WEBHOOK_RETRY_BASE_DELAY_MS || '60000', 10),
+    retryMaxDelayMs: parseInt(process.env.WEBHOOK_RETRY_MAX_DELAY_MS || '3600000', 10),
+    retryProcessorIntervalMs: parseInt(process.env.WEBHOOK_RETRY_PROCESSOR_INTERVAL_MS || '60000', 10),
+  },
 };
 
 export default config;

@@ -3,6 +3,7 @@ import { DistributionInput, PaginatedResponse } from '../types';
 import { DistributionStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
+import { WebhookService } from './webhook.service';
 
 export class DistributionService {
   static async createDistribution(data: DistributionInput, userId: string, userRole: Role): Promise<any> {
@@ -78,6 +79,21 @@ export class DistributionService {
     });
 
     logger.info(`Distribution confirmed: ${id} with tx ${txHash}`);
+
+    WebhookService.dispatchEventSafely({
+      type: 'distribution.completed',
+      resource: { type: 'distribution', id: updated.id },
+      data: {
+        distributionId: updated.id,
+        campaignId: distribution.campaignId,
+        beneficiaryId: distribution.beneficiaryId,
+        amount: distribution.amount,
+        currency: distribution.currency,
+        blockchainTxHash: txHash,
+        distributedBy: userId,
+        status: updated.status,
+      },
+    });
 
     return updated;
   }
@@ -158,6 +174,22 @@ export class DistributionService {
     });
 
     logger.info(`Distribution status updated: ${id} to ${status} by user ${userId}`);
+
+    if (status === DistributionStatus.COMPLETED) {
+      WebhookService.dispatchEventSafely({
+        type: 'distribution.completed',
+        resource: { type: 'distribution', id: updated.id },
+        data: {
+          distributionId: updated.id,
+          campaignId: distribution.campaignId,
+          beneficiaryId: distribution.beneficiaryId,
+          amount: distribution.amount,
+          currency: distribution.currency,
+          distributedBy: userId,
+          status: updated.status,
+        },
+      });
+    }
 
     return updated;
   }

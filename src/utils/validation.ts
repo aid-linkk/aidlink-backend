@@ -152,6 +152,37 @@ export const resolveAppealSchema = z.object({
   adminNotes: z.string().max(2000).optional(),
 });
 
+export const webhookEventTypes = [
+  'donation.confirmed',
+  'distribution.completed',
+  'campaign.milestone_reached',
+  'kyc.status_changed',
+] as const;
+
+const webhookUrl = z.string().url('Webhook URL must be valid').refine(
+  (url) => new URL(url).protocol === 'https:',
+  'Webhook URL must use HTTPS'
+);
+
+export const webhookCreateSchema = z.object({
+  name: z.string().min(2, 'Webhook name must be at least 2 characters').max(100),
+  url: webhookUrl,
+  events: z.array(z.enum(webhookEventTypes)).min(1, 'At least one event subscription is required'),
+  secret: z.string().min(16, 'Webhook secret must be at least 16 characters'),
+  active: z.boolean().optional(),
+  description: z.string().max(2000).optional(),
+  deliverTestPayload: z.boolean().optional(),
+});
+
+export const webhookUpdateSchema = z.object({
+  name: z.string().min(2).max(100).optional(),
+  url: webhookUrl.optional(),
+  events: z.array(z.enum(webhookEventTypes)).min(1).optional(),
+  secret: z.string().min(16).optional(),
+  active: z.boolean().optional(),
+  description: z.string().max(2000).nullable().optional(),
+}).refine((value) => Object.keys(value).length > 0, 'At least one webhook field is required');
+
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type WalletAuthInput = z.infer<typeof walletAuthSchema>;

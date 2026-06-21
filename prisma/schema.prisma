@@ -628,6 +628,13 @@ enum JobType {
   CACHE_INVALIDATION
 }
 
+enum WebhookDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  DISABLED
+}
+
 model QueueJob {
   id          String    @id @default(cuid())
   type        JobType
@@ -646,6 +653,73 @@ model QueueJob {
   @@index([type])
   @@index([status])
   @@index([priority])
+  @@index([createdAt])
+}
+
+// ============================================
+// WEBHOOKS
+// ============================================
+
+model WebhookSubscription {
+  id          String   @id @default(cuid())
+  name        String
+  url         String
+  secret      String
+  events      String[]
+  active      Boolean  @default(true)
+  description String?  @db.Text
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  deliveries WebhookEvent[]
+
+  @@index([active])
+  @@index([createdBy])
+  @@index([createdAt])
+}
+
+model WebhookEvent {
+  id              String                @id @default(cuid())
+  webhookId       String
+  eventType       String
+  payload         Json
+  status          WebhookDeliveryStatus @default(PENDING)
+  attempts        Int                   @default(0)
+  maxAttempts     Int                   @default(3)
+  nextRetryAt     DateTime?
+  lastAttemptAt   DateTime?
+  sentAt          DateTime?
+  responseCode    Int?
+  responseBody    String?               @db.Text
+  responseHeaders Json?
+  errorMessage    String?               @db.Text
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  webhook WebhookSubscription @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  deliveryAttempts WebhookDeliveryAttempt[]
+
+  @@index([webhookId])
+  @@index([eventType])
+  @@index([status])
+  @@index([nextRetryAt])
+  @@index([createdAt])
+}
+
+model WebhookDeliveryAttempt {
+  id              String   @id @default(cuid())
+  webhookEventId  String
+  attemptNumber   Int
+  responseCode    Int?
+  responseBody    String?  @db.Text
+  responseHeaders Json?
+  errorMessage    String?  @db.Text
+  createdAt       DateTime @default(now())
+
+  webhookEvent WebhookEvent @relation(fields: [webhookEventId], references: [id], onDelete: Cascade)
+
+  @@index([webhookEventId])
   @@index([createdAt])
 }
 

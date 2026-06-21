@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { AdminController } from '../controllers/admin.controller';
 import { ModerationController } from '../controllers/moderation.controller';
 import { OrganizationController } from '../controllers/organization.controller';
+import { WebhookController } from '../controllers/webhook.controller';
 import { authenticate } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
@@ -11,6 +12,8 @@ import {
   resolveAppealSchema,
   organizationReviewSchema,
   organizationRejectSchema,
+  webhookCreateSchema,
+  webhookUpdateSchema,
 } from '../utils/validation';
 
 const router = Router();
@@ -184,6 +187,64 @@ router.post(
   authenticate,
   validate(organizationRejectSchema),
   OrganizationController.requestMoreInfo
+);
+
+// ─── Webhooks (Admin) ───────────────────────────────────────────
+
+router.get(
+  '/webhooks/events',
+  authenticate,
+  WebhookController.listAllEvents
+);
+
+router.get(
+  '/webhooks/events/:eventId',
+  authenticate,
+  WebhookController.getEvent
+);
+
+router.get(
+  '/webhooks',
+  authenticate,
+  WebhookController.listWebhooks
+);
+
+router.post(
+  '/webhooks',
+  authenticate,
+  validate(webhookCreateSchema),
+  WebhookController.createWebhook
+);
+
+router.get(
+  '/webhooks/:id',
+  authenticate,
+  WebhookController.getWebhook
+);
+
+router.put(
+  '/webhooks/:id',
+  authenticate,
+  validate(webhookUpdateSchema),
+  WebhookController.updateWebhook
+);
+
+router.delete(
+  '/webhooks/:id',
+  authenticate,
+  WebhookController.deleteWebhook
+);
+
+router.post(
+  '/webhooks/:id/test',
+  authenticate,
+  WebhookController.testWebhook
+);
+
+router.get(
+  '/webhooks/:id/events',
+  authenticate,
+  WebhookController.listWebhookEvents
 );
 
 export default router;
