@@ -244,4 +244,179 @@ describe('DonationService', () => {
       expect(result.status).toBe('REFUNDED');
     });
   });
+
+
+  describe('getDonations', () => {
+    const mockDonations = [
+      {
+        id: '1',
+        campaignId: 'camp1',
+        userId: 'user1',
+        amount: 100,
+        currency: 'XLM',
+        status: 'CONFIRMED',
+        campaign: { id: 'camp1', title: 'Test Campaign' },
+        user: { id: 'user1', username: 'testuser', email: 'test@test.com' },
+      },
+      {
+        id: '2',
+        campaignId: 'camp1',
+        userId: 'user2',
+        amount: 200,
+        currency: 'XLM',
+        status: 'PENDING',
+        campaign: { id: 'camp1', title: 'Test Campaign' },
+        user: { id: 'user2', username: 'testuser2', email: 'test2@test.com' },
+      },
+    ];
+
+    it('should return all donations when no filters applied', async () => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue(mockDonations);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(2);
+
+      const result = await DonationService.getDonations({}, { page: 1, limit: 10 });
+
+      expect(result.data).toHaveLength(2);
+      expect(result.pagination.total).toBe(2);
+      expect(result.pagination.page).toBe(1);
+    });
+
+    it('should filter donations by user ID', async () => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue([mockDonations[0]]);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(1);
+
+      const result = await DonationService.getDonations(
+        { userId: 'user1' },
+        { page: 1, limit: 10 }
+      );
+
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].userId).toBe('user1');
+      expect(prisma.donation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ userId: 'user1' }),
+        })
+      );
+    });
+
+    it('should filter donations by campaign ID', async () => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue(mockDonations);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(2);
+
+      const result = await DonationService.getDonations(
+        { campaignId: 'camp1' },
+        { page: 1, limit: 10 }
+      );
+
+      expect(result.data).toHaveLength(2);
+      expect(prisma.donation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ campaignId: 'camp1' }),
+        })
+      );
+    });
+
+    it('should filter donations by status', async () => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue([mockDonations[0]]);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(1);
+
+      const result = await DonationService.getDonations(
+        { status: 'CONFIRMED' },
+        { page: 1, limit: 10 }
+      );
+
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].status).toBe('CONFIRMED');
+    });
+
+    it('should filter donations by multiple criteria', async () => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue([mockDonations[0]]);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(1);
+
+      const result = await DonationService.getDonations(
+        { userId: 'user1', campaignId: 'camp1', status: 'CONFIRMED' },
+        { page: 1, limit: 10 }
+      );
+
+      expect(result.data).toHaveLength(1);
+      expect(prisma.donation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            userId: 'user1',
+            campaignId: 'camp1',
+            status: 'CONFIRMED',
+          }),
+        })
+      );
+    });
+
+    it('should handle empty results', async () => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(0);
+
+      const result = await DonationService.getDonations(
+        { userId: 'nonexistent' },
+        { page: 1, limit: 10 }
+      );
+
+      expect(result.data).toHaveLength(0);
+      expect(result.pagination.total).toBe(0);
+    });
+
+    it('should handle pagination correctly', async () => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue([mockDonations[1]]);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(2);
+
+      const result = await DonationService.getDonations({}, { page: 2, limit: 1 });
+
+      expect(result.data).toHaveLength(1);
+      expect(result.pagination.page).toBe(2);
+      expect(result.pagination.totalPages).toBe(2);
+      expect(prisma.donation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skip: 1,
+          take: 1,
+        })
+      );
+    });
+
+    it('should filter by date range', async () => {
+      const startDate = new Date('2026-01-01');
+      const endDate = new Date('2026-12-31');
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue(mockDonations);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(2);
+
+      const result = await DonationService.getDonations(
+        { startDate, endDate },
+        { page: 1, limit: 10 }
+      );
+
+      expect(result.data).toHaveLength(2);
+      expect(prisma.donation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            createdAt: expect.objectContaining({
+              gte: startDate,
+              lte: endDate,
+            }),
+          }),
+        })
+      );
+    });
+
+    it('should not apply userId filter when userId is undefined', async () => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue(mockDonations);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(2);
+
+      await DonationService.getDonations(
+        { userId: undefined, campaignId: 'camp1' },
+        { page: 1, limit: 10 }
+      );
+
+      const callArgs = (prisma.donation.findMany as jest.Mock).mock.calls[0][0];
+      expect(callArgs.where).not.toHaveProperty('userId');
+      expect(callArgs.where).toHaveProperty('campaignId');
+    });
+  });
+
 });
