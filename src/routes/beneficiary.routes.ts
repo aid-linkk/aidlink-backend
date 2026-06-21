@@ -75,6 +75,17 @@ router.get(
 );
 
 /**
+ * @route   GET /api/v1/beneficiaries/me
+ * @desc    Get the authenticated user's own beneficiary profile
+ * @access  Private (Beneficiary)
+ */
+router.get(
+  '/me',
+  authenticate,
+  BeneficiaryController.getMyBeneficiaryProfile
+);
+
+/**
  * @route   GET /api/v1/beneficiaries/my-profile
  * @desc    Get current user's beneficiary profile
  * @access  Private (Beneficiary)
