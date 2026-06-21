@@ -73,7 +73,9 @@ export class DonationService {
     return updated;
   }
 
-  static async getDonations(filters: DonationFilters, pagination: any): Promise<PaginatedResponse<any>> {
+  static async getDonations(filters: DonationFilters = {}, pagination: any): Promise<PaginatedResponse<any>> {
+    filters = filters ?? {};
+
     const { page = 1, limit = 10, sortBy = 'createdAt', sortOrder = 'desc' } = pagination;
     const skip = (page - 1) * limit;
 
@@ -91,12 +93,16 @@ export class DonationService {
       where.status = filters.status;
     }
 
-    if (filters.startDate) {
-      where.createdAt = { gte: filters.startDate };
-    }
+    if (filters.startDate || filters.endDate) {
+      where.createdAt = {};
 
-    if (filters.endDate) {
-      where.createdAt = { lte: filters.endDate };
+      if (filters.startDate) {
+        where.createdAt.gte = filters.startDate;
+      }
+
+      if (filters.endDate) {
+        where.createdAt.lte = filters.endDate;
+      }
     }
 
     const [donations, total] = await Promise.all([

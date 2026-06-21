@@ -3,6 +3,16 @@ import prisma from '../config/database';
 
 // Mock Prisma
 jest.mock('../config/database');
+jest.mock('@prisma/client', () => ({
+  DonationStatus: {
+    PENDING: 'PENDING',
+    CONFIRMED: 'CONFIRMED',
+    REFUNDED: 'REFUNDED',
+  },
+  Role: {
+    ADMIN: 'ADMIN',
+  },
+}));
 
 describe('DonationService', () => {
   beforeEach(() => {
@@ -103,25 +113,141 @@ describe('DonationService', () => {
   });
 
   describe('getDonations', () => {
+    const defaultPagination = {
+      page: 1,
+      limit: 10,
+      sortBy: 'createdAt',
+      sortOrder: 'desc' as const,
+    };
+
+    const mockFindManyAndCount = (donations: any[] = [], total = donations.length) => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue(donations);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(total);
+    };
+
+    const expectDonationQueryWhere = (where: Record<string, any>) => {
+      expect(prisma.donation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where,
+          skip: 0,
+          take: 10,
+          orderBy: { createdAt: 'desc' },
+        })
+      );
+      expect(prisma.donation.count).toHaveBeenCalledWith({ where });
+    };
+
     it('should return paginated donations', async () => {
       const mockDonations = [
         { id: '1', amount: 100, status: 'CONFIRMED' },
         { id: '2', amount: 50, status: 'CONFIRMED' },
       ];
 
-      (prisma.donation.findMany as jest.Mock).mockResolvedValue(mockDonations);
-      (prisma.donation.count as jest.Mock).mockResolvedValue(2);
+      mockFindManyAndCount(mockDonations, 2);
 
-      const result = await DonationService.getDonations({}, {
-        page: 1,
-        limit: 10,
-        sortBy: 'createdAt',
-        sortOrder: 'desc',
-      });
+      const result = await DonationService.getDonations({}, defaultPagination);
 
       expect(result).toHaveProperty('data');
       expect(result).toHaveProperty('pagination');
       expect(result.data).toHaveLength(2);
+      expectDonationQueryWhere({});
+    });
+
+    it('should filter donations by user ID', async () => {
+      const mockDonations = [{ id: '1', userId: 'user-1', amount: 100 }];
+      mockFindManyAndCount(mockDonations);
+
+      const result = await DonationService.getDonations({ userId: 'user-1' }, defaultPagination);
+
+      expect(result.data).toEqual(mockDonations);
+      expectDonationQueryWhere({ userId: 'user-1' });
+    });
+
+    it('should filter donations by campaign ID', async () => {
+      const mockDonations = [{ id: '1', campaignId: 'campaign-1', amount: 100 }];
+      mockFindManyAndCount(mockDonations);
+
+      await DonationService.getDonations({ campaignId: 'campaign-1' }, defaultPagination);
+
+      expectDonationQueryWhere({ campaignId: 'campaign-1' });
+    });
+
+    it('should filter donations by status', async () => {
+      const mockDonations = [{ id: '1', status: 'CONFIRMED', amount: 100 }];
+      mockFindManyAndCount(mockDonations);
+
+      await DonationService.getDonations({ status: 'CONFIRMED' }, defaultPagination);
+
+      expectDonationQueryWhere({ status: 'CONFIRMED' });
+    });
+
+    it('should filter donations by start date', async () => {
+      const startDate = new Date('2026-01-01T00:00:00.000Z');
+      mockFindManyAndCount();
+
+      await DonationService.getDonations({ startDate }, defaultPagination);
+
+      expectDonationQueryWhere({ createdAt: { gte: startDate } });
+    });
+
+    it('should filter donations by end date', async () => {
+      const endDate = new Date('2026-01-31T23:59:59.000Z');
+      mockFindManyAndCount();
+
+      await DonationService.getDonations({ endDate }, defaultPagination);
+
+      expectDonationQueryWhere({ createdAt: { lte: endDate } });
+    });
+
+    it('should combine user, campaign, status, and date range filters', async () => {
+      const startDate = new Date('2026-01-01T00:00:00.000Z');
+      const endDate = new Date('2026-01-31T23:59:59.000Z');
+      mockFindManyAndCount([{ id: '1', userId: 'user-1', campaignId: 'campaign-1', status: 'CONFIRMED' }]);
+
+      await DonationService.getDonations(
+        {
+          userId: 'user-1',
+          campaignId: 'campaign-1',
+          status: 'CONFIRMED',
+          startDate,
+          endDate,
+        },
+        defaultPagination
+      );
+
+      expectDonationQueryWhere({
+        userId: 'user-1',
+        campaignId: 'campaign-1',
+        status: 'CONFIRMED',
+        createdAt: {
+          gte: startDate,
+          lte: endDate,
+        },
+      });
+    });
+
+    it('should return an empty page when filters match no donations', async () => {
+      mockFindManyAndCount([], 0);
+
+      const result = await DonationService.getDonations({ userId: 'missing-user' }, defaultPagination);
+
+      expect(result.data).toEqual([]);
+      expect(result.pagination).toEqual({
+        page: 1,
+        limit: 10,
+        total: 0,
+        totalPages: 0,
+      });
+      expectDonationQueryWhere({ userId: 'missing-user' });
+    });
+
+    it('should support null filters by using the unfiltered query', async () => {
+      mockFindManyAndCount([{ id: '1', amount: 100 }]);
+
+      const result = await DonationService.getDonations(null as any, defaultPagination);
+
+      expect(result.data).toHaveLength(1);
+      expectDonationQueryWhere({});
     });
   });
 });
