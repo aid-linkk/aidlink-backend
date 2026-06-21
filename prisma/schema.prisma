@@ -222,10 +222,12 @@ model Campaign {
 
   organization  Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  donations     Donation[]
+donations     Donation[]
   beneficiaries BeneficiaryAssignment[]
   distributions Distribution[]
   milestones    Milestone[]
+  multipliers   Multiplier[]
+  matchedFunds  MatchedFund[]
   suspensions   Suspension[]
   appeals       Appeal[]
   fraudReports  FraudReport[]
@@ -281,8 +283,9 @@ model Donation {
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
-  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   user     User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  matchedFunds MatchedFund[]
 
   @@index([campaignId])
   @@index([userId])
@@ -745,3 +748,63 @@ model FraudReport {
   @@index([reporterId])
   @@index([createdAt])
 }
+
+// ============================================
+// MULTIPLIERS & MATCHED FUNDS
+// ============================================
+
+enum MultiplierType {
+  CAMPAIGN_WIDE
+  CORPORATE
+  MILESTONE
+}
+
+model Multiplier {
+  id            String        @id @default(cuid())
+  campaignId    String
+  createdBy     String
+  type          MultiplierType
+  multiplier    Decimal       @db.Decimal(20, 8) // total multiplier, must be > 1.0
+  matchCap      Decimal?      @db.Decimal(20, 8)
+  perDonationCap Decimal?     @db.Decimal(20, 8)
+  startAt       DateTime?
+  endAt         DateTime?
+  milestoneId   String?
+  metadata      Json?
+  active        Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  campaign      Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  matchedFunds  MatchedFund[]
+
+  @@index([campaignId])
+  @@index([type])
+  @@index([active])
+  @@index([startAt])
+  @@index([endAt])
+  @@index([milestoneId])
+}
+
+model MatchedFund {
+  id             String   @id @default(cuid())
+  donationId     String
+  campaignId     String
+  multiplierId   String?
+  matcherId      String?
+  donorAmount    Decimal  @db.Decimal(20, 8)
+  matchedAmount  Decimal  @db.Decimal(20, 8)
+  totalAmount    Decimal  @db.Decimal(20, 8)
+  createdAt      DateTime @default(now())
+
+  donation       Donation @relation(fields: [donationId], references: [id], onDelete: Cascade)
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  multiplier     Multiplier? @relation(fields: [multiplierId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId])
+  @@index([donationId])
+  @@index([multiplierId])
+  @@index([matcherId])
+  @@index([createdAt])
+}
+
