@@ -32,7 +32,7 @@ async function writeAuditLog(
       action,
       entityType,
       entityId,
-      metadata: metadata ?? null,
+      ...(metadata !== undefined ? { metadata } : {}),
     },
   });
 }
@@ -63,7 +63,7 @@ export async function createFailedRefundCase(
       type: RecoveryCaseType.FAILED_REFUND,
       donationId,
       failureReason,
-      failureMetadata: failureMetadata ?? null,
+      ...(failureMetadata !== undefined ? { failureMetadata } : {}),
       status: RecoveryStatus.PENDING,
       maxRetries: MAX_RETRIES,
       nextRetryAt: nextRetryAt(0),
@@ -114,7 +114,7 @@ export async function createFailedDistributionCase(
       type: RecoveryCaseType.FAILED_DISTRIBUTION,
       distributionId,
       failureReason,
-      failureMetadata: failureMetadata ?? null,
+      ...(failureMetadata !== undefined ? { failureMetadata } : {}),
       status: RecoveryStatus.PENDING,
       maxRetries: MAX_RETRIES,
       nextRetryAt: nextRetryAt(0),
@@ -259,7 +259,7 @@ export async function updateRefundDestination(
   const updated = await prisma.recoveryCase.update({
     where: { id: recoveryCaseId },
     data: {
-      failureMetadata: { ...(rc.failureMetadata as object), updatedBankAccount: newAccount },
+      failureMetadata: { ...((rc.failureMetadata ?? {}) as any), updatedBankAccount: newAccount },
       status: RecoveryStatus.PENDING,
       nextRetryAt: nextRetryAt(0),
     },
@@ -316,12 +316,12 @@ export async function settleCancelledCampaign(
   if (!rc) throw new AppError('Recovery case not found', 404);
   if (rc.type !== RecoveryCaseType.CANCELLED_CAMPAIGN_FUNDS)
     throw new AppError('Not a CANCELLED_CAMPAIGN_FUNDS case', 400);
-  if (rc.status === RecoveryStatus.RECOVERED)
-    throw new AppError('Case is already settled', 400);
+  if (rc.status === RecoveryStatus.RECOVERED) throw new AppError('Case is already settled', 400);
   if (!rc.campaignId) throw new AppError('No campaign linked to this case', 400);
 
   if (option === SettlementOption.TRANSFER_TO_CAMPAIGN) {
-    if (!targetCampaignId) throw new AppError('targetCampaignId required for TRANSFER_TO_CAMPAIGN', 400);
+    if (!targetCampaignId)
+      throw new AppError('targetCampaignId required for TRANSFER_TO_CAMPAIGN', 400);
     const target = await prisma.campaign.findUnique({ where: { id: targetCampaignId } });
     if (!target || target.status !== CampaignStatus.ACTIVE)
       throw new AppError('Target campaign not found or not active', 400);
@@ -339,7 +339,10 @@ export async function settleCancelledCampaign(
     if (option === SettlementOption.REFUND_TO_DONOR) {
       // Mark each donation as refunded and notify donors
       for (const donation of campaign.donations) {
-        await tx.donation.update({ where: { id: donation.id }, data: { status: DonationStatus.REFUNDED } });
+        await tx.donation.update({
+          where: { id: donation.id },
+          data: { status: DonationStatus.REFUNDED },
+        });
         await tx.campaign.update({
           where: { id: campaign.id },
           data: { currentAmount: { decrement: donation.amount } },

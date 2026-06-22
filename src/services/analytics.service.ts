@@ -15,7 +15,6 @@ import {
 // Redis cache key prefixes
 const CACHE_PREFIX_STATS = 'campaign:stats:';
 const CACHE_PREFIX_TRENDING_DATA = 'campaigns:trending:data';
-const CACHE_PREFIX_TRENDING_ZSET = 'campaigns:trending';
 
 export class AnalyticsService {
   static async getCampaignAnalytics(campaignId: string): Promise<any> {
@@ -57,13 +56,14 @@ export class AnalyticsService {
 
     // Calculate distribution statistics
     const totalDistributed = campaign.distributions
-      .filter(d => d.status === 'COMPLETED')
+      .filter((d) => d.status === 'COMPLETED')
       .reduce((sum, d) => sum + Number(d.amount), 0);
 
     // Calculate progress percentage
-    const progress = Number(campaign.targetAmount) > 0 
-      ? (Number(campaign.currentAmount) / Number(campaign.targetAmount)) * 100 
-      : 0;
+    const progress =
+      Number(campaign.targetAmount) > 0
+        ? (Number(campaign.currentAmount) / Number(campaign.targetAmount)) * 100
+        : 0;
 
     // Daily donation trend (last 30 days)
     const thirtyDaysAgo = new Date();
@@ -98,7 +98,7 @@ export class AnalyticsService {
       distributions: {
         total: campaign._count.distributions,
         totalDistributed,
-        completed: campaign.distributions.filter(d => d.status === 'COMPLETED').length,
+        completed: campaign.distributions.filter((d) => d.status === 'COMPLETED').length,
       },
       beneficiaries: {
         total: campaign._count.beneficiaries,
@@ -122,7 +122,7 @@ export class AnalyticsService {
     });
 
     const totalDonated = donations.reduce((sum, d) => sum + Number(d.amount), 0);
-    const campaignsSupported = new Set(donations.map(d => d.campaignId)).size;
+    const campaignsSupported = new Set(donations.map((d) => d.campaignId)).size;
 
     // Monthly donation trend
     const monthlyDonations = await prisma.$queryRaw`
@@ -167,9 +167,11 @@ export class AnalyticsService {
     });
 
     const totalCampaigns = campaigns.length;
-    const activeCampaigns = campaigns.filter(c => c.status === 'ACTIVE').length;
-    const totalRaised = campaigns.reduce((sum, c) => 
-      sum + c.donations.reduce((dSum, d) => dSum + Number(d.amount), 0), 0);
+    const activeCampaigns = campaigns.filter((c) => c.status === 'ACTIVE').length;
+    const totalRaised = campaigns.reduce(
+      (sum, c) => sum + c.donations.reduce((dSum, d) => dSum + Number(d.amount), 0),
+      0
+    );
     const totalBeneficiaries = campaigns.reduce((sum, c) => sum + c._count.beneficiaries, 0);
     const totalDistributions = campaigns.reduce((sum, c) => sum + c._count.distributions, 0);
 
@@ -177,7 +179,7 @@ export class AnalyticsService {
       campaigns: {
         total: totalCampaigns,
         active: activeCampaigns,
-        completed: campaigns.filter(c => c.status === 'COMPLETED').length,
+        completed: campaigns.filter((c) => c.status === 'COMPLETED').length,
       },
       funds: {
         totalRaised,
@@ -268,22 +270,22 @@ export class AnalyticsService {
           throw new Error('Campaign ID is required for campaign report');
         }
         return this.getCampaignAnalytics(filters.campaignId);
-      
+
       case 'donor':
         if (!filters.userId) {
           throw new Error('User ID is required for donor report');
         }
         return this.getDonorAnalytics(filters.userId);
-      
+
       case 'organization':
         if (!filters.organizationId) {
           throw new Error('Organization ID is required for organization report');
         }
         return this.getOrganizationAnalytics(filters.organizationId);
-      
+
       case 'platform':
         return this.getPlatformAnalytics();
-      
+
       default:
         throw new Error('Invalid report type');
     }
@@ -318,7 +320,7 @@ export class AnalyticsService {
    */
   static async setCachedCampaignStats(
     campaignId: string,
-    stats: Record<string, string>,
+    stats: Record<string, string>
   ): Promise<void> {
     const cacheKey = `${CACHE_PREFIX_STATS}${campaignId}`;
     try {
@@ -440,7 +442,9 @@ export class AnalyticsService {
   /**
    * Get trending campaigns. Tries cache first (from Redis), falls back to DB.
    */
-  static async getTrendingCampaigns(filters: TrendingCampaignFilters = {}): Promise<TrendingCampaign[]> {
+  static async getTrendingCampaigns(
+    filters: TrendingCampaignFilters = {}
+  ): Promise<TrendingCampaign[]> {
     const { period = 'last24h', sortBy = 'trendScore', limit = 10 } = filters;
 
     // Try cached top-level data first
@@ -465,7 +469,7 @@ export class AnalyticsService {
   static async queryTrendingCampaignsFromDb(
     period: string,
     sortBy: string,
-    limit: number,
+    limit: number
   ): Promise<TrendingCampaign[]> {
     const trendingRows = await prisma.campaignTrending.findMany({
       where: { period },
@@ -522,7 +526,7 @@ export class AnalyticsService {
    */
   private static sortTrendingCampaigns(
     campaigns: TrendingCampaign[],
-    sortBy: string,
+    sortBy: string
   ): TrendingCampaign[] {
     return [...campaigns].sort((a, b) => {
       if (sortBy === 'donationVelocity') return b.donationVelocity - a.donationVelocity;
@@ -543,14 +547,16 @@ export class AnalyticsService {
         const windowStart = this.getPeriodStart(period);
 
         // Query raw donation/distribution data for trending calculation
-        const trendingData = await prisma.$queryRaw<Array<{
-          campaignId: string;
-          donationCount: number;
-          donationVolume: number;
-          uniqueDonors: number;
-          distributionCount: number;
-          distributionVolume: number;
-        }>>`
+        const trendingData = await prisma.$queryRaw<
+          Array<{
+            campaignId: string;
+            donationCount: number;
+            donationVolume: number;
+            uniqueDonors: number;
+            distributionCount: number;
+            distributionVolume: number;
+          }>
+        >`
           WITH campaign_metrics AS (
             SELECT
               d."campaignId",
@@ -575,13 +581,15 @@ export class AnalyticsService {
         // Calculate trend scores and upsert
         const count = config.analytics.trendingCampaignsCount;
         const enriched = trendingData.map((row) => {
-          const donationVelocity = period === 'last24h'
-            ? Number(row.donationVolume) * 24
-            : period === 'last7d'
-              ? Number(row.donationVolume) / 7
-              : Number(row.donationVolume) / 30;
+          const donationVelocity =
+            period === 'last24h'
+              ? Number(row.donationVolume) * 24
+              : period === 'last7d'
+                ? Number(row.donationVolume) / 7
+                : Number(row.donationVolume) / 30;
           const distributionImpact = Number(row.distributionVolume);
-          const trendScore = donationVelocity * 0.4 + distributionImpact * 0.3 + row.uniqueDonors * 0.3;
+          const trendScore =
+            donationVelocity * 0.4 + distributionImpact * 0.3 + row.uniqueDonors * 0.3;
 
           return {
             campaignId: row.campaignId,
@@ -635,11 +643,15 @@ export class AnalyticsService {
         }
 
         // Cache the full trending list in Redis for fast reads
-        const fullTrendingList = await this.queryTrendingCampaignsFromDb(period, 'trendScore', count);
+        const fullTrendingList = await this.queryTrendingCampaignsFromDb(
+          period,
+          'trendScore',
+          count
+        );
         await redis.setex(
           `${CACHE_PREFIX_TRENDING_DATA}:${period}`,
           900, // 15 min TTL
-          JSON.stringify(fullTrendingList),
+          JSON.stringify(fullTrendingList)
         );
 
         logger.info(`Trending campaigns refreshed for period: ${period}, count: ${topN.length}`);
@@ -727,10 +739,10 @@ export class AnalyticsService {
 
     const targetAmount = Number(campaign.targetAmount) || 1;
     const currentAmount = Number(campaign.currentAmount) || 0;
-    const conversionRate = totalDonations > 0
-      ? (totalDistributions / (totalDonations + totalDistributions)) * 100
-      : 0;
-    const impactScore = (beneficiariesReached * 0.4) +
+    const conversionRate =
+      totalDonations > 0 ? (totalDistributions / (totalDonations + totalDistributions)) * 100 : 0;
+    const impactScore =
+      beneficiariesReached * 0.4 +
       (totalDistributedAmount / Math.max(targetAmount, 1)) * 0.3 +
       (uniqueDonors / Math.max(totalDonations + 1, 1)) * 0.3;
 
@@ -760,7 +772,7 @@ export class AnalyticsService {
   static async getCampaignHistoricalStats(
     campaignId: string,
     granularity: 'hourly' | 'monthly' = 'hourly',
-    range?: { startDate: Date; endDate: Date },
+    range?: { startDate: Date; endDate: Date }
   ): Promise<HistoricalStats> {
     if (granularity === 'hourly') {
       const where: any = { campaignId };
@@ -829,7 +841,7 @@ export class AnalyticsService {
    */
   static async getAggregatedCampaignAnalytics(
     filters: CampaignAnalyticsFilters,
-    pagination: PaginationParams,
+    pagination: PaginationParams
   ): Promise<PaginatedResponse<any>> {
     const { page = 1, limit = 10, sortBy = 'createdAt', sortOrder = 'desc' } = pagination;
     const skip = (page - 1) * limit;
@@ -1024,41 +1036,42 @@ export class AnalyticsService {
 
     for (const campaignId of allCampaignIds) {
       try {
-        const [donationAgg, distributionAgg, uniqueDonorsResult, newBeneficiaries] = await Promise.all([
-          prisma.donation.aggregate({
-            where: {
-              campaignId,
-              status: 'CONFIRMED',
-              createdAt: { gte: targetHour, lt: hourEnd },
-            },
-            _count: true,
-            _sum: { amount: true },
-          }),
-          prisma.distribution.aggregate({
-            where: {
-              campaignId,
-              status: 'COMPLETED',
-              distributedAt: { gte: targetHour, lt: hourEnd },
-            },
-            _count: true,
-            _sum: { amount: true },
-          }),
-          prisma.donation.groupBy({
-            by: ['userId'],
-            where: {
-              campaignId,
-              status: 'CONFIRMED',
-              createdAt: { gte: targetHour, lt: hourEnd },
-              userId: { not: null },
-            },
-          }),
-          prisma.beneficiaryAssignment.count({
-            where: {
-              campaignId,
-              assignedAt: { gte: targetHour, lt: hourEnd },
-            },
-          }),
-        ]);
+        const [donationAgg, distributionAgg, uniqueDonorsResult, newBeneficiaries] =
+          await Promise.all([
+            prisma.donation.aggregate({
+              where: {
+                campaignId,
+                status: 'CONFIRMED',
+                createdAt: { gte: targetHour, lt: hourEnd },
+              },
+              _count: true,
+              _sum: { amount: true },
+            }),
+            prisma.distribution.aggregate({
+              where: {
+                campaignId,
+                status: 'COMPLETED',
+                distributedAt: { gte: targetHour, lt: hourEnd },
+              },
+              _count: true,
+              _sum: { amount: true },
+            }),
+            prisma.donation.groupBy({
+              by: ['userId'],
+              where: {
+                campaignId,
+                status: 'CONFIRMED',
+                createdAt: { gte: targetHour, lt: hourEnd },
+                userId: { not: null },
+              },
+            }),
+            prisma.beneficiaryAssignment.count({
+              where: {
+                campaignId,
+                assignedAt: { gte: targetHour, lt: hourEnd },
+              },
+            }),
+          ]);
 
         await prisma.campaignHourlyStat.upsert({
           where: {
@@ -1101,7 +1114,9 @@ export class AnalyticsService {
     // Update tracker
     await this.updateLastProcessedHour(trackerKey, targetHour);
 
-    logger.info(`Hourly rollup completed: ${processed} campaigns processed for hour ${targetHour.toISOString()}`);
+    logger.info(
+      `Hourly rollup completed: ${processed} campaigns processed for hour ${targetHour.toISOString()}`
+    );
     return { processed, hourOf: targetHour };
   }
 
@@ -1216,7 +1231,9 @@ export class AnalyticsService {
     // Update tracker
     await this.updateLastProcessedMonth(trackerKey, targetMonth);
 
-    logger.info(`Monthly rollup completed: ${processed} campaigns processed for month ${targetMonth.toISOString()}`);
+    logger.info(
+      `Monthly rollup completed: ${processed} campaigns processed for month ${targetMonth.toISOString()}`
+    );
     return { processed, monthOf: targetMonth };
   }
 

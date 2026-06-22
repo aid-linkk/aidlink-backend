@@ -4,9 +4,14 @@ import { DistributionStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
+import { AnalyticsService } from './analytics.service';
 
 export class DistributionService {
-  static async createDistribution(data: DistributionInput, userId: string, userRole: Role): Promise<any> {
+  static async createDistribution(
+    data: DistributionInput,
+    userId: string,
+    userRole: Role
+  ): Promise<any> {
     const campaign = await prisma.campaign.findUnique({
       where: { id: data.campaignId },
     });
@@ -39,7 +44,10 @@ export class DistributionService {
 
     // Check permissions
     if (campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to create distributions for this campaign', 403);
+      throw new AppError(
+        'You do not have permission to create distributions for this campaign',
+        403
+      );
     }
 
     const distribution = await prisma.distribution.create({
@@ -92,7 +100,11 @@ export class DistributionService {
     return updated;
   }
 
-  static async getDistributions(campaignId?: string, beneficiaryId?: string, pagination?: any): Promise<PaginatedResponse<any>> {
+  static async getDistributions(
+    campaignId?: string,
+    beneficiaryId?: string,
+    pagination?: any
+  ): Promise<PaginatedResponse<any>> {
     const { page = 1, limit = 10, sortBy = 'createdAt', sortOrder = 'desc' } = pagination || {};
     const skip = (page - 1) * limit;
 
@@ -143,7 +155,12 @@ export class DistributionService {
     };
   }
 
-  static async updateDistributionStatus(id: string, status: DistributionStatus, userId: string, userRole: Role): Promise<any> {
+  static async updateDistributionStatus(
+    id: string,
+    status: DistributionStatus,
+    userId: string,
+    userRole: Role
+  ): Promise<any> {
     const distribution = await prisma.distribution.findUnique({
       where: { id },
       include: { campaign: true },
@@ -177,7 +194,12 @@ export class DistributionService {
     return updated;
   }
 
-  static async addProofDocument(id: string, proofDocumentUrl: string, userId: string, userRole: Role): Promise<any> {
+  static async addProofDocument(
+    id: string,
+    proofDocumentUrl: string,
+    userId: string,
+    userRole: Role
+  ): Promise<any> {
     const distribution = await prisma.distribution.findUnique({
       where: { id },
       include: { campaign: true },
