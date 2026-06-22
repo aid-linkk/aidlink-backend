@@ -152,6 +152,34 @@ export const resolveAppealSchema = z.object({
   adminNotes: z.string().max(2000).optional(),
 });
 
+export const generateBatchReceiptsSchema = z
+  .object({
+    organizationId: z.string().min(1).optional(),
+    campaignId: z.string().min(1).optional(),
+    donationIds: z.array(z.string().min(1)).min(1).max(1000).optional(),
+    dateRange: z
+      .object({
+        from: z.coerce.date().optional(),
+        to: z.coerce.date().optional(),
+      })
+      .optional(),
+    region: z.string().min(2).max(8).optional(),
+  })
+  .refine(
+    (data) =>
+      Boolean(
+        data.organizationId ||
+          data.campaignId ||
+          (data.donationIds && data.donationIds.length > 0) ||
+          data.dateRange?.from ||
+          data.dateRange?.to,
+      ),
+    {
+      message:
+        'At least one filter is required (organizationId, campaignId, donationIds, or dateRange)',
+    },
+  );
+
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type WalletAuthInput = z.infer<typeof walletAuthSchema>;
@@ -161,3 +189,4 @@ export type BeneficiaryInput = z.infer<typeof beneficiarySchema>;
 export type OrganizationInput = z.infer<typeof organizationSchema>;
 export type DistributionInput = z.infer<typeof distributionSchema>;
 export type KYCSubmissionInput = z.infer<typeof kycSubmissionSchema>;
+export type GenerateBatchReceiptsInput = z.infer<typeof generateBatchReceiptsSchema>;

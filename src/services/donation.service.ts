@@ -3,6 +3,7 @@ import { DonationInput, DonationFilters, PaginatedResponse } from '../types';
 import { DonationStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
+import { config } from '../config';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 
 export class DonationService {
@@ -78,6 +79,14 @@ export class DonationService {
       currency: updated.currency,
       blockchainTxHash: txHash,
     }).catch((err) => logger.error('Webhook dispatch error (donation.confirmed):', err));
+
+    if (config.receipts.enabled && donation.userId) {
+      import('../workers/receipt.worker.js')
+        .then(({ enqueueReceiptGeneration }) => enqueueReceiptGeneration(id))
+        .catch((error) =>
+          logger.error(`Failed to enqueue receipt generation for donation ${id}:`, error),
+        );
+    }
 
     return updated;
   }

@@ -32,6 +32,21 @@ const prismaMock = {
     update: jest.fn(),
     count: jest.fn(),
   },
+  taxReceipt: {
+    findUnique: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    delete: jest.fn(),
+    count: jest.fn(),
+  },
+  receiptBatchJob: {
+    findUnique: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn(),
+  },
   beneficiaryAssignment: {
     upsert: jest.fn(),
   },

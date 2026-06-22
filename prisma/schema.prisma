@@ -45,15 +45,17 @@ model User {
   updatedAt     DateTime   @updatedAt
 
   // Relations
-  sessions       Session[]
-  organizations  Organization?
-  beneficiary    Beneficiary?
-  donations      Donation[]
-  campaigns      Campaign[]
-  auditLogs      AuditLog[]
-  notifications  Notification[]
-  kycSubmissions KYCSubmission[]
+  sessions         Session[]
+  organizations    Organization?
+  beneficiary      Beneficiary?
+  donations        Donation[]
+  campaigns        Campaign[]
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+  kycSubmissions   KYCSubmission[]
   donorCredits   DonorCredit[]
+  taxReceipts      TaxReceipt[]
+  receiptBatchJobs ReceiptBatchJob[]
 
   @@index([email])
   @@index([walletAddress])
@@ -130,10 +132,12 @@ model Organization {
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  campaigns    Campaign[]
-  bankAccounts BankAccount[]
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaigns        Campaign[]
+  bankAccounts     BankAccount[]
   verificationEvents OrganizationVerificationEvent[]
+  taxReceipts      TaxReceipt[]
+  receiptBatchJobs ReceiptBatchJob[]
 
   @@index([userId])
   @@index([status])
@@ -267,23 +271,25 @@ enum DonationStatus {
 }
 
 model Donation {
-  id               String         @id @default(cuid())
-  campaignId       String
-  userId           String?
-  amount           Decimal        @db.Decimal(20, 8)
-  currency         String         @default("XLM")
-  status           DonationStatus @default(PENDING)
-  blockchainTxHash String?        @unique
-  fromWallet       String?
-  toWallet         String?
-  memo             String?
-  isAnonymous      Boolean        @default(false)
-  donorMessage     String?        @db.Text
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  id                 String         @id @default(cuid())
+  campaignId         String
+  userId             String?
+  amount             Decimal        @db.Decimal(20, 8)
+  currency           String         @default("XLM")
+  status             DonationStatus @default(PENDING)
+  blockchainTxHash   String?        @unique
+  fromWallet         String?
+  toWallet           String?
+  memo               String?
+  isAnonymous        Boolean        @default(false)
+  donorMessage       String?        @db.Text
+  receiptGeneratedAt DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
-  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  user     User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  campaign   Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user       User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  taxReceipt TaxReceipt?
 
   @@index([campaignId])
   @@index([userId])
@@ -905,5 +911,82 @@ model FraudReport {
 
   @@index([campaignId])
   @@index([reporterId])
+  @@index([createdAt])
+}
+
+// ============================================
+// TAX RECEIPTS
+// ============================================
+
+enum ReceiptEmailStatus {
+  PENDING
+  SENT
+  BOUNCED
+  FAILED
+}
+
+enum ReceiptBatchJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// One immutable tax receipt per confirmed donation. Metadata is retained
+// permanently for audit; the underlying PDF file may be subject to a separate
+// retention policy. `donationId` is unique so generation is idempotent.
+model TaxReceipt {
+  id                  String             @id @default(uuid())
+  donationId          String             @unique
+  donorId             String
+  organizationId      String
+  amount              Decimal            @db.Decimal(20, 8)
+  currency            String
+  donationDate        DateTime
+  receiptNumber       String             @unique
+  filePath            String
+  fileUrl             String?
+  region              String
+  taxDeductible       Boolean            @default(false)
+  templateVersion     String
+  generatedAt         DateTime           @default(now())
+  emailSentAt         DateTime?
+  emailDeliveryStatus ReceiptEmailStatus @default(PENDING)
+  metadata            Json?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  donation     Donation     @relation(fields: [donationId], references: [id], onDelete: Cascade)
+  donor        User         @relation(fields: [donorId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([donorId])
+  @@index([organizationId])
+  @@index([emailDeliveryStatus])
+  @@index([donationDate])
+  @@index([createdAt])
+}
+
+// Tracks an asynchronous bulk receipt-generation request. Progress counters are
+// updated as the worker processes matching donations.
+model ReceiptBatchJob {
+  id             String                @id @default(uuid())
+  organizationId String?
+  createdBy      String
+  status         ReceiptBatchJobStatus @default(PENDING)
+  totalCount     Int                   @default(0)
+  generatedCount Int                   @default(0)
+  failedCount    Int                   @default(0)
+  jobMetadata    Json?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  completedAt    DateTime?
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  creator      User          @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([createdBy])
+  @@index([status])
   @@index([createdAt])
 }

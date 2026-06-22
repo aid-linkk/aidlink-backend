@@ -43,6 +43,14 @@ export class S3Adapter implements IStorageAdapter {
     await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 
+  async download(key: string): Promise<Buffer> {
+    const response = await this.client.send(
+      new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+    );
+    const bytes = await response.Body!.transformToByteArray();
+    return Buffer.from(bytes);
+  }
+
   async getSignedUrl(key: string, expiresIn = 3600): Promise<string> {
     const command = new GetObjectCommand({ Bucket: this.bucket, Key: key });
     return s3GetSignedUrl(this.client, command, { expiresIn });

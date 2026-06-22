@@ -1,7 +1,7 @@
-import { WebhookService } from '../webhook.service';
+import { WebhookService } from './webhook.service';
 
 // Mock prisma
-jest.mock('../../config/database', () => ({
+jest.mock('../config/database', () => ({
   __esModule: true,
   default: {
     webhookSubscription: {
@@ -25,7 +25,7 @@ jest.mock('../../config/database', () => ({
 
 jest.mock('axios');
 import axios from 'axios';
-import prisma from '../../config/database';
+import prisma from '../config/database';
 
 const mockWebhook = {
   id: 'wh_1',

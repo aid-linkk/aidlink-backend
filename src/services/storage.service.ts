@@ -94,6 +94,7 @@ const STORAGE_PREFIXES = [
   'kyc-documents/',
   'campaign-images/',
   'distribution-proofs/',
+  'receipts/',
 ];
 
 export interface UploadOutput {
@@ -278,6 +279,36 @@ export class StorageService {
     });
 
     return { url: result.url, key: result.key, thumbnailUrl, thumbnailKey };
+  }
+
+  /**
+   * Uploads a pre-rendered document buffer (e.g. a generated PDF) at an exact
+   * key, bypassing image optimisation. The caller is responsible for the key
+   * layout and for supplying a trustworthy content type.
+   */
+  static async uploadDocument(
+    key: string,
+    buffer: Buffer,
+    contentType: string,
+    metadata?: Record<string, string>,
+  ): Promise<UploadOutput> {
+    if (buffer.length === 0) {
+      throw new AppError('Cannot store an empty document', 400);
+    }
+
+    const result = await StorageService.adapter.upload(key, buffer, {
+      contentType,
+      metadata,
+    });
+
+    return { url: result.url, key: result.key };
+  }
+
+  /**
+   * Reads a stored object back into memory by its storage key.
+   */
+  static async download(key: string): Promise<Buffer> {
+    return StorageService.adapter.download(key);
   }
 
   /**

@@ -39,6 +39,11 @@ export class AzureAdapter implements IStorageAdapter {
     await container.getBlockBlobClient(key).deleteIfExists();
   }
 
+  async download(key: string): Promise<Buffer> {
+    const container = this.client.getContainerClient(this.containerName);
+    return container.getBlockBlobClient(key).downloadToBuffer();
+  }
+
   async getSignedUrl(key: string, expiresIn = 3600): Promise<string> {
     const credential = new StorageSharedKeyCredential(this.accountName, this.accountKey);
     const expiresOn = new Date(Date.now() + expiresIn * 1000);

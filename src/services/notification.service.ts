@@ -38,13 +38,22 @@ export class NotificationService {
     return notification;
   }
 
-  static async sendEmail(to: string, subject: string, html: string): Promise<void> {
+  static async sendEmail(
+    to: string,
+    subject: string,
+    html: string,
+    options: {
+      from?: string;
+      attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>;
+    } = {}
+  ): Promise<void> {
     try {
       await this.transporter.sendMail({
-        from: config.email.from,
+        from: options.from || config.email.from,
         to,
         subject,
         html,
+        attachments: options.attachments,
       });
 
       logger.info(`Email sent to ${to}`);

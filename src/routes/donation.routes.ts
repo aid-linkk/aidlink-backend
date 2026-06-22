@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { DonationController } from '../controllers/donation.controller';
+import { ReceiptController } from '../controllers/receipt.controller';
 import { authenticate } from '../middleware/auth';
-import { donationLimiter } from '../middleware/rateLimit';
+import { donationLimiter, receiptDownloadLimiter } from '../middleware/rateLimit';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
 
@@ -67,6 +68,29 @@ router.get(
   '/campaign/:campaignId',
   authenticate,
   DonationController.getCampaignDonations
+);
+
+/**
+ * @route   GET /api/v1/donations/:donationId/receipt
+ * @desc    Download the tax receipt PDF for a donation
+ * @access  Private (Donor who owns it, owning Organization, Admin/Auditor)
+ */
+router.get(
+  '/:donationId/receipt',
+  authenticate,
+  receiptDownloadLimiter,
+  ReceiptController.downloadDonationReceipt
+);
+
+/**
+ * @route   GET /api/v1/donations/:donationId/receipt/status
+ * @desc    Get tax receipt generation/delivery status for a donation
+ * @access  Private (Donor who owns it, owning Organization, Admin/Auditor)
+ */
+router.get(
+  '/:donationId/receipt/status',
+  authenticate,
+  ReceiptController.getDonationReceiptStatus
 );
 
 /**

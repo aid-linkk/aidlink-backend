@@ -70,6 +70,16 @@ export const config = {
     healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL || '30000', 10),
   },
 
+  receipts: {
+    enabled: process.env.RECEIPTS_ENABLED !== 'false',
+    storagePrefix: process.env.RECEIPT_STORAGE_PREFIX || 'receipts',
+    senderEmail: process.env.RECEIPT_SENDER_EMAIL || process.env.EMAIL_FROM || 'noreply@aidlink.org',
+    urlExpirySeconds: parseInt(process.env.RECEIPT_URL_EXPIRY_SECONDS || '86400', 10),
+    defaultRegion: process.env.RECEIPT_DEFAULT_REGION || 'US',
+    regionalRequirements: process.env.REGIONAL_TAX_REQUIREMENTS,
+    maxBatchSize: parseInt(process.env.RECEIPT_MAX_BATCH_SIZE || '1000', 10),
+  },
+
   moderation: {
     // Feature flag: when false, the worker still records reports but never
     // auto-suspends. Admins can always suspend/reinstate manually.

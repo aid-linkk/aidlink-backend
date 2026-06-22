@@ -91,3 +91,9 @@ export const reportLimiter = createRateLimiter(
   'Too many reports submitted, please try again later'
 );
 
+export const receiptDownloadLimiter = createRateLimiter(
+  60 * 1000, // 1 minute
+  20, // 20 receipt downloads per minute
+  'Too many receipt download requests, please try again later'
+);
+
