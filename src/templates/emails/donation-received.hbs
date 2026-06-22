@@ -1,0 +1,69 @@
+<!-- Donation Received Email Template -->
+{{> greeting name=donorName fallback="Supporter"}}
+
+<p style="margin: 0 0 16px 0; font-size: 16px; color: #1f7a5a; font-weight: 600;">
+  Thank you for your generous donation!
+</p>
+
+<p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+  Your contribution of <strong>{{formatCurrency amount currency}}</strong> to
+  <strong>{{campaignName}}</strong> was received on {{formatDate date}}.
+</p>
+
+{{#if impactSummary}}
+  <p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+    {{impactSummary}}
+  </p>
+{{/if}}
+
+<!-- Donation Details Box -->
+<table
+  role="presentation"
+  cellspacing="0"
+  cellpadding="0"
+  border="0"
+  width="100%"
+  style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; margin: 16px 0;"
+>
+  <tr>
+    <td style="padding: 16px;">
+      <p style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: #333;">Donation Details</p>
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+        <tr>
+          <td style="padding: 4px 0; color: #666; font-size: 14px; width: 50%;">Campaign</td>
+          <td style="padding: 4px 0; color: #333; font-size: 14px;">{{campaignName}}</td>
+        </tr>
+        <tr>
+          <td style="padding: 4px 0; color: #666; font-size: 14px;">Amount</td>
+          <td style="padding: 4px 0; color: #333; font-size: 14px;">{{formatCurrency amount currency}}</td>
+        </tr>
+        <tr>
+          <td style="padding: 4px 0; color: #666; font-size: 14px;">Date</td>
+          <td style="padding: 4px 0; color: #333; font-size: 14px;">{{formatDate date}}</td>
+        </tr>
+        {{#if receiptLink}}
+          <tr>
+            <td style="padding: 4px 0; color: #666; font-size: 14px;">Receipt</td>
+            <td style="padding: 4px 0; font-size: 14px;">
+              <a href="{{receiptLink}}" style="color: #1f7a5a;">View Receipt</a>
+            </td>
+          </tr>
+        {{/if}}
+      </table>
+    </td>
+  </tr>
+</table>
+
+{{#if receiptLink}}
+  {{> button link=receiptLink label="Download Your Tax Receipt"}}
+{{/if}}
+
+{{#if nextStepLink}}
+  <p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+    <a href="{{nextStepLink}}" style="color: #1f7a5a;">Track your donation impact &rarr;</a>
+  </p>
+{{/if}}
+
+<p style="margin: 0; color: #666; font-size: 14px; line-height: 1.6;">
+  Your support makes a real difference. Thank you for being part of the AidLink community.
+</p>

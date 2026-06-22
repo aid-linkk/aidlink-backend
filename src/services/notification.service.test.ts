@@ -18,6 +18,45 @@ jest.mock('../config', () => ({
   },
 }));
 
+jest.mock('./emailTemplate.service', () => ({
+  EmailTemplateService: {
+    TEMPLATE_VERSIONS: {
+      'donation-received': '1.0.0',
+      'campaign-update': '1.0.0',
+      'distribution-sent': '1.0.0',
+      'kyc-approved': '1.0.0',
+      'kyc-rejected': '1.0.0',
+      'security-alert': '1.0.0',
+      receipt: '1.0.0',
+      generic: '1.0.0',
+    },
+    DEFAULT_TEMPLATE: 'generic',
+    initialize: jest.fn(),
+    render: jest.fn().mockReturnValue({
+      html: '<html><body><h1>Test Email</h1><p>Content</p></body></html>',
+      text: 'Test Email\nContent',
+    }),
+    renderHtml: jest.fn().mockReturnValue('<html><body><h1>Test Email</h1></body></html>'),
+    renderText: jest.fn().mockReturnValue('Test Email plain text'),
+    getVersion: jest.fn().mockReturnValue('1.0.0'),
+    logRender: jest.fn().mockResolvedValue(undefined),
+  },
+}));
+
+jest.mock('./email-preference.service', () => ({
+  EmailPreferenceService: {
+    DEFAULT_PREFERENCES: {
+      donationReceived: true,
+      campaignUpdates: true,
+      distributionNotices: true,
+      kycNotifications: true,
+      securityAlerts: true,
+    },
+    shouldSendEmail: jest.fn().mockResolvedValue(true),
+    createDefault: jest.fn().mockResolvedValue({}),
+  },
+}));
+
 jest.mock('../config/database', () => {
   const mock = {
     __esModule: true,
@@ -32,6 +71,8 @@ jest.mock('../config/database', () => {
         count: jest.fn(),
       },
       user: { findUnique: jest.fn() },
+      emailPreference: { findUnique: jest.fn(), create: jest.fn() },
+      emailTemplate: { create: jest.fn() },
     },
   };
   return mock;
@@ -122,37 +163,82 @@ describe('NotificationService', () => {
   });
 
   describe('sendNotificationEmail', () => {
-    it('sends email notification and updates sentVia', async () => {
-      const notification = mockNotification();
-      prismaMock.user.findUnique.mockResolvedValue(mockUser());
+    beforeEach(() => {
+      // Default: preferences allow, user exists with email
+      const EmailPreferenceService = require('./email-preference.service').EmailPreferenceService;
+      EmailPreferenceService.shouldSendEmail.mockResolvedValue(true);
+      prismaMock.user.findUnique.mockResolvedValue({ email: 'test@example.com' });
       transporter.sendMail.mockResolvedValue({ messageId: 'msg-1' });
-      prismaMock.notification.update.mockResolvedValue({ ...notification, sentVia: ['EMAIL'] });
+      prismaMock.notification.update.mockResolvedValue(mockNotification());
+    });
+
+    it('sends email with rendered template and updates sentVia + metadata', async () => {
+      const notification = mockNotification({ metadata: { campaignName: 'Test' } });
 
       await NotificationService.sendNotificationEmail('user-1', notification);
 
-      expect(transporter.sendMail).toHaveBeenCalled();
+      expect(transporter.sendMail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: 'test@example.com',
+          html: expect.any(String),
+          text: expect.any(String),
+        })
+      );
       expect(prismaMock.notification.update).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: 'notif-1' },
-          data: { sentVia: ['EMAIL'] },
+          data: expect.objectContaining({
+            sentVia: ['EMAIL'],
+            metadata: expect.objectContaining({
+              templateVersion: '1.0.0',
+              templateName: expect.any(String),
+            }),
+          }),
         })
       );
     });
 
-    it('skips if user not found', async () => {
-      prismaMock.user.findUnique.mockResolvedValue(null);
-
-      await NotificationService.sendNotificationEmail('nonexistent', mockNotification());
-
-      expect(transporter.sendMail).not.toHaveBeenCalled();
-    });
-
-    it('skips if email not verified', async () => {
-      prismaMock.user.findUnique.mockResolvedValue(mockUser({ emailVerified: false }));
+    it('skips when email preferences disallow sending', async () => {
+      const EmailPreferenceService = require('./email-preference.service').EmailPreferenceService;
+      EmailPreferenceService.shouldSendEmail.mockResolvedValue(false);
 
       await NotificationService.sendNotificationEmail('user-1', mockNotification());
 
       expect(transporter.sendMail).not.toHaveBeenCalled();
+    });
+
+    it('skips when user email is not found after preference check', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(null);
+
+      await NotificationService.sendNotificationEmail('user-1', mockNotification());
+
+      expect(transporter.sendMail).not.toHaveBeenCalled();
+    });
+
+    it('renders template with structured context from notification metadata', async () => {
+      const EmailTemplateService = require('./emailTemplate.service').EmailTemplateService;
+      const notification = mockNotification({
+        type: 'DONATION_RECEIVED',
+        title: 'Donation Received',
+        message: 'Thank you!',
+        metadata: {
+          donorName: 'Alice',
+          campaignName: 'Relief Fund',
+          amount: 100,
+          currency: 'XLM',
+        },
+      });
+
+      await NotificationService.sendNotificationEmail('user-1', notification);
+
+      expect(EmailTemplateService.render).toHaveBeenCalledWith(
+        'donation-received',
+        expect.objectContaining({
+          donorName: 'Alice',
+          campaignName: 'Relief Fund',
+          amount: 100,
+        })
+      );
     });
   });
 

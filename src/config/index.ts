@@ -34,6 +34,10 @@ export const config = {
     user: process.env.SMTP_USER!,
     password: process.env.SMTP_PASSWORD!,
     from: process.env.EMAIL_FROM || 'noreply@aidlink.org',
+    queueEnabled: process.env.EMAIL_QUEUE_ENABLED === 'true',
+    appUrl: process.env.APP_URL || 'http://localhost:3000',
+    logoUrl: process.env.EMAIL_LOGO_URL || 'https://aidlink.org/logo.png',
+    supportEmail: process.env.SUPPORT_EMAIL || 'support@aidlink.org',
   },
   
   soroban: {

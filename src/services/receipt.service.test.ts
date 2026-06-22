@@ -19,6 +19,16 @@ jest.mock('./storage.service', () => ({
 jest.mock('./notification.service', () => ({
   NotificationService: { sendEmail: jest.fn() },
 }));
+jest.mock('./emailTemplate.service', () => ({
+  EmailTemplateService: {
+    render: jest.fn().mockReturnValue({
+      html: '<html><body>Receipt Email</body></html>',
+      text: 'Receipt Email plain text',
+    }),
+    getVersion: jest.fn().mockReturnValue('1.0.0'),
+    logRender: jest.fn().mockResolvedValue(undefined),
+  },
+}));
 jest.mock('../utils/pdf.generator', () => ({
   generateReceiptPdf: jest.fn(),
 }));
@@ -149,6 +159,7 @@ describe('ReceiptService', () => {
       filePath: 'receipts/org1/don1_123.pdf',
       amount: 100,
       currency: 'USD',
+      donationDate: new Date('2026-01-01T00:00:00Z'),
       donor: { email: 'donor@example.com', username: 'donor' },
       organization: { name: 'Org One' },
     };
@@ -164,6 +175,7 @@ describe('ReceiptService', () => {
         expect.stringContaining('RCPT-2026-AAAAA'),
         expect.any(String),
         expect.objectContaining({
+          text: expect.any(String),
           attachments: [
             expect.objectContaining({ filename: 'RCPT-2026-AAAAA.pdf', contentType: 'application/pdf' }),
           ],

@@ -1,0 +1,29 @@
+<!-- KYC Approved Email Template -->
+{{> greeting name=userName fallback="there"}}
+
+<p style="margin: 0 0 16px 0; font-size: 16px; color: #1f7a5a; font-weight: 600;">
+  &#10003; KYC Verification Approved
+</p>
+
+<p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+  Great news! Your identity verification has been <strong>approved</strong>{{#if approvedDate}} on {{formatDate approvedDate}}{{/if}}.
+</p>
+
+{{#if welcomeMessage}}
+  <p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+    {{welcomeMessage}}
+  </p>
+{{/if}}
+
+{{#if nextSteps}}
+  <div style="background-color: #f0fdf6; border: 1px solid #bbf7d0; border-radius: 6px; padding: 16px; margin: 16px 0;">
+    <p style="margin: 0 0 6px 0; font-weight: 600; color: #166534; font-size: 14px;">Next Steps</p>
+    <p style="margin: 0; color: #166534; font-size: 14px; line-height: 1.6;">
+      {{nextSteps}}
+    </p>
+  </div>
+{{/if}}
+
+<p style="margin: 0; color: #444; line-height: 1.6;">
+  You now have full access to receive distributions and participate in AidLink programs.
+</p>

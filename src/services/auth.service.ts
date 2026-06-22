@@ -5,6 +5,7 @@ import { RegisterData, LoginCredentials, TokenPair, JWTPayload } from '../types'
 import { Role, UserStatus } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
+import { EmailPreferenceService } from './email-preference.service';
 
 export class AuthService {
   static async register(data: RegisterData): Promise<{ user: any; tokens: TokenPair }> {
@@ -42,6 +43,11 @@ export class AuthService {
         status: UserStatus.PENDING_VERIFICATION,
       },
     });
+
+    // Create default email preferences (non-blocking)
+    EmailPreferenceService.createDefault(user.id).catch((err) =>
+      logger.error('Failed to create email preferences for new user:', err)
+    );
 
     // Generate tokens
     const tokens = this.generateTokens(user.id, user.email, user.role);
@@ -125,6 +131,11 @@ export class AuthService {
           emailVerified: true,
         },
       });
+
+      // Create default email preferences for new wallet user (non-blocking)
+      EmailPreferenceService.createDefault(user.id).catch((err) =>
+        logger.error('Failed to create email preferences for wallet user:', err)
+      );
     }
 
     // Update last login

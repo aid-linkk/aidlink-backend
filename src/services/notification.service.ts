@@ -4,6 +4,8 @@ import logger from '../config/logger';
 import nodemailer from 'nodemailer';
 import { config } from '../config';
 import { sendNotificationWithCount, sendUnreadCount } from '../websocket/socket.server';
+import { EmailTemplateService } from './emailTemplate.service';
+import { EmailPreferenceService } from './email-preference.service';
 
 export class NotificationService {
   private static transporter = nodemailer.createTransport({
@@ -15,6 +17,42 @@ export class NotificationService {
       pass: config.email.password,
     },
   });
+
+  // ── Template Name Mapping ──────────────────────────────────────────
+
+  /** Map a NotificationType to its Handlebars template name. */
+  private static getTemplateName(type: NotificationType): string {
+    const map: Partial<Record<NotificationType, string>> = {
+      DONATION_RECEIVED: 'donation-received',
+      CAMPAIGN_UPDATE: 'campaign-update',
+      DISTRIBUTION_SENT: 'distribution-sent',
+      KYC_APPROVED: 'kyc-approval',
+      KYC_REJECTED: 'kyc-rejection',
+      SECURITY_ALERT: 'security-alert',
+    };
+    return map[type] || EmailTemplateService.DEFAULT_TEMPLATE;
+  }
+
+  /** Build a structured context object from notification data for template rendering. */
+  private static buildEmailContext(notification: any): Record<string, unknown> {
+    const meta = notification.metadata || {};
+
+    // Common context injected into every email
+    const base: Record<string, unknown> = {
+      subject: notification.title,
+      title: notification.title,
+      message: notification.message,
+      userName: meta.userName || meta.donorName || meta.name || undefined,
+      supportEmail: config.email.supportEmail,
+      logoUrl: config.email.logoUrl,
+      currentYear: new Date().getFullYear(),
+      managePreferencesLink: `${config.email.appUrl}/settings/email-preferences`,
+    };
+
+    return { ...base, ...meta };
+  }
+
+  // ── Core Notification CRUD ─────────────────────────────────────────
 
   static async createNotification(
     userId: string,
@@ -52,12 +90,19 @@ export class NotificationService {
     return notification;
   }
 
+  // ── Email Sending ──────────────────────────────────────────────────
+
+  /**
+   * Send a raw email via the SMTP transporter.
+   * Supports both HTML and plain-text bodies, plus attachments.
+   */
   static async sendEmail(
     to: string,
     subject: string,
     html: string,
     options: {
       from?: string;
+      text?: string;
       attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>;
     } = {}
   ): Promise<void> {
@@ -67,6 +112,7 @@ export class NotificationService {
         to,
         subject,
         html,
+        text: options.text,
         attachments: options.attachments,
       });
 
@@ -77,33 +123,80 @@ export class NotificationService {
     }
   }
 
+  /**
+   * Send a notification email using HTML templates.
+   *
+   * Flow:
+   *  1. Check user email preferences (opt-in/out, emailVerified, etc.)
+   *  2. Map notification type → template name
+   *  3. Build context from notification metadata
+   *  4. Render HTML + plain text via EmailTemplateService
+   *  5. Deliver via SMTP
+   *  6. Record template version in notification metadata
+   *  7. Log template render to audit table
+   */
   static async sendNotificationEmail(userId: string, notification: any): Promise<void> {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-    });
-
-    if (!user || !user.emailVerified) {
+    // 1. Check preferences (user existence, emailVerified, category opt-in)
+    const shouldSend = await EmailPreferenceService.shouldSendEmail(
+      userId,
+      notification.type as NotificationType
+    );
+    if (!shouldSend) {
+      logger.info(
+        `Email skipped for user ${userId} — notification ${notification.id} (type: ${notification.type}) — preferences or email not verified`
+      );
       return;
     }
 
-    const html = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #333;">${notification.title}</h2>
-        <p style="color: #666;">${notification.message}</p>
-        <p style="color: #999; font-size: 12px;">This is an automated email from AidLink.</p>
-      </div>
-    `;
+    // Fetch user email for sending
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
 
-    await this.sendEmail(user.email, notification.title, html);
+    if (!user?.email) {
+      logger.warn(`Cannot send email to user ${userId} — no email address`);
+      return;
+    }
 
-    // Update notification to include email in sentVia
+    // 2. Map to template name
+    const templateName = this.getTemplateName(notification.type as NotificationType);
+
+    // 3. Build template context
+    const context = this.buildEmailContext(notification);
+
+    // 4. Render
+    const { html, text } = EmailTemplateService.render(templateName, context);
+    const version = EmailTemplateService.getVersion(templateName);
+
+    // 5. Send
+    try {
+      await this.sendEmail(user.email, notification.title, html, { text });
+    } catch (err) {
+      logger.error(`Failed to send email for notification ${notification.id}:`, err);
+      throw err;
+    }
+
+    // 6. Update notification with sentVia + template version in metadata
     await prisma.notification.update({
       where: { id: notification.id },
       data: {
         sentVia: ['EMAIL'],
+        metadata: {
+          ...(notification.metadata || {}),
+          templateVersion: version,
+          templateName,
+        },
       },
     });
+
+    // 7. Audit log
+    EmailTemplateService.logRender(templateName, notification.id, context).catch((err) =>
+      logger.error('Template render audit log failed:', err)
+    );
   }
+
+  // ── User Notification Management ──────────────────────────────────
 
   static async getUserNotifications(
     userId: string,
@@ -202,24 +295,47 @@ export class NotificationService {
     });
   }
 
-  // Notification templates
-  static async sendDonationReceivedNotification(userId: string, campaignTitle: string, amount: number): Promise<void> {
+  // ── Notification Templates ─────────────────────────────────────────
+
+  static async sendDonationReceivedNotification(
+    userId: string,
+    campaignTitle: string,
+    amount: number
+  ): Promise<void> {
     const notification = await this.createNotification(
       userId,
       NotificationType.DONATION_RECEIVED,
       'Donation Received',
-      `Thank you for your donation of ${amount} XLM to "${campaignTitle}". Your contribution will help make a difference.`
+      `Thank you for your donation of ${amount} XLM to "${campaignTitle}". Your contribution will help make a difference.`,
+      {
+        campaignName: campaignTitle,
+        amount,
+        currency: 'XLM',
+        date: new Date().toISOString(),
+        impactSummary: `Your donation to "${campaignTitle}" will help provide critical aid to those who need it most.`,
+        nextStepLink: `${config.email.appUrl}/campaigns`,
+      }
     );
 
     await this.sendNotificationEmail(userId, notification);
   }
 
-  static async sendCampaignUpdateNotification(userId: string, campaignTitle: string, update: string): Promise<void> {
+  static async sendCampaignUpdateNotification(
+    userId: string,
+    campaignTitle: string,
+    update: string
+  ): Promise<void> {
     const notification = await this.createNotification(
       userId,
       NotificationType.CAMPAIGN_UPDATE,
       'Campaign Update',
-      `Update for "${campaignTitle}": ${update}`
+      `Update for "${campaignTitle}": ${update}`,
+      {
+        campaignTitle,
+        updateSummary: update,
+        postedDate: new Date().toISOString(),
+        fullUpdateLink: `${config.email.appUrl}/campaigns`,
+      }
     );
 
     await this.sendNotificationEmail(userId, notification);
@@ -230,7 +346,12 @@ export class NotificationService {
       userId,
       NotificationType.DISTRIBUTION_SENT,
       'Distribution Received',
-      `You have received a distribution of ${amount} XLM.`
+      `You have received a distribution of ${amount} XLM.`,
+      {
+        amount,
+        currency: 'XLM',
+        deliveryDate: new Date().toISOString(),
+      }
     );
 
     await this.sendNotificationEmail(userId, notification);
@@ -241,7 +362,14 @@ export class NotificationService {
       userId,
       NotificationType.KYC_APPROVED,
       'KYC Approved',
-      'Your KYC verification has been approved. You can now receive distributions.'
+      'Your KYC verification has been approved. You can now receive distributions.',
+      {
+        approvedDate: new Date().toISOString(),
+        welcomeMessage:
+          'Welcome to the AidLink community! Your identity has been verified successfully.',
+        nextSteps:
+          'You can now participate in aid programs, receive distributions, and track your impact through the AidLink platform.',
+      }
     );
 
     await this.sendNotificationEmail(userId, notification);
@@ -252,13 +380,23 @@ export class NotificationService {
       userId,
       NotificationType.KYC_REJECTED,
       'KYC Rejected',
-      `Your KYC verification was rejected. Reason: ${reason}`
+      `Your KYC verification was rejected. Reason: ${reason}`,
+      {
+        rejectionReason: reason,
+        requiredDocuments:
+          'A valid government-issued ID, proof of address, and a clear self-portrait.',
+        correctionSteps:
+          'Please review the reason above, gather the required documents, and resubmit your verification through the AidLink platform.',
+        resubmitLink: `${config.email.appUrl}/kyc/resubmit`,
+        appealInstructions:
+          'If you believe this decision was made in error, you may contact our support team for assistance.',
+      }
     );
 
     await this.sendNotificationEmail(userId, notification);
   }
 
-  // ─── Organization templates ────────────────────────────────────
+  // ─── Organization templates ────────────────────────────────────────
 
   static async sendOrganizationProfileUpdatedNotification(
     userId: string,
@@ -368,7 +506,7 @@ export class NotificationService {
     await this.sendNotificationEmail(userId, notification);
   }
 
-  // ─── Moderation templates ──────────────────────────────────────
+  // ─── Moderation templates ──────────────────────────────────────────
 
   static async sendCampaignSuspendedNotification(
     userId: string,
@@ -402,7 +540,14 @@ export class NotificationService {
       NotificationType.CAMPAIGN_SUSPENDED,
       'Campaign Suspended',
       parts.join(' '),
-      metadata
+      {
+        ...metadata,
+        campaignTitle,
+        reasonSummary,
+        canAppeal,
+        evidenceSummary,
+        reviewTimeframe,
+      }
     );
 
     await this.sendNotificationEmail(userId, notification);
@@ -421,7 +566,8 @@ export class NotificationService {
       userId,
       NotificationType.CAMPAIGN_REINSTATED,
       'Campaign Reinstated',
-      message
+      message,
+      { campaignTitle, notes }
     );
 
     await this.sendNotificationEmail(userId, notification);
@@ -442,7 +588,8 @@ export class NotificationService {
       userId,
       NotificationType.APPEAL_UPDATE,
       'Appeal Update',
-      message
+      message,
+      { campaignTitle, decision, adminNotes }
     );
 
     await this.sendNotificationEmail(userId, notification);
@@ -457,7 +604,15 @@ export class NotificationService {
       NotificationType.SECURITY_ALERT,
       'Campaign You Supported Was Suspended',
       `A campaign you donated to, "${campaignTitle}", has been suspended while we review a possible policy or fraud concern. ` +
-      `Distributions are paused during the review. We will keep you informed of any action regarding your donation.`
+      `Distributions are paused during the review. We will keep you informed of any action regarding your donation.`,
+      {
+        alertType: 'account_change',
+        campaignTitle,
+        whatHappened: `The campaign "${campaignTitle}" that you donated to has been flagged for review due to a possible policy or fraud concern. We are investigating and will keep you informed.`,
+        timestamp: new Date().toISOString(),
+        recommendedActions:
+          'No action is required from you at this time. We will notify you once the review is complete. If you have concerns, please contact our support team.',
+      }
     );
 
     await this.sendNotificationEmail(userId, notification);

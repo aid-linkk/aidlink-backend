@@ -56,6 +56,7 @@ model User {
   donorCredits   DonorCredit[]
   taxReceipts      TaxReceipt[]
   receiptBatchJobs ReceiptBatchJob[]
+  emailPreference  EmailPreference?
 
   @@index([email])
   @@index([walletAddress])
@@ -504,6 +505,37 @@ model Notification {
   @@index([status])
   @@index([type])
   @@index([createdAt])
+}
+
+// ============================================
+// EMAIL PREFERENCES & TEMPLATES
+// ============================================
+
+model EmailPreference {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  categories        Json
+  allEmailsDisabled Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model EmailTemplate {
+  id              String   @id @default(cuid())
+  name            String
+  version         String
+  notificationId  String?
+  description     String?
+  renderedAt      DateTime @default(now())
+  metadata        Json?
+
+  @@index([name])
+  @@index([version])
+  @@index([renderedAt])
 }
 
 // ============================================

@@ -6,6 +6,7 @@ import logger from '../config/logger';
 import { AppError } from '../middleware/error';
 import { StorageService } from './storage.service';
 import { NotificationService } from './notification.service';
+import { EmailTemplateService } from './emailTemplate.service';
 import { generateReceiptPdf, ReceiptPdfData } from '../utils/pdf.generator';
 import {
   getRegionRequirement,
@@ -233,19 +234,18 @@ export class ReceiptService {
 
     try {
       const pdf = await StorageService.download(receipt.filePath);
-      const amount = formatCurrency(receipt.amount.toString(), receipt.currency);
-      const html = `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #1f7a5a;">Thank you for your donation</h2>
-          <p style="color: #444;">
-            Please find attached your official tax receipt
-            (<strong>${receipt.receiptNumber}</strong>) for your donation of
-            <strong>${amount}</strong> to ${receipt.organization.name}.
-          </p>
-          <p style="color: #444;">You can also download it any time from your AidLink donor portal.</p>
-          <p style="color: #999; font-size: 12px;">This is an automated email from AidLink.</p>
-        </div>
-      `;
+
+      const { html, text } = EmailTemplateService.render('receipt', {
+        donorName: receipt.donor.username,
+        receiptNumber: receipt.receiptNumber,
+        amount: receipt.amount.toString(),
+        currency: receipt.currency,
+        organizationName: receipt.organization.name,
+        donationDate: receipt.donationDate.toISOString(),
+        downloadLink: `${config.email.appUrl}/receipts/${receipt.id}`,
+        donorPortalLink: `${config.email.appUrl}/donor/portal`,
+        subject: `Your tax receipt ${receipt.receiptNumber}`,
+      });
 
       await NotificationService.sendEmail(
         receipt.donor.email,
@@ -253,6 +253,7 @@ export class ReceiptService {
         html,
         {
           from: config.receipts.senderEmail,
+          text,
           attachments: [
             {
               filename: `${receipt.receiptNumber}.pdf`,
