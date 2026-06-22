@@ -56,7 +56,12 @@ const prismaMock = {
   },
   notification: {
     create: jest.fn().mockResolvedValue({}),
+    findUnique: jest.fn(),
     findMany: jest.fn().mockResolvedValue([]),
+    update: jest.fn(),
+    updateMany: jest.fn(),
+    delete: jest.fn(),
+    count: jest.fn(),
   },
   recoveryCase: {
     findUnique: jest.fn(),

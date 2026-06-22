@@ -689,18 +689,32 @@ socket.emit('leave_campaign', 'campaign_id');
 #### Receive Updates
 
 ```javascript
-socket.on('donation_received', (data) => {
+socket.on('donation:created', (data) => {
   console.log('New donation:', data);
 });
 
-socket.on('campaign_update', (data) => {
+socket.on('campaign:updated', (data) => {
   console.log('Campaign updated:', data);
 });
 
-socket.on('distribution_sent', (data) => {
-  console.log('Distribution sent:', data);
+socket.on('distribution:updated', (data) => {
+  console.log('Distribution updated:', data);
 });
 ```
+
+#### Notification Updates
+
+```javascript
+socket.on('notification:new', (notification) => {
+  console.log('New notification:', notification);
+});
+
+socket.on('notification:unreadCountUpdated', (data) => {
+  console.log('Unread notification count:', data.unreadCount);
+});
+```
+
+`notification:unreadCountUpdated` is sent only to the authenticated user's personal room when notifications are created, marked read, bulk-marked read, or deleted while unread. The payload includes `{ userId, unreadCount }` and may include lightweight metadata such as `reason` and `notificationId`.
 
 ## Interactive Documentation
 

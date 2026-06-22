@@ -3,6 +3,7 @@ import { NotificationType, NotificationStatus } from '@prisma/client';
 import logger from '../config/logger';
 import nodemailer from 'nodemailer';
 import { config } from '../config';
+import { sendNotification, sendUnreadNotificationCountUpdate } from '../websocket/socket.server';
 
 export class NotificationService {
   private static transporter = nodemailer.createTransport({
@@ -34,6 +35,9 @@ export class NotificationService {
     });
 
     logger.info(`Notification created: ${notification.id} for user ${userId}`);
+
+    sendNotification(userId, notification);
+    await this.emitUnreadCountUpdate(userId, 'created', { notificationId: notification.id });
 
     return notification;
   }
@@ -113,13 +117,17 @@ export class NotificationService {
       throw new Error('You do not have permission to update this notification');
     }
 
-    return prisma.notification.update({
+    const updatedNotification = await prisma.notification.update({
       where: { id: notificationId },
       data: {
         status: NotificationStatus.READ,
         readAt: new Date(),
       },
     });
+
+    await this.emitUnreadCountUpdate(userId, 'marked_read', { notificationId });
+
+    return updatedNotification;
   }
 
   static async markAllAsRead(userId: string): Promise<void> {
@@ -133,6 +141,8 @@ export class NotificationService {
         readAt: new Date(),
       },
     });
+
+    await this.emitUnreadCountUpdate(userId, 'bulk_marked_read');
   }
 
   static async deleteNotification(notificationId: string, userId: string): Promise<void> {
@@ -151,6 +161,10 @@ export class NotificationService {
     await prisma.notification.delete({
       where: { id: notificationId },
     });
+
+    if (notification.status === NotificationStatus.UNREAD) {
+      await this.emitUnreadCountUpdate(userId, 'deleted', { notificationId });
+    }
   }
 
   static async getUnreadCount(userId: string): Promise<number> {
@@ -160,6 +174,23 @@ export class NotificationService {
         status: NotificationStatus.UNREAD,
       },
     });
+  }
+
+  private static async emitUnreadCountUpdate(
+    userId: string,
+    reason: string,
+    metadata?: Record<string, unknown>
+  ): Promise<number> {
+    const unreadCount = await this.getUnreadCount(userId);
+
+    sendUnreadNotificationCountUpdate(userId, {
+      userId,
+      unreadCount,
+      reason,
+      ...metadata,
+    });
+
+    return unreadCount;
   }
 
   // Notification templates

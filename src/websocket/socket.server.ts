@@ -223,6 +223,13 @@ export const sendNotification = (userId: string, notification: any): void => {
   broadcastToUser(userId, 'notification:new', notification);
 };
 
+export const sendUnreadNotificationCountUpdate = (
+  userId: string,
+  data: { userId: string; unreadCount: number; reason?: string; [key: string]: unknown }
+): void => {
+  broadcastToUser(userId, 'notification:unreadCountUpdated', data);
+};
+
 // ─── Moderation events ─────────────────────────────────────────
 
 export const sendCampaignSuspended = (campaignId: string, ownerId: string, payload: any): void => {
