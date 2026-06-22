@@ -1,0 +1,5958 @@
+openapi: 3.0.3
+info:
+  title: AidLink Backend API
+  version: 1.0.0
+  description: |
+    Production-grade REST API for AidLink — a blockchain-powered humanitarian aid platform built on Soroban/Stellar.
+
+    ## Authentication
+    All protected endpoints require a Bearer JWT in the `Authorization` header:
+    ```
+    Authorization: Bearer <access_token>
+    ```
+    Tokens are obtained via `POST /api/v1/auth/login` or `POST /api/v1/auth/wallet`.
+    Access tokens expire in 15 minutes; use `POST /api/v1/auth/refresh` with the refresh token.
+
+    ## Rate Limits
+    Rate limit headers are returned on every response (`RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`).
+    | Scope | Limit |
+    |---|---|
+    | Global API | 100 req / 15 min per IP |
+    | Auth endpoints | 5 req / 15 min per IP |
+    | Donation creation | 10 req / min per user |
+    | Campaign creation | 3 req / hour per user |
+    | Distribution creation | 5 req / min per user |
+    | Search | 30 req / min per user |
+    | Analytics | 20 req / min per user |
+    | Notifications | 10 req / min per user |
+    | Fraud reports | 5 req / hour per user |
+
+    ## Roles
+    | Role | Description |
+    |---|---|
+    | ADMIN | Full platform access |
+    | ORGANIZATION | Manages campaigns and distributions |
+    | DONOR | Creates donations |
+    | BENEFICIARY | Receives distributions, submits KYC |
+    | VERIFIER | Reviews KYC and beneficiary data |
+    | AUDITOR | Read-only audit access |
+
+    ## Errors
+    All errors follow a consistent envelope:
+    ```json
+    { "success": false, "error": "Human-readable message", "details": [...] }
+    ```
+
+  contact:
+    name: AidLink Team
+    email: dev@aidlink.org
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+  - url: https://api-staging.aidlink.org
+    description: Staging
+  - url: https://api.aidlink.org
+    description: Production
+
+tags:
+  - name: Authentication
+    description: Register, login, wallet auth, token refresh, session management
+  - name: Campaigns
+    description: Campaign lifecycle — create, update, fund-track, milestone and beneficiary assignment
+  - name: Donations
+    description: Donor contributions and blockchain confirmation
+  - name: Beneficiaries
+    description: Beneficiary profiles, KYC submissions and review
+  - name: Distributions
+    description: Fund disbursement to beneficiaries with proof tracking
+  - name: Notifications
+    description: In-app and push notification management
+  - name: Admin
+    description: Platform administration — users, audit logs, moderation, system health
+  - name: Organizations
+    description: NGO/organization profiles, bank accounts and verification workflow
+  - name: Analytics
+    description: Campaign, donor, organization and platform-wide metrics
+  - name: Search
+    description: Full-text and filtered search across entities
+  - name: Upload
+    description: File upload — profile pictures, KYC documents, campaign images, distribution proofs
+  - name: Moderation
+    description: Fraud reports, campaign suspensions and appeals
+
+# ---------------------------------------------------------------------------
+# COMPONENTS
+# ---------------------------------------------------------------------------
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token obtained from /auth/login or /auth/wallet
+
+  schemas:
+    # ── Generic wrappers ────────────────────────────────────────────────────
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Operation completed successfully
+        data:
+          type: object
+
+    PaginatedMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 20
+        total:
+          type: integer
+          example: 142
+        pages:
+          type: integer
+          example: 8
+
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: Validation failed
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+    # ── Enums ──────────────────────────────────────────────────────────────
+    Role:
+      type: string
+      enum: [ADMIN, ORGANIZATION, DONOR, BENEFICIARY, VERIFIER, AUDITOR]
+
+    UserStatus:
+      type: string
+      enum: [ACTIVE, SUSPENDED, PENDING_VERIFICATION, REJECTED, DELETED]
+
+    CampaignStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, PAUSED, COMPLETED, CANCELLED, SUSPENDED, PENDING_REVIEW]
+
+    DonationStatus:
+      type: string
+      enum: [PENDING, CONFIRMED, FAILED, REFUNDED]
+
+    BeneficiaryStatus:
+      type: string
+      enum: [PENDING, VERIFIED, REJECTED, SUSPENDED, ACTIVE]
+
+    DistributionStatus:
+      type: string
+      enum: [PENDING, IN_PROGRESS, COMPLETED, FAILED, CANCELLED]
+
+    DistributionMethod:
+      type: string
+      enum: [CASH, BANK_TRANSFER, MOBILE_MONEY, CRYPTO, VOUCHER, IN_KIND]
+
+    KYCStatus:
+      type: string
+      enum: [PENDING, UNDER_REVIEW, APPROVED, REJECTED, EXPIRED]
+
+    NotificationType:
+      type: string
+      enum:
+        - DONATION_RECEIVED
+        - CAMPAIGN_UPDATE
+        - DISTRIBUTION_SENT
+        - KYC_APPROVED
+        - KYC_REJECTED
+        - SYSTEM_ALERT
+        - SECURITY_ALERT
+        - CAMPAIGN_SUSPENDED
+        - CAMPAIGN_REINSTATED
+        - APPEAL_UPDATE
+
+    AppealStatus:
+      type: string
+      enum: [OPEN, UNDER_REVIEW, APPROVED, DENIED]
+
+    FraudReportType:
+      type: string
+      enum: [SCAM, MISINFORMATION, INAPPROPRIATE_CONTENT, IMPERSONATION, DUPLICATE, OTHER]
+
+    OrganizationStatus:
+      type: string
+      enum: [PENDING, APPROVED, SUSPENDED, REJECTED]
+
+    OrganizationVerificationStatus:
+      type: string
+      enum: [UNVERIFIED, PENDING_VERIFICATION, VERIFIED, REJECTED, SUSPENDED, MORE_INFO_REQUESTED]
+
+    # ── Core models ────────────────────────────────────────────────────────
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          example: clx1a2b3c4d5e6f7g8h9
+        email:
+          type: string
+          format: email
+          example: donor@example.com
+        username:
+          type: string
+          example: john_donor
+        walletAddress:
+          type: string
+          example: GBKZRTIOAHMXIJKUQPMKLF6JYLXV2PJHFGXZQ4LQXSWM5YIZD3HMGKQ
+        role:
+          $ref: '#/components/schemas/Role'
+        status:
+          $ref: '#/components/schemas/UserStatus'
+        emailVerified:
+          type: boolean
+        lastLogin:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Session:
+      type: object
+      properties:
+        accessToken:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        refreshToken:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        expiresIn:
+          type: integer
+          description: Seconds until access token expires
+          example: 900
+        user:
+          $ref: '#/components/schemas/User'
+
+    Organization:
+      type: object
+      properties:
+        id:
+          type: string
+          example: clx2org0001
+        userId:
+          type: string
+        name:
+          type: string
+          example: Hope Foundation
+        email:
+          type: string
+          format: email
+        country:
+          type: string
+          example: Kenya
+        description:
+          type: string
+        website:
+          type: string
+          format: uri
+        logo:
+          type: string
+          format: uri
+        registrationNumber:
+          type: string
+        taxId:
+          type: string
+        status:
+          $ref: '#/components/schemas/OrganizationStatus'
+        verificationStatus:
+          $ref: '#/components/schemas/OrganizationVerificationStatus'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    BankAccount:
+      type: object
+      properties:
+        id:
+          type: string
+          example: clxbank001
+        organizationId:
+          type: string
+        bankName:
+          type: string
+          example: Equity Bank Kenya
+        accountHolderName:
+          type: string
+          example: Hope Foundation
+        accountNumber:
+          type: string
+          example: "1234567890"
+        routingNumber:
+          type: string
+        iban:
+          type: string
+        accountType:
+          type: string
+          example: CHECKING
+        currency:
+          type: string
+          example: USD
+        country:
+          type: string
+        verificationStatus:
+          type: string
+          enum: [UNVERIFIED, PENDING_VERIFICATION, VERIFIED, REJECTED, ARCHIVED]
+        isPrimary:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    Campaign:
+      type: object
+      properties:
+        id:
+          type: string
+          example: clxcamp001
+        organizationId:
+          type: string
+        userId:
+          type: string
+        title:
+          type: string
+          example: Clean Water for Northern Kenya
+        description:
+          type: string
+        imageUrl:
+          type: string
+          format: uri
+        targetAmount:
+          type: string
+          description: Decimal string to preserve precision
+          example: "50000.00"
+        currentAmount:
+          type: string
+          example: "12500.00"
+        startDate:
+          type: string
+          format: date-time
+        endDate:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/CampaignStatus'
+        blockchainTxHash:
+          type: string
+        contractAddress:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CampaignStats:
+      type: object
+      properties:
+        campaignId:
+          type: string
+          example: clxcamp001
+        totalDonated:
+          type: string
+          example: "12500.00"
+          description: Sum of all confirmed donations
+        totalMatched:
+          type: string
+          example: "3750.00"
+          description: Quadratic matching funds added
+        combinedRaised:
+          type: string
+          example: "16250.00"
+          description: totalDonated + totalMatched
+        donationCount:
+          type: integer
+          example: 47
+        beneficiaryCount:
+          type: integer
+          example: 12
+        distributionCount:
+          type: integer
+          example: 8
+        percentFunded:
+          type: number
+          format: float
+          example: 32.5
+
+    Milestone:
+      type: object
+      properties:
+        id:
+          type: string
+        campaignId:
+          type: string
+        title:
+          type: string
+          example: Drill first borehole
+        description:
+          type: string
+        targetAmount:
+          type: string
+          example: "10000.00"
+        achieved:
+          type: boolean
+        achievedAt:
+          type: string
+          format: date-time
+        order:
+          type: integer
+          example: 1
+        createdAt:
+          type: string
+          format: date-time
+
+    Donation:
+      type: object
+      properties:
+        id:
+          type: string
+          example: clxdon001
+        campaignId:
+          type: string
+        userId:
+          type: string
+        amount:
+          type: string
+          example: "250.00"
+        currency:
+          type: string
+          example: XLM
+        status:
+          $ref: '#/components/schemas/DonationStatus'
+        blockchainTxHash:
+          type: string
+          example: a3f8c2d1e4b5...
+        fromWallet:
+          type: string
+        toWallet:
+          type: string
+        memo:
+          type: string
+        isAnonymous:
+          type: boolean
+        donorMessage:
+          type: string
+        matchedFunds:
+          type: string
+          description: Quadratic match amount added to this donation
+          example: "75.00"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Beneficiary:
+      type: object
+      properties:
+        id:
+          type: string
+          example: clxben001
+        userId:
+          type: string
+        firstName:
+          type: string
+          example: Amina
+        lastName:
+          type: string
+          example: Hassan
+        dateOfBirth:
+          type: string
+          format: date-time
+        gender:
+          type: string
+          example: FEMALE
+        nationality:
+          type: string
+          example: Kenyan
+        idDocumentType:
+          type: string
+          example: NATIONAL_ID
+        idDocumentNumber:
+          type: string
+        phoneNumber:
+          type: string
+        address:
+          type: string
+        city:
+          type: string
+          example: Nairobi
+        country:
+          type: string
+          example: Kenya
+        familySize:
+          type: integer
+          example: 4
+        status:
+          $ref: '#/components/schemas/BeneficiaryStatus'
+        riskScore:
+          type: integer
+          example: 15
+        createdAt:
+          type: string
+          format: date-time
+
+    KYCSubmission:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        beneficiaryId:
+          type: string
+        submissionType:
+          type: string
+          example: INDIVIDUAL
+        status:
+          $ref: '#/components/schemas/KYCStatus'
+        documentType:
+          type: string
+          example: NATIONAL_ID
+        documentUrl:
+          type: string
+          format: uri
+        selfieUrl:
+          type: string
+          format: uri
+        reviewNotes:
+          type: string
+        reviewedAt:
+          type: string
+          format: date-time
+        fraudScore:
+          type: integer
+          example: 5
+        createdAt:
+          type: string
+          format: date-time
+
+    Distribution:
+      type: object
+      properties:
+        id:
+          type: string
+          example: clxdist001
+        campaignId:
+          type: string
+        beneficiaryId:
+          type: string
+        amount:
+          type: string
+          example: "500.00"
+        currency:
+          type: string
+          example: XLM
+        method:
+          $ref: '#/components/schemas/DistributionMethod'
+        status:
+          $ref: '#/components/schemas/DistributionStatus'
+        blockchainTxHash:
+          type: string
+        proofDocumentUrl:
+          type: string
+          format: uri
+        notes:
+          type: string
+        distributedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        type:
+          $ref: '#/components/schemas/NotificationType'
+        title:
+          type: string
+          example: Donation Received
+        message:
+          type: string
+          example: Your campaign received a donation of 250 XLM
+        status:
+          type: string
+          enum: [UNREAD, READ, ARCHIVED]
+        metadata:
+          type: object
+        readAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    Suspension:
+      type: object
+      properties:
+        id:
+          type: string
+        campaignId:
+          type: string
+        source:
+          type: string
+          enum: [AUTO, ADMIN]
+        reasonCode:
+          type: string
+          enum: [LOW_VERIFICATION, FRAUD_REPORTS, POLICY_VIOLATION, MANUAL_REVIEW, OTHER]
+        reasonText:
+          type: string
+        active:
+          type: boolean
+        liftedAt:
+          type: string
+          format: date-time
+        liftNotes:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    Appeal:
+      type: object
+      properties:
+        id:
+          type: string
+        suspensionId:
+          type: string
+        campaignId:
+          type: string
+        message:
+          type: string
+        attachments:
+          type: array
+          items:
+            type: string
+            format: uri
+        status:
+          $ref: '#/components/schemas/AppealStatus'
+        adminNotes:
+          type: string
+        resolvedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        action:
+          type: string
+          example: DONATION_MADE
+        entityType:
+          type: string
+          example: Donation
+        entityId:
+          type: string
+        changes:
+          type: object
+        ipAddress:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    BlockchainTransaction:
+      type: object
+      properties:
+        id:
+          type: string
+        txHash:
+          type: string
+          example: a3f8c2d1e4b567890abcdef1234567890abcdef1234567890abcdef1234567890
+        type:
+          type: string
+          enum: [DONATION, DISTRIBUTION, CONTRACT_DEPLOYMENT, CONTRACT_CALL, FEE_PAYMENT]
+        fromAddress:
+          type: string
+          example: GBKZRTIOAHMXIJKUQPMKLF6JYLXV2PJHFGXZQ4LQXSWM5YIZD3HMGKQ
+        toAddress:
+          type: string
+          example: GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGKZM9OSGLPQOAKXQ5XRGT
+        amount:
+          type: string
+          example: "250.00"
+        currency:
+          type: string
+          example: XLM
+        contractAddress:
+          type: string
+        functionName:
+          type: string
+          example: donate
+        parameters:
+          type: object
+        status:
+          type: string
+          enum: [PENDING, CONFIRMED, FAILED]
+        blockNumber:
+          type: string
+          description: Stellar ledger sequence number
+          example: "50234891"
+        timestamp:
+          type: string
+          format: date-time
+        indexed:
+          type: boolean
+
+  # ── Reusable parameters ──────────────────────────────────────────────────
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      description: Page number (1-based)
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+
+    LimitParam:
+      name: limit
+      in: query
+      description: Results per page
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+
+    SortParam:
+      name: sort
+      in: query
+      description: "Sort field, prefix with - for descending (e.g. -createdAt)"
+      schema:
+        type: string
+
+  # ── Reusable responses ───────────────────────────────────────────────────
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            error: Authentication token required
+
+    Forbidden:
+      description: Authenticated but insufficient role
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            error: Insufficient permissions
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            error: Resource not found
+
+    ValidationError:
+      description: Request body failed schema validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            error: Validation failed
+            details:
+              - field: amount
+                message: Amount must be positive
+
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            error: Too many requests, please try again later
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            error: Internal server error
+
+# ---------------------------------------------------------------------------
+# PATHS
+# ---------------------------------------------------------------------------
+paths:
+
+  # ==========================================================================
+  # AUTH
+  # ==========================================================================
+
+  /api/v1/auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new user
+      description: |
+        Creates a new user account. The account starts in `PENDING_VERIFICATION` status.
+        **Rate limit:** 5 requests / 15 min per IP.
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: donor@example.com
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+                  example: "SecurePass123!"
+                username:
+                  type: string
+                  example: john_donor
+                role:
+                  $ref: '#/components/schemas/Role'
+            example:
+              email: donor@example.com
+              password: "SecurePass123!"
+              username: john_donor
+              role: DONOR
+      responses:
+        "201":
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                message: User registered successfully
+                data:
+                  id: clx1a2b3c4d5e6f7g8h9
+                  email: donor@example.com
+                  username: john_donor
+                  role: DONOR
+                  status: PENDING_VERIFICATION
+                  createdAt: "2024-03-15T10:30:00Z"
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "409":
+          description: Email already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error: Email already in use
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Login with email and password
+      description: |
+        Authenticates a user and returns JWT access + refresh tokens.
+        **Rate limit:** 5 requests / 15 min per IP.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+            example:
+              email: donor@example.com
+              password: "SecurePass123!"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                message: Login successful
+                data:
+                  accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJjbHgxYTJiM2M0ZDVlNmY3ZzhoOSIsInJvbGUiOiJET05PUiIsImlhdCI6MTcxMDQ5NjIwMCwiZXhwIjoxNzEwNDk3MTAwfQ.sig
+                  refreshToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh.sig
+                  expiresIn: 900
+                  user:
+                    id: clx1a2b3c4d5e6f7g8h9
+                    email: donor@example.com
+                    role: DONOR
+                    status: ACTIVE
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error: Invalid email or password
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/wallet:
+    post:
+      tags: [Authentication]
+      summary: Authenticate with a Stellar wallet
+      description: |
+        Verifies a signed message from a Stellar wallet address and returns JWT tokens.
+        The client must sign the `message` string with the wallet private key and pass the hex signature.
+        **Rate limit:** 5 requests / 15 min per IP.
+      operationId: walletAuth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [walletAddress, signature, message]
+              properties:
+                walletAddress:
+                  type: string
+                  example: GBKZRTIOAHMXIJKUQPMKLF6JYLXV2PJHFGXZQ4LQXSWM5YIZD3HMGKQ
+                signature:
+                  type: string
+                  description: Ed25519 signature of `message` in hex
+                  example: a3f8c2d1e4b567890abcdef...
+                message:
+                  type: string
+                  description: Nonce/challenge string that was signed
+                  example: "AidLink authentication nonce: 1710496200"
+            example:
+              walletAddress: GBKZRTIOAHMXIJKUQPMKLF6JYLXV2PJHFGXZQ4LQXSWM5YIZD3HMGKQ
+              signature: a3f8c2d1e4b567890abcdef1234567890abcdef1234567890abcdef12345678
+              message: "AidLink authentication nonce: 1710496200"
+      responses:
+        "200":
+          description: Wallet authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                message: Wallet authentication successful
+                data:
+                  accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.wallet.sig
+                  refreshToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh.sig
+                  expiresIn: 900
+        "401":
+          description: Signature verification failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error: Invalid wallet signature
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Authentication]
+      summary: Refresh access token
+      description: Exchange a valid refresh token for a new access token.
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+            example:
+              refreshToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.refresh.sig
+      responses:
+        "200":
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                data:
+                  accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.new.sig
+                  expiresIn: 900
+        "401":
+          description: Refresh token invalid or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error: Refresh token expired
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Logout current session
+      description: Invalidates the current session token. Requires Bearer auth.
+      operationId: logout
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Logged out successfully
+          content:
+            application/json:
+              example:
+                success: true
+                message: Logged out successfully
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/logout-all:
+    post:
+      tags: [Authentication]
+      summary: Logout from all sessions
+      description: Invalidates all active sessions for the authenticated user.
+      operationId: logoutAll
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: All sessions invalidated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Logged out from all devices
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get current authenticated user
+      description: Returns the profile of the user identified by the Bearer token.
+      operationId: getMe
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User profile retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                data:
+                  id: clx1a2b3c4d5e6f7g8h9
+                  email: donor@example.com
+                  username: john_donor
+                  role: DONOR
+                  status: ACTIVE
+                  emailVerified: true
+                  lastLogin: "2024-03-15T10:30:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  # ==========================================================================
+  # CAMPAIGNS
+  # ==========================================================================
+
+  /api/v1/campaigns:
+    post:
+      tags: [Campaigns]
+      summary: Create a new campaign
+      description: |
+        Creates a humanitarian aid campaign. The campaign starts in `DRAFT` status.
+        **Auth:** Bearer JWT — role: ORGANIZATION or ADMIN.
+        **Rate limit:** 3 req / hour per user.
+      operationId: createCampaign
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, description, targetAmount, startDate, organizationId]
+              properties:
+                title:
+                  type: string
+                  minLength: 5
+                  maxLength: 200
+                  example: Clean Water for Northern Kenya
+                description:
+                  type: string
+                  minLength: 20
+                  example: Drilling boreholes to provide safe drinking water to 5,000 families
+                imageUrl:
+                  type: string
+                  format: uri
+                targetAmount:
+                  type: number
+                  format: float
+                  minimum: 1
+                  example: 50000
+                startDate:
+                  type: string
+                  format: date-time
+                  example: "2024-04-01T00:00:00Z"
+                endDate:
+                  type: string
+                  format: date-time
+                  example: "2024-07-01T00:00:00Z"
+                organizationId:
+                  type: string
+                  example: clx2org0001
+            example:
+              title: Clean Water for Northern Kenya
+              description: Drilling boreholes to provide safe drinking water to 5,000 families in Turkana County
+              targetAmount: 50000
+              startDate: "2024-04-01T00:00:00Z"
+              endDate: "2024-07-01T00:00:00Z"
+              organizationId: clx2org0001
+      responses:
+        "201":
+          description: Campaign created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                message: Campaign created successfully
+                data:
+                  id: clxcamp001
+                  title: Clean Water for Northern Kenya
+                  status: DRAFT
+                  targetAmount: "50000.00"
+                  currentAmount: "0.00"
+                  organizationId: clx2org0001
+                  createdAt: "2024-03-15T10:30:00Z"
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+    get:
+      tags: [Campaigns]
+      summary: List campaigns
+      description: |
+        Returns a paginated list of campaigns. Supports filtering by status, organization, and keyword search.
+        **Auth:** Bearer JWT — all roles.
+      operationId: getCampaigns
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/SortParam'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/CampaignStatus'
+        - name: organizationId
+          in: query
+          schema:
+            type: string
+        - name: search
+          in: query
+          description: Keyword search on title and description
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Campaigns retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  campaigns:
+                    - id: clxcamp001
+                      title: Clean Water for Northern Kenya
+                      status: ACTIVE
+                      targetAmount: "50000.00"
+                      currentAmount: "12500.00"
+                      organizationId: clx2org0001
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 142
+                    pages: 8
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/campaigns/{id}:
+    get:
+      tags: [Campaigns]
+      summary: Get campaign by ID
+      operationId: getCampaignById
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: clxcamp001
+      responses:
+        "200":
+          description: Campaign retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxcamp001
+                  title: Clean Water for Northern Kenya
+                  description: Drilling boreholes...
+                  targetAmount: "50000.00"
+                  currentAmount: "12500.00"
+                  status: ACTIVE
+                  organization:
+                    id: clx2org0001
+                    name: Hope Foundation
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Campaigns]
+      summary: Update campaign
+      description: |
+        Full update of a campaign. Only the campaign owner or ADMIN may update.
+        **Auth:** Bearer JWT — role: ORGANIZATION (owner) or ADMIN.
+      operationId: updateCampaign
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                imageUrl:
+                  type: string
+                  format: uri
+                targetAmount:
+                  type: number
+                endDate:
+                  type: string
+                  format: date-time
+            example:
+              title: Clean Water for Northern Kenya (Updated)
+              targetAmount: 60000
+      responses:
+        "200":
+          description: Campaign updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Campaign updated successfully
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Campaigns]
+      summary: Delete campaign
+      description: |
+        Soft-deletes a campaign. Only the owner or ADMIN may delete.
+        **Auth:** Bearer JWT — role: ORGANIZATION (owner) or ADMIN.
+      operationId: deleteCampaign
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Campaign deleted
+          content:
+            application/json:
+              example:
+                success: true
+                message: Campaign deleted successfully
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/campaigns/{id}/status:
+    patch:
+      tags: [Campaigns]
+      summary: Update campaign status
+      description: |
+        Transitions a campaign between statuses. Valid transitions depend on role.
+        **Auth:** Bearer JWT — role: ORGANIZATION (owner) or ADMIN.
+      operationId: updateCampaignStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: '#/components/schemas/CampaignStatus'
+            example:
+              status: ACTIVE
+      responses:
+        "200":
+          description: Status updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Campaign status updated to ACTIVE
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/campaigns/{id}/stats:
+    get:
+      tags: [Campaigns]
+      summary: Get campaign statistics
+      description: |
+        Returns funding totals including quadratic matching.
+        **Auth:** Bearer JWT — all roles.
+      operationId: getCampaignStats
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: clxcamp001
+      responses:
+        "200":
+          description: Statistics retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                data:
+                  campaignId: clxcamp001
+                  totalDonated: "12500.00"
+                  totalMatched: "3750.00"
+                  combinedRaised: "16250.00"
+                  donationCount: 47
+                  beneficiaryCount: 12
+                  distributionCount: 8
+                  percentFunded: 32.5
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/campaigns/{campaignId}/milestones:
+    post:
+      tags: [Campaigns]
+      summary: Add milestone to campaign
+      description: |
+        Appends a fundraising milestone to an existing campaign.
+        **Auth:** Bearer JWT — role: ORGANIZATION (owner) or ADMIN.
+      operationId: addMilestone
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: campaignId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, targetAmount, order]
+              properties:
+                title:
+                  type: string
+                  example: Drill first borehole
+                description:
+                  type: string
+                targetAmount:
+                  type: number
+                  example: 10000
+                order:
+                  type: integer
+                  example: 1
+            example:
+              title: Drill first borehole
+              description: Equipment procurement and site preparation
+              targetAmount: 10000
+              order: 1
+      responses:
+        "201":
+          description: Milestone added
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxmile001
+                  title: Drill first borehole
+                  targetAmount: "10000.00"
+                  achieved: false
+                  order: 1
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/campaigns/{campaignId}/beneficiaries:
+    post:
+      tags: [Campaigns]
+      summary: Assign beneficiary to campaign
+      description: |
+        Links a verified beneficiary to a campaign with an optional pre-allocated amount.
+        **Auth:** Bearer JWT — role: ORGANIZATION or ADMIN.
+      operationId: assignBeneficiary
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: campaignId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [beneficiaryId]
+              properties:
+                beneficiaryId:
+                  type: string
+                  example: clxben001
+                assignedAmount:
+                  type: number
+                  example: 500
+                priority:
+                  type: integer
+                  example: 1
+                notes:
+                  type: string
+            example:
+              beneficiaryId: clxben001
+              assignedAmount: 500
+              priority: 1
+              notes: Single mother, 3 children
+      responses:
+        "201":
+          description: Beneficiary assigned
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  campaignId: clxcamp001
+                  beneficiaryId: clxben001
+                  assignedAmount: "500.00"
+                  priority: 1
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: Beneficiary already assigned to this campaign
+          content:
+            application/json:
+              example:
+                success: false
+                error: Beneficiary already assigned to this campaign
+
+  /api/v1/campaigns/{campaignId}/multipliers:
+    post:
+      tags: [Campaigns]
+      summary: Set quadratic funding multipliers for a campaign
+      description: |
+        Configures matching multiplier rules (e.g., 1.5× for first 100 donors) applied
+        during the quadratic funding calculation. Only platform ADMIN or the campaign's
+        owning ORGANIZATION may configure multipliers.
+
+        **Auth:** Bearer JWT — role: ORGANIZATION or ADMIN.
+        **Rate limit:** 100 req / min per user (global API limit applies).
+      operationId: setCampaignMultipliers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: campaignId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: clxcamp001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [multipliers]
+              properties:
+                multipliers:
+                  type: array
+                  items:
+                    type: object
+                    required: [factor, condition]
+                    properties:
+                      factor:
+                        type: number
+                        format: float
+                        description: Multiplier factor (e.g. 1.5 = 50% boost)
+                        example: 1.5
+                      condition:
+                        type: object
+                        description: Conditions that trigger this multiplier
+                        properties:
+                          maxDonorRank:
+                            type: integer
+                            description: Only apply to donors ranked ≤ this value
+                            example: 100
+                          minDonationAmount:
+                            type: number
+                            description: Only apply if single donation ≥ this amount
+                            example: 10
+                      expiresAt:
+                        type: string
+                        format: date-time
+                        description: Optional expiry for this multiplier rule
+            example:
+              multipliers:
+                - factor: 1.5
+                  condition:
+                    maxDonorRank: 100
+                    minDonationAmount: 10
+                  expiresAt: "2024-06-01T00:00:00Z"
+                - factor: 1.2
+                  condition:
+                    minDonationAmount: 50
+      responses:
+        "200":
+          description: Multipliers saved
+          content:
+            application/json:
+              example:
+                success: true
+                message: Multipliers updated for campaign clxcamp001
+                data:
+                  campaignId: clxcamp001
+                  multipliers:
+                    - factor: 1.5
+                      condition:
+                        maxDonorRank: 100
+                        minDonationAmount: 10
+                      expiresAt: "2024-06-01T00:00:00Z"
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/campaigns/{id}/reports:
+    post:
+      tags: [Campaigns, Moderation]
+      summary: Report a campaign for fraud or policy violation
+      description: |
+        Submits a fraud/abuse report against a campaign. Accumulating reports may trigger
+        automatic suspension (configurable via `MODERATION_FRAUD_REPORT_THRESHOLD`).
+        **Auth:** Bearer JWT — all roles.
+        **Rate limit:** 5 req / hour per user.
+      operationId: reportCampaign
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type:
+                  $ref: '#/components/schemas/FraudReportType'
+                details:
+                  type: string
+                  example: This campaign appears to be impersonating a legitimate NGO
+            example:
+              type: IMPERSONATION
+              details: This campaign appears to be impersonating Hope Foundation Kenya
+      responses:
+        "201":
+          description: Report submitted
+          content:
+            application/json:
+              example:
+                success: true
+                message: Report submitted successfully
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/campaigns/{id}/appeals:
+    post:
+      tags: [Campaigns, Moderation]
+      summary: Submit an appeal for a suspended campaign
+      description: |
+        Campaign owner submits an appeal against a suspension.
+        **Auth:** Bearer JWT — campaign owner only.
+      operationId: submitAppeal
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  example: Our campaign is legitimate. Here is our registration certificate...
+                attachments:
+                  type: array
+                  items:
+                    type: string
+                    format: uri
+            example:
+              message: We are a registered NGO. The report was made in error.
+              attachments:
+                - https://storage.aidlink.org/docs/cert-abc123.pdf
+      responses:
+        "201":
+          description: Appeal submitted
+          content:
+            application/json:
+              example:
+                success: true
+                message: Appeal submitted successfully
+                data:
+                  id: clxapp001
+                  status: OPEN
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    get:
+      tags: [Campaigns, Moderation]
+      summary: List appeals for a campaign
+      description: |
+        Returns all appeals filed against suspensions for this campaign.
+        **Auth:** Bearer JWT — campaign owner or ADMIN.
+      operationId: getCampaignAppeals
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Appeals retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  - id: clxapp001
+                    status: OPEN
+                    message: We are a registered NGO...
+                    createdAt: "2024-03-15T10:30:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ==========================================================================
+  # DONATIONS
+  # ==========================================================================
+
+  /api/v1/donations:
+    post:
+      tags: [Donations]
+      summary: Create a donation
+      description: |
+        Initiates a donation to a campaign. The donation starts in `PENDING` status until
+        confirmed on-chain via `POST /api/v1/donations/:id/confirm`.
+        **Auth:** Bearer JWT — role: DONOR or ADMIN.
+        **Rate limit:** 10 req / min per user.
+      operationId: createDonation
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [campaignId, amount]
+              properties:
+                campaignId:
+                  type: string
+                  example: clxcamp001
+                amount:
+                  type: number
+                  format: float
+                  minimum: 0.01
+                  example: 250
+                currency:
+                  type: string
+                  default: XLM
+                  example: XLM
+                fromWallet:
+                  type: string
+                  example: GBKZRTIOAHMXIJKUQPMKLF6JYLXV2PJHFGXZQ4LQXSWM5YIZD3HMGKQ
+                toWallet:
+                  type: string
+                  example: GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGKZM9OSGLPQOAKXQ5XRGT
+                memo:
+                  type: string
+                  maxLength: 100
+                  example: Donation from John
+                isAnonymous:
+                  type: boolean
+                  default: false
+                donorMessage:
+                  type: string
+                  example: Wishing the families well!
+            example:
+              campaignId: clxcamp001
+              amount: 250
+              currency: XLM
+              fromWallet: GBKZRTIOAHMXIJKUQPMKLF6JYLXV2PJHFGXZQ4LQXSWM5YIZD3HMGKQ
+              toWallet: GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGKZM9OSGLPQOAKXQ5XRGT
+              isAnonymous: false
+              donorMessage: Wishing the families well!
+      responses:
+        "201":
+          description: Donation created — awaiting blockchain confirmation
+          content:
+            application/json:
+              example:
+                success: true
+                message: Donation created. Please confirm the blockchain transaction.
+                data:
+                  id: clxdon001
+                  campaignId: clxcamp001
+                  amount: "250.00"
+                  currency: XLM
+                  status: PENDING
+                  matchedFunds: "75.00"
+                  createdAt: "2024-03-15T10:30:00Z"
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          description: Campaign not found or not ACTIVE
+          content:
+            application/json:
+              example:
+                success: false
+                error: Campaign not found or not accepting donations
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+    get:
+      tags: [Donations]
+      summary: List all donations
+      description: |
+        Paginated list of donations. Only ADMIN and ORGANIZATION roles may list all
+        donations across users.
+        **Auth:** Bearer JWT — role: ADMIN or ORGANIZATION.
+      operationId: getDonations
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: campaignId
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/DonationStatus'
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Donations retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  donations:
+                    - id: clxdon001
+                      campaignId: clxcamp001
+                      amount: "250.00"
+                      currency: XLM
+                      status: CONFIRMED
+                      matchedFunds: "75.00"
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 320
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/donations/my-donations:
+    get:
+      tags: [Donations]
+      summary: Get current user's donations
+      description: Returns all donations made by the authenticated user.
+      operationId: getMyDonations
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: User's donations retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  donations:
+                    - id: clxdon001
+                      campaignId: clxcamp001
+                      amount: "250.00"
+                      status: CONFIRMED
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 5
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/donations/campaign/{campaignId}:
+    get:
+      tags: [Donations]
+      summary: Get donations for a campaign
+      description: Returns all donations made to a specific campaign.
+      operationId: getCampaignDonations
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: campaignId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: Campaign donations retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  donations:
+                    - id: clxdon001
+                      amount: "250.00"
+                      currency: XLM
+                      status: CONFIRMED
+                      isAnonymous: false
+                      donorMessage: Wishing the families well!
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/donations/{id}:
+    get:
+      tags: [Donations]
+      summary: Get donation by ID
+      operationId: getDonationById
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Donation retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxdon001
+                  campaignId: clxcamp001
+                  amount: "250.00"
+                  currency: XLM
+                  status: CONFIRMED
+                  blockchainTxHash: a3f8c2d1e4b567890abcdef1234567890abcdef1234567890abcdef1234567890
+                  matchedFunds: "75.00"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/donations/{id}/confirm:
+    post:
+      tags: [Donations]
+      summary: Confirm donation with blockchain transaction
+      description: |
+        Links a pending donation to a confirmed Stellar transaction hash. The server
+        verifies the tx on-chain before marking the donation `CONFIRMED`.
+        **Auth:** Bearer JWT — donation owner.
+      operationId: confirmDonation
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [txHash]
+              properties:
+                txHash:
+                  type: string
+                  description: Stellar transaction hash (64-char hex)
+                  example: a3f8c2d1e4b567890abcdef1234567890abcdef1234567890abcdef1234567890
+            example:
+              txHash: a3f8c2d1e4b567890abcdef1234567890abcdef1234567890abcdef1234567890
+      responses:
+        "200":
+          description: Donation confirmed on-chain
+          content:
+            application/json:
+              example:
+                success: true
+                message: Donation confirmed on blockchain
+                data:
+                  id: clxdon001
+                  status: CONFIRMED
+                  blockchainTxHash: a3f8c2d1e4b567890abcdef1234567890abcdef1234567890abcdef1234567890
+                  matchedFunds: "75.00"
+        "400":
+          description: Transaction hash invalid or already used
+          content:
+            application/json:
+              example:
+                success: false
+                error: Transaction hash already associated with another donation
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/donations/{id}/refund:
+    post:
+      tags: [Donations]
+      summary: Refund a donation
+      description: |
+        Initiates a refund for a confirmed donation. Only ADMIN or the donor (for their own
+        donation) may request a refund.
+        **Auth:** Bearer JWT — role: ADMIN or donation owner.
+      operationId: refundDonation
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Refund initiated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Refund initiated
+                data:
+                  id: clxdon001
+                  status: REFUNDED
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: Donation is not in a refundable state
+          content:
+            application/json:
+              example:
+                success: false
+                error: Only CONFIRMED donations can be refunded
+
+  # ==========================================================================
+  # BENEFICIARIES
+  # ==========================================================================
+
+  /api/v1/beneficiaries:
+    post:
+      tags: [Beneficiaries]
+      summary: Create a beneficiary profile
+      description: |
+        Registers a new beneficiary. The profile starts in `PENDING` status until verified.
+        **Auth:** Bearer JWT — role: BENEFICIARY.
+      operationId: createBeneficiary
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - firstName
+                - lastName
+                - dateOfBirth
+                - gender
+                - nationality
+                - idDocumentType
+                - idDocumentNumber
+                - phoneNumber
+                - address
+                - city
+                - country
+                - familySize
+              properties:
+                firstName:
+                  type: string
+                  example: Amina
+                lastName:
+                  type: string
+                  example: Hassan
+                dateOfBirth:
+                  type: string
+                  format: date-time
+                  example: "1988-06-15T00:00:00Z"
+                gender:
+                  type: string
+                  example: FEMALE
+                nationality:
+                  type: string
+                  example: Kenyan
+                idDocumentType:
+                  type: string
+                  example: NATIONAL_ID
+                idDocumentNumber:
+                  type: string
+                  example: "12345678"
+                phoneNumber:
+                  type: string
+                  example: "+254712345678"
+                address:
+                  type: string
+                  example: 12 Kibera Drive
+                city:
+                  type: string
+                  example: Nairobi
+                country:
+                  type: string
+                  example: Kenya
+                coordinates:
+                  type: string
+                  description: JSON string e.g. {"lat":-1.2921,"lng":36.8219}
+                familySize:
+                  type: integer
+                  minimum: 1
+                  example: 4
+                needsAssessment:
+                  type: string
+                  example: Clean water, food, healthcare
+            example:
+              firstName: Amina
+              lastName: Hassan
+              dateOfBirth: "1988-06-15T00:00:00Z"
+              gender: FEMALE
+              nationality: Kenyan
+              idDocumentType: NATIONAL_ID
+              idDocumentNumber: "12345678"
+              phoneNumber: "+254712345678"
+              address: 12 Kibera Drive
+              city: Nairobi
+              country: Kenya
+              familySize: 4
+              needsAssessment: Clean water, food, healthcare
+      responses:
+        "201":
+          description: Beneficiary profile created
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxben001
+                  firstName: Amina
+                  lastName: Hassan
+                  status: PENDING
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "409":
+          description: Beneficiary profile already exists for this user
+          content:
+            application/json:
+              example:
+                success: false
+                error: Beneficiary profile already exists
+
+    get:
+      tags: [Beneficiaries]
+      summary: List beneficiaries
+      description: |
+        Returns a paginated list of beneficiaries.
+        **Auth:** Bearer JWT — role: ADMIN or VERIFIER.
+      operationId: getBeneficiaries
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/BeneficiaryStatus'
+        - name: country
+          in: query
+          schema:
+            type: string
+        - name: city
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Beneficiaries retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  beneficiaries:
+                    - id: clxben001
+                      firstName: Amina
+                      lastName: Hassan
+                      status: PENDING
+                      country: Kenya
+                      city: Nairobi
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 84
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/beneficiaries/my-profile:
+    get:
+      tags: [Beneficiaries]
+      summary: Get current user's beneficiary profile
+      description: Returns the beneficiary profile linked to the authenticated user.
+      operationId: getMyBeneficiaryProfile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Beneficiary profile retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxben001
+                  firstName: Amina
+                  lastName: Hassan
+                  status: VERIFIED
+                  riskScore: 5
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          description: No beneficiary profile for this user
+          content:
+            application/json:
+              example:
+                success: false
+                error: Beneficiary profile not found
+
+  /api/v1/beneficiaries/{id}:
+    get:
+      tags: [Beneficiaries]
+      summary: Get beneficiary by ID
+      operationId: getBeneficiaryById
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Beneficiary retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxben001
+                  firstName: Amina
+                  lastName: Hassan
+                  status: VERIFIED
+                  riskScore: 5
+                  country: Kenya
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Beneficiaries]
+      summary: Update beneficiary profile
+      description: |
+        Partial update of a beneficiary profile.
+        **Auth:** Bearer JWT — role: ADMIN, VERIFIER, or beneficiary (own profile).
+      operationId: updateBeneficiary
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                firstName:
+                  type: string
+                lastName:
+                  type: string
+                phoneNumber:
+                  type: string
+                address:
+                  type: string
+                city:
+                  type: string
+                country:
+                  type: string
+                needsAssessment:
+                  type: string
+      responses:
+        "200":
+          description: Beneficiary updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Beneficiary profile updated
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/beneficiaries/{id}/status:
+    patch:
+      tags: [Beneficiaries]
+      summary: Update beneficiary status
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN or VERIFIER.
+      operationId: updateBeneficiaryStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: '#/components/schemas/BeneficiaryStatus'
+            example:
+              status: VERIFIED
+      responses:
+        "200":
+          description: Status updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Beneficiary status updated to VERIFIED
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/beneficiaries/{id}/risk-score:
+    post:
+      tags: [Beneficiaries]
+      summary: Calculate risk score for a beneficiary
+      description: |
+        Runs the fraud-detection algorithm and updates the beneficiary's `riskScore`.
+        **Auth:** Bearer JWT — role: ADMIN or VERIFIER.
+      operationId: calculateRiskScore
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Risk score calculated
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  beneficiaryId: clxben001
+                  riskScore: 15
+                  riskLevel: LOW
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/beneficiaries/{id}/kyc:
+    post:
+      tags: [Beneficiaries]
+      summary: Submit KYC documents
+      description: |
+        Submits identity documents for KYC review. The submission starts in `PENDING` status.
+        **Auth:** Bearer JWT — role: BENEFICIARY (own profile).
+      operationId: submitKYC
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [documentType, documentUrl, submissionType]
+              properties:
+                documentType:
+                  type: string
+                  example: NATIONAL_ID
+                documentUrl:
+                  type: string
+                  format: uri
+                  example: https://storage.aidlink.org/kyc/doc-abc123.jpg
+                submissionType:
+                  type: string
+                  example: INDIVIDUAL
+                selfieUrl:
+                  type: string
+                  format: uri
+                  example: https://storage.aidlink.org/kyc/selfie-abc123.jpg
+                additionalDocs:
+                  type: object
+            example:
+              documentType: NATIONAL_ID
+              documentUrl: https://storage.aidlink.org/kyc/doc-abc123.jpg
+              submissionType: INDIVIDUAL
+              selfieUrl: https://storage.aidlink.org/kyc/selfie-abc123.jpg
+      responses:
+        "201":
+          description: KYC submission created
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxkyc001
+                  status: PENDING
+                  documentType: NATIONAL_ID
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/beneficiaries/kyc/{submissionId}/review:
+    patch:
+      tags: [Beneficiaries]
+      summary: Review a KYC submission
+      description: |
+        Approves or rejects a KYC submission.
+        **Auth:** Bearer JWT — role: ADMIN or VERIFIER.
+      operationId: reviewKYC
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: submissionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: '#/components/schemas/KYCStatus'
+                reviewNotes:
+                  type: string
+                  example: Document is clear and matches provided information
+            example:
+              status: APPROVED
+              reviewNotes: Document is clear and matches provided information
+      responses:
+        "200":
+          description: KYC submission reviewed
+          content:
+            application/json:
+              example:
+                success: true
+                message: KYC submission APPROVED
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ==========================================================================
+  # DISTRIBUTIONS
+  # ==========================================================================
+
+  /api/v1/distributions:
+    post:
+      tags: [Distributions]
+      summary: Create a distribution
+      description: |
+        Initiates disbursement of funds from a campaign to a beneficiary.
+        **Auth:** Bearer JWT — role: ORGANIZATION or ADMIN.
+        **Rate limit:** 5 req / min per user.
+      operationId: createDistribution
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [campaignId, beneficiaryId, amount, method]
+              properties:
+                campaignId:
+                  type: string
+                  example: clxcamp001
+                beneficiaryId:
+                  type: string
+                  example: clxben001
+                amount:
+                  type: number
+                  format: float
+                  minimum: 0.01
+                  example: 500
+                currency:
+                  type: string
+                  default: XLM
+                  example: XLM
+                method:
+                  $ref: '#/components/schemas/DistributionMethod'
+                notes:
+                  type: string
+                  example: Monthly water fund disbursement
+            example:
+              campaignId: clxcamp001
+              beneficiaryId: clxben001
+              amount: 500
+              currency: XLM
+              method: CRYPTO
+              notes: Monthly water fund disbursement
+      responses:
+        "201":
+          description: Distribution created
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxdist001
+                  campaignId: clxcamp001
+                  beneficiaryId: clxben001
+                  amount: "500.00"
+                  currency: XLM
+                  method: CRYPTO
+                  status: PENDING
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+    get:
+      tags: [Distributions]
+      summary: List all distributions
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN or ORGANIZATION.
+      operationId: getDistributions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/DistributionStatus'
+        - name: campaignId
+          in: query
+          schema:
+            type: string
+        - name: beneficiaryId
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Distributions retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  distributions:
+                    - id: clxdist001
+                      amount: "500.00"
+                      status: COMPLETED
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 48
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/distributions/campaign/{campaignId}:
+    get:
+      tags: [Distributions]
+      summary: Get distributions for a campaign
+      operationId: getCampaignDistributions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: campaignId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: Campaign distributions retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  distributions:
+                    - id: clxdist001
+                      beneficiaryId: clxben001
+                      amount: "500.00"
+                      method: CRYPTO
+                      status: COMPLETED
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/distributions/beneficiary/{beneficiaryId}:
+    get:
+      tags: [Distributions]
+      summary: Get distributions for a beneficiary
+      operationId: getBeneficiaryDistributions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: beneficiaryId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: Beneficiary distributions retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  distributions:
+                    - id: clxdist001
+                      campaignId: clxcamp001
+                      amount: "500.00"
+                      method: CRYPTO
+                      status: COMPLETED
+                      distributedAt: "2024-03-20T14:00:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/distributions/{id}/confirm:
+    post:
+      tags: [Distributions]
+      summary: Confirm distribution with blockchain transaction
+      description: |
+        Links a distribution to a confirmed Stellar tx hash.
+        **Auth:** Bearer JWT — role: ORGANIZATION or ADMIN.
+      operationId: confirmDistribution
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [txHash]
+              properties:
+                txHash:
+                  type: string
+                  example: b4e9d3f2a5c678901bcdef2345678901bcdef2345678901bcdef2345678901bc
+            example:
+              txHash: b4e9d3f2a5c678901bcdef2345678901bcdef2345678901bcdef2345678901bc
+      responses:
+        "200":
+          description: Distribution confirmed on-chain
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxdist001
+                  status: COMPLETED
+                  blockchainTxHash: b4e9d3f2a5c678901bcdef2345678901bcdef2345678901bcdef2345678901bc
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/distributions/{id}/status:
+    patch:
+      tags: [Distributions]
+      summary: Update distribution status
+      description: |
+        **Auth:** Bearer JWT — role: ORGANIZATION or ADMIN.
+      operationId: updateDistributionStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: '#/components/schemas/DistributionStatus'
+            example:
+              status: IN_PROGRESS
+      responses:
+        "200":
+          description: Status updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Distribution status updated to IN_PROGRESS
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/distributions/{id}/proof:
+    post:
+      tags: [Distributions]
+      summary: Add proof document to distribution
+      description: |
+        Attaches a proof-of-delivery URL (uploaded separately via /upload).
+        **Auth:** Bearer JWT — role: ORGANIZATION or ADMIN.
+      operationId: addProofDocument
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proofDocumentUrl]
+              properties:
+                proofDocumentUrl:
+                  type: string
+                  format: uri
+                  example: https://storage.aidlink.org/proofs/dist001-proof.pdf
+            example:
+              proofDocumentUrl: https://storage.aidlink.org/proofs/dist001-proof.pdf
+      responses:
+        "200":
+          description: Proof document attached
+          content:
+            application/json:
+              example:
+                success: true
+                message: Proof document added
+                data:
+                  id: clxdist001
+                  proofDocumentUrl: https://storage.aidlink.org/proofs/dist001-proof.pdf
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ==========================================================================
+  # NOTIFICATIONS
+  # ==========================================================================
+
+  /api/v1/notifications:
+    post:
+      tags: [Notifications]
+      summary: Create a notification
+      description: |
+        Creates a notification for the authenticated user.
+        **Auth:** Bearer JWT — all roles.
+        **Rate limit:** 10 req / min per user.
+      operationId: createNotification
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, title, message]
+              properties:
+                type:
+                  $ref: '#/components/schemas/NotificationType'
+                title:
+                  type: string
+                  example: Donation Received
+                message:
+                  type: string
+                  example: Your campaign received a donation of 250 XLM
+                metadata:
+                  type: object
+            example:
+              type: DONATION_RECEIVED
+              title: Donation Received
+              message: Your campaign received a donation of 250 XLM
+              metadata:
+                campaignId: clxcamp001
+                donationId: clxdon001
+      responses:
+        "201":
+          description: Notification created
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxnotif001
+                  type: DONATION_RECEIVED
+                  title: Donation Received
+                  status: UNREAD
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+    get:
+      tags: [Notifications]
+      summary: Get current user's notifications
+      operationId: getUserNotifications
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [UNREAD, READ, ARCHIVED]
+      responses:
+        "200":
+          description: Notifications retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  notifications:
+                    - id: clxnotif001
+                      type: DONATION_RECEIVED
+                      title: Donation Received
+                      message: Your campaign received a donation of 250 XLM
+                      status: UNREAD
+                      createdAt: "2024-03-15T10:30:00Z"
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 12
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: Get unread notification count
+      operationId: getUnreadCount
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Unread count retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  count: 5
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/read-all:
+    patch:
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      operationId: markAllAsRead
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: All notifications marked as read
+          content:
+            application/json:
+              example:
+                success: true
+                message: All notifications marked as read
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/donation:
+    post:
+      tags: [Notifications]
+      summary: Send a donation received notification
+      description: Sends a pre-formatted notification for a received donation.
+      operationId: sendDonationNotification
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [campaignTitle, amount]
+              properties:
+                campaignTitle:
+                  type: string
+                  example: Clean Water for Northern Kenya
+                amount:
+                  type: number
+                  example: 250
+            example:
+              campaignTitle: Clean Water for Northern Kenya
+              amount: 250
+      responses:
+        "200":
+          description: Notification sent
+          content:
+            application/json:
+              example:
+                success: true
+                message: Donation notification sent
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/campaign-update:
+    post:
+      tags: [Notifications]
+      summary: Send a campaign update notification
+      operationId: sendCampaignUpdateNotification
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [campaignTitle, update]
+              properties:
+                campaignTitle:
+                  type: string
+                  example: Clean Water for Northern Kenya
+                update:
+                  type: string
+                  example: First borehole successfully drilled!
+            example:
+              campaignTitle: Clean Water for Northern Kenya
+              update: First borehole successfully drilled!
+      responses:
+        "200":
+          description: Notification sent
+          content:
+            application/json:
+              example:
+                success: true
+                message: Campaign update notification sent
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/distribution:
+    post:
+      tags: [Notifications]
+      summary: Send a distribution notification
+      operationId: sendDistributionNotification
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: number
+                  example: 500
+            example:
+              amount: 500
+      responses:
+        "200":
+          description: Notification sent
+          content:
+            application/json:
+              example:
+                success: true
+                message: Distribution notification sent
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/{id}/read:
+    patch:
+      tags: [Notifications]
+      summary: Mark a notification as read
+      operationId: markAsRead
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Notification marked as read
+          content:
+            application/json:
+              example:
+                success: true
+                message: Notification marked as read
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/notifications/{id}:
+    delete:
+      tags: [Notifications]
+      summary: Delete a notification
+      operationId: deleteNotification
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Notification deleted
+          content:
+            application/json:
+              example:
+                success: true
+                message: Notification deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ==========================================================================
+  # ADMIN
+  # ==========================================================================
+
+  /api/v1/admin/dashboard:
+    get:
+      tags: [Admin]
+      summary: Get dashboard statistics
+      description: |
+        Returns platform-wide summary stats.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: getDashboardStats
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Dashboard stats retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  totalUsers: 1240
+                  activeCampaigns: 34
+                  totalDonated: "2345000.00"
+                  totalDistributed: "1890000.00"
+                  pendingKYC: 12
+                  openAppeals: 3
+                  suspendedCampaigns: 5
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/activity:
+    get:
+      tags: [Admin]
+      summary: Get recent platform activity
+      description: |
+        Returns a time-ordered feed of recent actions across the platform.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: getRecentActivity
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: Activity retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  activities:
+                    - action: DONATION_MADE
+                      entityType: Donation
+                      entityId: clxdon001
+                      createdAt: "2024-03-15T10:30:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/users:
+    get:
+      tags: [Admin]
+      summary: Get all users
+      description: |
+        Paginated, filterable list of all users.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: getAllUsers
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: role
+          in: query
+          schema:
+            $ref: '#/components/schemas/Role'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/UserStatus'
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Users retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  users:
+                    - id: clx1a2b3c4d5e6f7g8h9
+                      email: donor@example.com
+                      role: DONOR
+                      status: ACTIVE
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 1240
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/users/{id}/status:
+    patch:
+      tags: [Admin]
+      summary: Update user status
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: updateUserStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: '#/components/schemas/UserStatus'
+            example:
+              status: SUSPENDED
+      responses:
+        "200":
+          description: User status updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: User status updated to SUSPENDED
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/users/{id}/role:
+    patch:
+      tags: [Admin]
+      summary: Update user role
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: updateUserRole
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  $ref: '#/components/schemas/Role'
+            example:
+              role: VERIFIER
+      responses:
+        "200":
+          description: Role updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: User role updated to VERIFIER
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/audit-logs:
+    get:
+      tags: [Admin]
+      summary: Get audit logs
+      description: |
+        Filterable, paginated audit log of all platform actions.
+        **Auth:** Bearer JWT — role: ADMIN or AUDITOR.
+      operationId: getAuditLogs
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: userId
+          in: query
+          schema:
+            type: string
+        - name: action
+          in: query
+          schema:
+            type: string
+            example: DONATION_MADE
+        - name: entityType
+          in: query
+          schema:
+            type: string
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Audit logs retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  logs:
+                    - id: clxlog001
+                      action: DONATION_MADE
+                      entityType: Donation
+                      entityId: clxdon001
+                      userId: clx1a2b3c4d5e6f7g8h9
+                      ipAddress: 203.0.113.42
+                      createdAt: "2024-03-15T10:30:00Z"
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 5420
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/health:
+    get:
+      tags: [Admin]
+      summary: Get system health status
+      description: |
+        Returns connectivity status of DB, Redis, and blockchain indexer.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: getSystemHealth
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Health status retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  database: healthy
+                  redis: healthy
+                  blockchainIndexer: running
+                  lastIndexedBlock: "50234891"
+                  uptime: 86400
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/campaigns/{id}/suspend:
+    post:
+      tags: [Admin, Moderation]
+      summary: Suspend a campaign
+      description: |
+        Records an immutable suspension event with a reason code.
+        The campaign status is set to `SUSPENDED`.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: suspendCampaign
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reasonCode]
+              properties:
+                reasonCode:
+                  type: string
+                  enum: [LOW_VERIFICATION, FRAUD_REPORTS, POLICY_VIOLATION, MANUAL_REVIEW, OTHER]
+                reasonText:
+                  type: string
+                  example: Multiple credible fraud reports received
+                evidence:
+                  type: object
+            example:
+              reasonCode: FRAUD_REPORTS
+              reasonText: Multiple credible fraud reports received within 24 hours
+      responses:
+        "200":
+          description: Campaign suspended
+          content:
+            application/json:
+              example:
+                success: true
+                message: Campaign suspended
+                data:
+                  suspensionId: clxsusp001
+                  campaignId: clxcamp001
+                  reasonCode: FRAUD_REPORTS
+                  active: true
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: Campaign already suspended
+          content:
+            application/json:
+              example:
+                success: false
+                error: Campaign is already suspended
+
+  /api/v1/admin/campaigns/{id}/reinstate:
+    post:
+      tags: [Admin, Moderation]
+      summary: Reinstate a suspended campaign
+      description: |
+        Lifts the active suspension and sets campaign status back to `ACTIVE`.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: reinstateCampaign
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                liftNotes:
+                  type: string
+                  example: Appeal approved, campaign verified legitimate
+            example:
+              liftNotes: Appeal approved after document review
+      responses:
+        "200":
+          description: Campaign reinstated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Campaign reinstated
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: Campaign is not currently suspended
+          content:
+            application/json:
+              example:
+                success: false
+                error: No active suspension found
+
+  /api/v1/admin/campaigns/{id}/suspensions:
+    get:
+      tags: [Admin, Moderation]
+      summary: List suspensions for a campaign
+      description: |
+        Returns the full suspension history (with linked appeals) for a campaign.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: getSuspensions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Suspensions retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  - id: clxsusp001
+                    source: ADMIN
+                    reasonCode: FRAUD_REPORTS
+                    active: false
+                    liftedAt: "2024-03-18T09:00:00Z"
+                    appeals:
+                      - id: clxapp001
+                        status: APPROVED
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/appeals:
+    get:
+      tags: [Admin, Moderation]
+      summary: List all appeals
+      description: |
+        Filterable list of appeals across all campaigns.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: listAppeals
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/AppealStatus'
+      responses:
+        "200":
+          description: Appeals retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  appeals:
+                    - id: clxapp001
+                      campaignId: clxcamp001
+                      status: OPEN
+                      createdAt: "2024-03-16T08:00:00Z"
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 3
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/appeals/{id}/resolve:
+    post:
+      tags: [Admin, Moderation]
+      summary: Resolve an appeal
+      description: |
+        Approves or denies an appeal. Approving automatically reinstates the campaign.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: resolveAppeal
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [APPROVED, DENIED]
+                adminNotes:
+                  type: string
+                  example: Documents verified — reinstating campaign
+            example:
+              decision: APPROVED
+              adminNotes: Documents verified — reinstating campaign
+      responses:
+        "200":
+          description: Appeal resolved
+          content:
+            application/json:
+              example:
+                success: true
+                message: Appeal APPROVED — campaign reinstated
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/organizations/{id}/verification/approve:
+    post:
+      tags: [Admin, Organizations]
+      summary: Approve organization verification
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: approveVerification
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                notes:
+                  type: string
+                  example: All documents verified and in order
+      responses:
+        "200":
+          description: Verification approved
+          content:
+            application/json:
+              example:
+                success: true
+                message: Organization verification approved
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/organizations/{id}/verification/reject:
+    post:
+      tags: [Admin, Organizations]
+      summary: Reject organization verification
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: rejectVerification
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  example: Provided documents do not match registration records
+            example:
+              reason: Provided documents do not match registration records
+      responses:
+        "200":
+          description: Verification rejected
+          content:
+            application/json:
+              example:
+                success: true
+                message: Organization verification rejected
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/organizations/{id}/verification/request-more-info:
+    post:
+      tags: [Admin, Organizations]
+      summary: Request more information from an organization
+      description: |
+        Sets verification status to `MORE_INFO_REQUESTED` and notifies the organization.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: requestMoreInfo
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  example: Please provide a certified copy of your registration certificate
+            example:
+              reason: Please provide a certified copy of your registration certificate
+      responses:
+        "200":
+          description: More info requested
+          content:
+            application/json:
+              example:
+                success: true
+                message: More information requested from organization
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ==========================================================================
+  # ORGANIZATIONS
+  # ==========================================================================
+
+  /api/v1/organizations:
+    post:
+      tags: [Organizations]
+      summary: Create an organization
+      description: |
+        Registers a new NGO/organization profile under the authenticated user.
+        **Auth:** Bearer JWT — role: ORGANIZATION.
+      operationId: createOrganization
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: Hope Foundation
+                email:
+                  type: string
+                  format: email
+                country:
+                  type: string
+                  example: Kenya
+                description:
+                  type: string
+                website:
+                  type: string
+                  format: uri
+                registrationNumber:
+                  type: string
+                taxId:
+                  type: string
+            example:
+              name: Hope Foundation
+              email: info@hopefoundation.ke
+              country: Kenya
+              description: Providing clean water and food security across East Africa
+              website: https://hopefoundation.ke
+              registrationNumber: NGO/2019/001234
+      responses:
+        "201":
+          description: Organization created
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clx2org0001
+                  name: Hope Foundation
+                  status: PENDING
+                  verificationStatus: UNVERIFIED
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "409":
+          description: Organization already exists for this user
+          content:
+            application/json:
+              example:
+                success: false
+                error: Organization already registered for this account
+
+    get:
+      tags: [Organizations]
+      summary: List organizations
+      description: |
+        Paginated list of organizations.
+        **Auth:** Bearer JWT — all roles.
+      operationId: getOrganizations
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/OrganizationStatus'
+        - name: verificationStatus
+          in: query
+          schema:
+            $ref: '#/components/schemas/OrganizationVerificationStatus'
+      responses:
+        "200":
+          description: Organizations retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  organizations:
+                    - id: clx2org0001
+                      name: Hope Foundation
+                      country: Kenya
+                      status: APPROVED
+                      verificationStatus: VERIFIED
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 38
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/organizations/{id}:
+    get:
+      tags: [Organizations]
+      summary: Get organization by ID
+      operationId: getOrganizationById
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Organization retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clx2org0001
+                  name: Hope Foundation
+                  country: Kenya
+                  status: APPROVED
+                  verificationStatus: VERIFIED
+                  verifiedAt: "2024-01-10T00:00:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Organizations]
+      summary: Update organization
+      description: |
+        **Auth:** Bearer JWT — organization owner or ADMIN.
+      operationId: updateOrganization
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                website:
+                  type: string
+                  format: uri
+                country:
+                  type: string
+      responses:
+        "200":
+          description: Organization updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Organization updated
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Organizations]
+      summary: Delete organization
+      description: |
+        Soft-deletes the organization.
+        **Auth:** Bearer JWT — organization owner or ADMIN.
+      operationId: deleteOrganization
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Organization deleted
+          content:
+            application/json:
+              example:
+                success: true
+                message: Organization deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/organizations/{id}/bank-accounts:
+    post:
+      tags: [Organizations]
+      summary: Add a bank account
+      description: |
+        **Auth:** Bearer JWT — organization owner or ADMIN.
+      operationId: addBankAccount
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bankName, accountNumber, routingNumber, accountType]
+              properties:
+                bankName:
+                  type: string
+                  example: Equity Bank Kenya
+                accountHolderName:
+                  type: string
+                  example: Hope Foundation
+                accountNumber:
+                  type: string
+                  example: "1234567890"
+                routingNumber:
+                  type: string
+                  example: "026009593"
+                iban:
+                  type: string
+                accountType:
+                  type: string
+                  example: CHECKING
+                currency:
+                  type: string
+                  default: USD
+                country:
+                  type: string
+                  example: Kenya
+                isPrimary:
+                  type: boolean
+                  default: false
+            example:
+              bankName: Equity Bank Kenya
+              accountHolderName: Hope Foundation
+              accountNumber: "1234567890"
+              routingNumber: "026009593"
+              accountType: CHECKING
+              currency: USD
+              country: Kenya
+              isPrimary: true
+      responses:
+        "201":
+          description: Bank account added
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxbank001
+                  bankName: Equity Bank Kenya
+                  verificationStatus: UNVERIFIED
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    get:
+      tags: [Organizations]
+      summary: List bank accounts
+      operationId: listBankAccounts
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bank accounts retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  - id: clxbank001
+                    bankName: Equity Bank Kenya
+                    accountType: CHECKING
+                    verificationStatus: VERIFIED
+                    isPrimary: true
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/organizations/{id}/bank-accounts/{accountId}:
+    get:
+      tags: [Organizations]
+      summary: Get a bank account
+      operationId: getBankAccount
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bank account retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxbank001
+                  bankName: Equity Bank Kenya
+                  accountType: CHECKING
+                  verificationStatus: VERIFIED
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Organizations]
+      summary: Update a bank account
+      operationId: updateBankAccount
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                accountHolderName:
+                  type: string
+                isPrimary:
+                  type: boolean
+      responses:
+        "200":
+          description: Bank account updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Bank account updated
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Organizations]
+      summary: Delete (archive) a bank account
+      operationId: deleteBankAccount
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bank account archived
+          content:
+            application/json:
+              example:
+                success: true
+                message: Bank account archived
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/organizations/{id}/bank-accounts/{accountId}/verify:
+    post:
+      tags: [Organizations]
+      summary: Request bank account verification
+      description: Triggers the bank account verification workflow.
+      operationId: verifyBankAccount
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Verification requested
+          content:
+            application/json:
+              example:
+                success: true
+                message: Bank account verification requested
+                data:
+                  verificationStatus: PENDING_VERIFICATION
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/organizations/{id}/verification:
+    post:
+      tags: [Organizations]
+      summary: Submit organization verification documents
+      description: |
+        Submits legal/registration documents for admin review.
+        **Auth:** Bearer JWT — organization owner.
+      operationId: submitVerification
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [legalDocuments]
+              properties:
+                legalDocuments:
+                  type: object
+                  description: Map of document type to storage URL
+                  example:
+                    registrationCertificate: https://storage.aidlink.org/orgs/cert.pdf
+                    taxClearance: https://storage.aidlink.org/orgs/tax.pdf
+                representativeContact:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    email:
+                      type: string
+                    phone:
+                      type: string
+      responses:
+        "200":
+          description: Verification submitted
+          content:
+            application/json:
+              example:
+                success: true
+                message: Verification documents submitted for review
+                data:
+                  verificationStatus: PENDING_VERIFICATION
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    get:
+      tags: [Organizations]
+      summary: Get organization verification status
+      operationId: getVerification
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Verification status retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  verificationStatus: PENDING_VERIFICATION
+                  verificationRequestedAt: "2024-03-10T00:00:00Z"
+                  verificationNotes: Awaiting document review
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ==========================================================================
+  # ANALYTICS
+  # ==========================================================================
+
+  /api/v1/analytics/campaign/{campaignId}:
+    get:
+      tags: [Analytics]
+      summary: Get campaign analytics
+      description: |
+        Returns detailed metrics for a campaign including donation trends, donor counts,
+        matching stats, and milestone progress.
+        **Auth:** Bearer JWT — campaign owner, ORGANIZATION, or ADMIN.
+        **Rate limit:** 20 req / min per user.
+      operationId: getCampaignAnalytics
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: campaignId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: clxcamp001
+      responses:
+        "200":
+          description: Campaign analytics retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  campaignId: clxcamp001
+                  totalDonations: 47
+                  totalDonated: "12500.00"
+                  totalMatched: "3750.00"
+                  uniqueDonors: 41
+                  averageDonation: "265.96"
+                  donationsByDay:
+                    - date: "2024-03-15"
+                      amount: "1250.00"
+                      count: 5
+                  milestoneProgress:
+                    - id: clxmile001
+                      title: Drill first borehole
+                      targetAmount: "10000.00"
+                      achieved: true
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/analytics/donor:
+    get:
+      tags: [Analytics]
+      summary: Get donor analytics
+      description: |
+        Returns analytics for the authenticated donor.
+        **Auth:** Bearer JWT — role: DONOR or ADMIN.
+        **Rate limit:** 20 req / min per user.
+      operationId: getDonorAnalytics
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Donor analytics retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  totalDonated: "1250.00"
+                  donationCount: 7
+                  campaignsSupported: 4
+                  averageDonation: "178.57"
+                  donationsByMonth:
+                    - month: "2024-03"
+                      amount: "500.00"
+                      count: 2
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/analytics/organization/{organizationId}:
+    get:
+      tags: [Analytics]
+      summary: Get organization analytics
+      description: |
+        Returns aggregated analytics across all campaigns of an organization.
+        **Auth:** Bearer JWT — organization owner or ADMIN.
+        **Rate limit:** 20 req / min per user.
+      operationId: getOrganizationAnalytics
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: organizationId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Organization analytics retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  organizationId: clx2org0001
+                  activeCampaigns: 3
+                  totalCampaigns: 8
+                  totalRaised: "245000.00"
+                  totalDistributed: "198000.00"
+                  beneficiariesReached: 142
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/analytics/platform:
+    get:
+      tags: [Analytics]
+      summary: Get platform-wide analytics
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN or AUDITOR.
+        **Rate limit:** 20 req / min per user.
+      operationId: getPlatformAnalytics
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Platform analytics retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  totalUsers: 1240
+                  totalOrganizations: 38
+                  totalCampaigns: 156
+                  activeCampaigns: 34
+                  totalDonated: "2345000.00"
+                  totalDistributed: "1890000.00"
+                  beneficiariesReached: 3420
+                  blockchainTransactions: 5678
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/analytics/report/{reportType}:
+    post:
+      tags: [Analytics]
+      summary: Generate a report
+      description: |
+        Generates and returns (or queues) a custom report.
+        **Auth:** Bearer JWT — role: ORGANIZATION, ADMIN, or AUDITOR.
+        **Rate limit:** 20 req / min per user.
+      operationId: generateReport
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: reportType
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [campaign, donor, organization, platform, audit]
+          example: campaign
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entityId:
+                  type: string
+                  example: clxcamp001
+                fromDate:
+                  type: string
+                  format: date-time
+                toDate:
+                  type: string
+                  format: date-time
+                format:
+                  type: string
+                  enum: [json, csv, pdf]
+                  default: json
+            example:
+              entityId: clxcamp001
+              fromDate: "2024-01-01T00:00:00Z"
+              toDate: "2024-03-31T23:59:59Z"
+              format: csv
+      responses:
+        "200":
+          description: Report generated
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  reportId: clxrpt001
+                  status: COMPLETED
+                  downloadUrl: https://storage.aidlink.org/reports/rpt001.csv
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  # ==========================================================================
+  # SEARCH
+  # ==========================================================================
+
+  /api/v1/search/campaigns:
+    get:
+      tags: [Search]
+      summary: Search campaigns
+      description: |
+        Full-text and filtered search on campaigns.
+        **Auth:** Bearer JWT — all roles.
+        **Rate limit:** 30 req / min per user.
+      operationId: searchCampaigns
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          description: Full-text search query
+          schema:
+            type: string
+          example: clean water kenya
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/CampaignStatus'
+        - name: organizationId
+          in: query
+          schema:
+            type: string
+        - name: minTarget
+          in: query
+          schema:
+            type: number
+        - name: maxTarget
+          in: query
+          schema:
+            type: number
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/SortParam'
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  results:
+                    - id: clxcamp001
+                      title: Clean Water for Northern Kenya
+                      status: ACTIVE
+                      targetAmount: "50000.00"
+                      currentAmount: "12500.00"
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 8
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/search/donations:
+    get:
+      tags: [Search]
+      summary: Search donations
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN or ORGANIZATION.
+        **Rate limit:** 30 req / min per user.
+      operationId: searchDonations
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: campaignId
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/DonationStatus'
+        - name: minAmount
+          in: query
+          schema:
+            type: number
+        - name: maxAmount
+          in: query
+          schema:
+            type: number
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  results:
+                    - id: clxdon001
+                      campaignId: clxcamp001
+                      amount: "250.00"
+                      status: CONFIRMED
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 15
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/search/beneficiaries:
+    get:
+      tags: [Search]
+      summary: Search beneficiaries
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN or VERIFIER.
+        **Rate limit:** 30 req / min per user.
+      operationId: searchBeneficiaries
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+          example: Amina Kenya
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/BeneficiaryStatus'
+        - name: country
+          in: query
+          schema:
+            type: string
+        - name: city
+          in: query
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  results:
+                    - id: clxben001
+                      firstName: Amina
+                      lastName: Hassan
+                      status: VERIFIED
+                      country: Kenya
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 6
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/search/global:
+    get:
+      tags: [Search]
+      summary: Global search across all entities
+      description: |
+        Single query searches campaigns, donations, beneficiaries and organizations.
+        **Auth:** Bearer JWT — all roles.
+        **Rate limit:** 30 req / min per user.
+      operationId: globalSearch
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          example: Hope Foundation
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: Global search results
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  campaigns:
+                    - id: clxcamp001
+                      title: Clean Water for Northern Kenya
+                  organizations:
+                    - id: clx2org0001
+                      name: Hope Foundation
+                  beneficiaries: []
+                  donations: []
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/search/advanced:
+    get:
+      tags: [Search]
+      summary: Advanced search with entity type filtering
+      description: |
+        Allows filtering by entity type with multiple field criteria.
+        **Auth:** Bearer JWT — all roles.
+        **Rate limit:** 30 req / min per user.
+      operationId: advancedSearch
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          description: Entity type to search
+          schema:
+            type: string
+            enum: [campaign, donation, beneficiary, organization]
+        - name: filters
+          in: query
+          description: JSON-encoded filter object
+          schema:
+            type: string
+          example: '{"status":"ACTIVE","country":"Kenya"}'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/SortParam'
+      responses:
+        "200":
+          description: Advanced search results
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  results:
+                    - type: campaign
+                      id: clxcamp001
+                      title: Clean Water for Northern Kenya
+                      status: ACTIVE
+                  meta:
+                    page: 1
+                    limit: 20
+                    total: 5
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "429":
+          $ref: '#/components/responses/RateLimited'
+
+  # ==========================================================================
+  # UPLOAD
+  # ==========================================================================
+
+  /api/v1/upload/profile-picture:
+    post:
+      tags: [Upload]
+      summary: Upload organization profile picture
+      description: |
+        Accepts a JPEG/PNG/WEBP image (max 5 MB, min 200×200 px). Updates
+        `Organization.logo` on success.
+        **Auth:** Bearer JWT — organization owner.
+      operationId: uploadProfilePicture
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Profile picture uploaded
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  url: https://storage.aidlink.org/logos/org001-logo.webp
+                  organizationId: clx2org0001
+        "400":
+          description: No file provided or invalid type
+          content:
+            application/json:
+              example:
+                success: false
+                error: No file provided
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "413":
+          description: File exceeds 5 MB limit
+          content:
+            application/json:
+              example:
+                success: false
+                error: File too large — maximum is 5 MB
+        "415":
+          description: Unsupported file type
+          content:
+            application/json:
+              example:
+                success: false
+                error: Unsupported file type — use JPEG, PNG or WEBP
+        "422":
+          description: Image dimensions too small or corrupt
+          content:
+            application/json:
+              example:
+                success: false
+                error: Image must be at least 200x200 pixels
+
+  /api/v1/upload/kyc/{submissionId}/document:
+    post:
+      tags: [Upload]
+      summary: Upload a KYC identity document or selfie
+      description: |
+        Stores the file and updates the `KYCSubmission` record.
+        Use `?field=selfie` to update `selfieUrl` instead of `documentUrl`.
+        **Auth:** Bearer JWT — submission owner.
+      operationId: uploadKycDocument
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: submissionId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: field
+          in: query
+          description: Which field to update (default = document)
+          schema:
+            type: string
+            enum: [document, selfie]
+            default: document
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Document uploaded
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  url: https://storage.aidlink.org/kyc/doc-abc123.jpg
+                  submissionId: clxkyc001
+                  field: document
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          description: Not the submission owner
+          content:
+            application/json:
+              example:
+                success: false
+                error: Access denied
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/upload/campaign/{campaignId}/image:
+    post:
+      tags: [Upload]
+      summary: Upload a campaign cover image
+      description: |
+        Stores the image and updates `Campaign.imageUrl`. Minimum 400×300 px.
+        **Auth:** Bearer JWT — campaign owner or ADMIN.
+      operationId: uploadCampaignImage
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: campaignId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Image uploaded
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  url: https://storage.aidlink.org/campaigns/camp001-cover.webp
+                  campaignId: clxcamp001
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          description: Not the campaign owner
+          content:
+            application/json:
+              example:
+                success: false
+                error: Access denied
+        "422":
+          description: Image too small or corrupt
+          content:
+            application/json:
+              example:
+                success: false
+                error: Image must be at least 400x300 pixels
+
+  /api/v1/upload/distribution/{distributionId}/proof:
+    post:
+      tags: [Upload]
+      summary: Upload a distribution proof document
+      description: |
+        Stores a proof PDF/image and updates `Distribution.proofDocumentUrl`.
+        **Auth:** Bearer JWT — ORGANIZATION or ADMIN.
+      operationId: uploadDistributionProof
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: distributionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Proof uploaded
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  url: https://storage.aidlink.org/proofs/dist001-proof.pdf
+                  distributionId: clxdist001
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/upload/presigned:
+    post:
+      tags: [Upload]
+      summary: Get a pre-signed URL for direct large-file upload
+      description: |
+        Returns a time-limited pre-signed URL for uploading directly to cloud storage
+        (S3 / Azure Blob). Use this for files > 10 MB to avoid passing through the server.
+        **Auth:** Bearer JWT — all roles.
+      operationId: getPresignedUploadUrl
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [uploadType, entityId, mimeType]
+              properties:
+                uploadType:
+                  type: string
+                  enum: [profile-picture, kyc-document, campaign-image, distribution-proof]
+                  example: campaign-image
+                entityId:
+                  type: string
+                  example: clxcamp001
+                mimeType:
+                  type: string
+                  example: image/jpeg
+            example:
+              uploadType: campaign-image
+              entityId: clxcamp001
+              mimeType: image/jpeg
+      responses:
+        "200":
+          description: Pre-signed URL returned
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  uploadUrl: https://aidlink-storage.s3.amazonaws.com/campaigns/camp001-cover.jpg?X-Amz-Signature=...
+                  expiresAt: "2024-03-15T11:00:00Z"
+                  maxSizeBytes: 52428800
+                  allowedMimeTypes:
+                    - image/jpeg
+                    - image/png
+                    - image/webp
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  # ==========================================================================
+  # WEBHOOK SUBSCRIPTIONS (Admin management)
+  # ==========================================================================
+
+  /api/v1/admin/webhooks:
+    post:
+      tags: [Admin]
+      summary: Register a webhook subscription
+      description: |
+        Creates a new outbound webhook subscription. AidLink will POST event
+        payloads to the registered HTTPS URL and sign them with HMAC-SHA256.
+        **Auth:** Bearer JWT — role: ADMIN.
+        **Rate limit:** 30 req / min.
+      operationId: createWebhook
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url, secret, events]
+              properties:
+                name:
+                  type: string
+                  maxLength: 100
+                  example: Donation Alerts
+                url:
+                  type: string
+                  format: uri
+                  description: Must be HTTPS
+                  example: https://partner.example.com/hooks/aidlink
+                secret:
+                  type: string
+                  minLength: 16
+                  description: Shared secret used to sign payloads (min 16 chars)
+                  example: whsec_super_secret_key_1234567890ab
+                events:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                    enum:
+                      - DONATION_CONFIRMED
+                      - DISTRIBUTION_COMPLETED
+                      - CAMPAIGN_MILESTONE_REACHED
+                      - KYC_STATUS_CHANGED
+                  example: [DONATION_CONFIRMED, DISTRIBUTION_COMPLETED]
+                description:
+                  type: string
+                  maxLength: 500
+            example:
+              name: Donation Alerts
+              url: https://partner.example.com/hooks/aidlink
+              secret: whsec_super_secret_key_1234567890ab
+              events: [DONATION_CONFIRMED, DISTRIBUTION_COMPLETED]
+              description: Notify partner system on donation and distribution completion
+      responses:
+        "201":
+          description: Webhook subscription created
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxwh001
+                  name: Donation Alerts
+                  url: https://partner.example.com/hooks/aidlink
+                  events: [DONATION_CONFIRMED, DISTRIBUTION_COMPLETED]
+                  createdAt: "2024-03-15T10:30:00Z"
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+    get:
+      tags: [Admin]
+      summary: List webhook subscriptions
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: listWebhooks
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Webhook subscriptions retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  - id: clxwh001
+                    name: Donation Alerts
+                    url: https://partner.example.com/hooks/aidlink
+                    events: [DONATION_CONFIRMED]
+                    createdAt: "2024-03-15T10:30:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/webhooks/events:
+    get:
+      tags: [Admin]
+      summary: Get all webhook delivery events
+      description: |
+        Returns a log of all outbound webhook delivery attempts across all subscriptions.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: getAllWebhookEvents
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: Webhook delivery events retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  - id: clxwhe001
+                    webhookId: clxwh001
+                    event: DONATION_CONFIRMED
+                    statusCode: 200
+                    deliveredAt: "2024-03-15T10:31:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/webhooks/events/{eventId}:
+    get:
+      tags: [Admin]
+      summary: Get webhook delivery event by ID
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: getWebhookEventById
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Webhook delivery event retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxwhe001
+                  webhookId: clxwh001
+                  event: DONATION_CONFIRMED
+                  payload:
+                    event: donation.confirmed
+                    data:
+                      id: clxdon001
+                      amount: "250.00"
+                  responseBody: '{"received":true}'
+                  statusCode: 200
+                  deliveredAt: "2024-03-15T10:31:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/webhooks/{id}:
+    get:
+      tags: [Admin]
+      summary: Get webhook subscription by ID
+      operationId: getWebhookById
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Webhook subscription retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  id: clxwh001
+                  name: Donation Alerts
+                  url: https://partner.example.com/hooks/aidlink
+                  events: [DONATION_CONFIRMED]
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Admin]
+      summary: Update webhook subscription
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: updateWebhook
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                url:
+                  type: string
+                  format: uri
+                secret:
+                  type: string
+                events:
+                  type: array
+                  items:
+                    type: string
+                description:
+                  type: string
+      responses:
+        "200":
+          description: Webhook subscription updated
+          content:
+            application/json:
+              example:
+                success: true
+                message: Webhook subscription updated
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Admin]
+      summary: Delete webhook subscription
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: deleteWebhook
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Webhook subscription deleted
+          content:
+            application/json:
+              example:
+                success: true
+                message: Webhook subscription deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/webhooks/{id}/test:
+    post:
+      tags: [Admin]
+      summary: Send a test delivery to a webhook
+      description: |
+        Fires a test payload to the subscription URL to verify connectivity.
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: testWebhook
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Test delivery sent
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  statusCode: 200
+                  responseTime: 142
+                  message: Test delivery successful
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/webhooks/{id}/events:
+    get:
+      tags: [Admin]
+      summary: Get delivery events for a specific webhook
+      description: |
+        **Auth:** Bearer JWT — role: ADMIN.
+      operationId: getWebhookEvents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        "200":
+          description: Webhook delivery events retrieved
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  - id: clxwhe001
+                    event: DONATION_CONFIRMED
+                    statusCode: 200
+                    deliveredAt: "2024-03-15T10:31:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+# ---------------------------------------------------------------------------
+# WEBHOOK PAYLOADS
+# ---------------------------------------------------------------------------
+# AidLink emits webhook events to registered URLs.
+# All requests include:
+#   X-Signature: sha256=<HMAC-SHA256 of request body using your webhook secret>
+#   X-Webhook-Id: <unique delivery ID>
+#   Content-Type: application/json
+#
+# HMAC verification example (Node.js):
+#   const sig = crypto.createHmac('sha256', WEBHOOK_SECRET)
+#                     .update(rawBody)
+#                     .digest('hex');
+#   if (`sha256=${sig}` !== req.headers['x-signature']) throw new Error('Invalid signature');
+#
+# x-webhooks is a vendor extension; events are not REST endpoints.
+# ---------------------------------------------------------------------------
+x-webhooks:
+  donation.created:
+    post:
+      summary: Donation created
+      description: |
+        Fired when a new donation record is created (status = PENDING).
+        Includes a `matchedFunds` estimate for display purposes; final match
+        is computed after confirmation.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event:
+                  type: string
+                  example: donation.created
+                timestamp:
+                  type: string
+                  format: date-time
+                  example: "2024-03-15T10:30:00Z"
+                data:
+                  $ref: '#/components/schemas/Donation'
+            example:
+              event: donation.created
+              timestamp: "2024-03-15T10:30:00Z"
+              data:
+                id: clxdon001
+                campaignId: clxcamp001
+                amount: "250.00"
+                currency: XLM
+                status: PENDING
+                matchedFunds: "75.00"
+                isAnonymous: false
+                donorMessage: Wishing the families well!
+                createdAt: "2024-03-15T10:30:00Z"
+
+  donation.confirmed:
+    post:
+      summary: Donation confirmed on-chain
+      description: Fired when a donation is confirmed on the Stellar blockchain.
+      requestBody:
+        content:
+          application/json:
+            example:
+              event: donation.confirmed
+              timestamp: "2024-03-15T10:35:00Z"
+              data:
+                id: clxdon001
+                campaignId: clxcamp001
+                amount: "250.00"
+                status: CONFIRMED
+                blockchainTxHash: a3f8c2d1e4b567890abcdef1234567890abcdef1234567890abcdef1234567890
+                matchedFunds: "75.00"
+
+  campaign.suspended:
+    post:
+      summary: Campaign suspended
+      description: Fired when a campaign is suspended (auto or admin).
+      requestBody:
+        content:
+          application/json:
+            example:
+              event: campaign.suspended
+              timestamp: "2024-03-15T12:00:00Z"
+              data:
+                campaignId: clxcamp001
+                suspensionId: clxsusp001
+                reasonCode: FRAUD_REPORTS
+                source: AUTO
+
+  campaign.reinstated:
+    post:
+      summary: Campaign reinstated
+      requestBody:
+        content:
+          application/json:
+            example:
+              event: campaign.reinstated
+              timestamp: "2024-03-18T09:00:00Z"
+              data:
+                campaignId: clxcamp001
+                liftedAt: "2024-03-18T09:00:00Z"
+
+  distribution.completed:
+    post:
+      summary: Distribution completed
+      description: Fired when a distribution is confirmed on-chain.
+      requestBody:
+        content:
+          application/json:
+            example:
+              event: distribution.completed
+              timestamp: "2024-03-20T14:00:00Z"
+              data:
+                id: clxdist001
+                campaignId: clxcamp001
+                beneficiaryId: clxben001
+                amount: "500.00"
+                currency: XLM
+                status: COMPLETED
+                blockchainTxHash: b4e9d3f2a5c678901bcdef2345678901bcdef2345678901bcdef2345678901bc
+
+  kyc.reviewed:
+    post:
+      summary: KYC submission reviewed
+      requestBody:
+        content:
+          application/json:
+            example:
+              event: kyc.reviewed
+              timestamp: "2024-03-16T11:00:00Z"
+              data:
+                submissionId: clxkyc001
+                beneficiaryId: clxben001
+                status: APPROVED
+                reviewNotes: Document is clear
+
+# ---------------------------------------------------------------------------
+# WEBSOCKET EVENTS
+# ---------------------------------------------------------------------------
+# WebSocket connection: ws(s)://<host>/socket.io/
+# Authentication: pass JWT in handshake:
+#   const socket = io(HOST, { auth: { token: accessToken } })
+#
+# Client → Server events (emit):
+#   join_campaign    { campaignId }   — subscribe to campaign room
+#   leave_campaign   { campaignId }
+#   join_organization  { organizationId }
+#   leave_organization { organizationId }
+#   join_beneficiary   { beneficiaryId }
+#   leave_beneficiary  { beneficiaryId }
+#
+# Server → Client events (listen):
+# ---------------------------------------------------------------------------
+x-websocket-events:
+  connected:
+    description: Emitted immediately after a successful authenticated connection.
+    payload:
+      example:
+        message: Successfully connected to AidLink real-time updates
+        userId: clx1a2b3c4d5e6f7g8h9
+
+  donation:created:
+    description: |
+      Emitted to campaign room and donor's personal room when a new donation is
+      created (PENDING). Used to show live donation feeds on campaign pages.
+    payload:
+      example:
+        id: clxdon001
+        campaignId: clxcamp001
+        amount: "250.00"
+        currency: XLM
+        status: PENDING
+        matchedFunds: "75.00"
+        isAnonymous: false
+        donorMessage: Wishing the families well!
+        createdAt: "2024-03-15T10:30:00Z"
+        campaign:
+          id: clxcamp001
+          title: Clean Water for Northern Kenya
+        user:
+          id: clx1a2b3c4d5e6f7g8h9
+          username: john_donor
+
+  campaign:updated:
+    description: Emitted to campaign room whenever campaign data changes (new donation, status change, etc.).
+    payload:
+      example:
+        id: clxcamp001
+        title: Clean Water for Northern Kenya
+        currentAmount: "12750.00"
+        status: ACTIVE
+        _count:
+          donations: 48
+          beneficiaries: 12
+          distributions: 8
+
+  distribution:updated:
+    description: Emitted to campaign room and beneficiary room when a distribution is updated.
+    payload:
+      example:
+        id: clxdist001
+        campaignId: clxcamp001
+        beneficiaryId: clxben001
+        amount: "500.00"
+        status: COMPLETED
+        blockchainTxHash: b4e9d3f2a5c678901bcdef2345678901bcdef2345678901bcdef2345678901bc
+
+  notification:new:
+    description: Emitted to the user's personal room for any new in-app notification.
+    payload:
+      example:
+        id: clxnotif001
+        type: DONATION_RECEIVED
+        title: Donation Received
+        message: Your campaign received a donation of 250 XLM
+        status: UNREAD
+        createdAt: "2024-03-15T10:30:00Z"
+
+  campaign:suspended:
+    description: Emitted to campaign room and owner's personal room when a campaign is suspended.
+    payload:
+      example:
+        campaignId: clxcamp001
+        suspensionId: clxsusp001
+        reasonCode: FRAUD_REPORTS
+        source: AUTO
+
+  campaign:reinstated:
+    description: Emitted to campaign room and owner's personal room when a suspension is lifted.
+    payload:
+      example:
+        campaignId: clxcamp001
+        liftedAt: "2024-03-18T09:00:00Z"
+
+  appeal:updated:
+    description: Emitted to the campaign owner's personal room when an appeal status changes.
+    payload:
+      example:
+        appealId: clxapp001
+        campaignId: clxcamp001
+        status: APPROVED
+        adminNotes: Documents verified — campaign reinstated
+
+# ---------------------------------------------------------------------------
+# BLOCKCHAIN TRANSACTION FORMATS
+# ---------------------------------------------------------------------------
+# AidLink uses Stellar (Soroban) for on-chain donations and distributions.
+# Transactions are constructed client-side, signed with the donor/org wallet,
+# and submitted to Stellar. The resulting tx hash is then sent to the API
+# for confirmation (POST /donations/:id/confirm or /distributions/:id/confirm).
+# ---------------------------------------------------------------------------
+x-blockchain-formats:
+  stellar-donation-tx:
+    description: |
+      A signed Stellar payment transaction representing a donation.
+      The client constructs and signs this, then submits to Stellar Horizon.
+      After successful submission, send the `txHash` to `/donations/:id/confirm`.
+    example:
+      txEnvelopeXdr: AAAAAgAAAABLqBdSHJ5KMKaIJtHgLBqo1H6MXLPK0X8F3KNZcgHEQAAAAA...
+      txHash: a3f8c2d1e4b567890abcdef1234567890abcdef1234567890abcdef1234567890
+      network: TESTNET
+      operations:
+        - type: payment
+          destination: GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGKZM9OSGLPQOAKXQ5XRGT
+          asset: XLM
+          amount: "250.0000000"
+      memo:
+        type: text
+        value: aidlink:donate:clxcamp001
+      fee: 100
+      sequence: "50234891"
+
+  stellar-distribution-tx:
+    description: |
+      A signed Stellar payment transaction representing a fund distribution
+      to a beneficiary. Constructed by the organization, signed, submitted
+      to Stellar, then confirmed via `/distributions/:id/confirm`.
+    example:
+      txEnvelopeXdr: AAAAAgAAAABK8m3ZX1TKsYUdV2lJfF8FBlo5JHxZmGw9Kq0...
+      txHash: b4e9d3f2a5c678901bcdef2345678901bcdef2345678901bcdef2345678901bc
+      network: MAINNET
+      operations:
+        - type: payment
+          destination: GBKZRTIOAHMXIJKUQPMKLF6JYLXV2PJHFGXZQ4LQXSWM5YIZD3HMGKQ
+          asset: XLM
+          amount: "500.0000000"
+      memo:
+        type: text
+        value: aidlink:dist:clxdist001
+
+  soroban-contract-call:
+    description: |
+      A Soroban smart contract invocation (e.g., campaign registration or
+      quadratic funding calculation). The result is indexed by the Soroban
+      indexer and stored as a `BlockchainTransaction` record.
+    example:
+      txEnvelopeXdr: AAAAAgAAAACPFx8K2HxzYMzW3DpLkq7R...
+      txHash: c5f0e4g3b6d789012cdefg3456789012cdefg3456789012cdefg3456789012cd
+      network: MAINNET
+      contractAddress: CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+      functionName: register_campaign
+      args:
+        - type: Bytes
+          value: clxcamp001
+        - type: i128
+          value: "50000000000"
+      simulated: false

@@ -148,7 +148,68 @@ npm start
 
 ## API Documentation
 
-API documentation is available at `/api/docs` when the server is running.
+Interactive Swagger UI is served at **`/api-docs`** when the server is running.
+The raw OpenAPI 3.x spec is available at `/openapi.yaml`.
+
+### What's documented
+
+| Section | Coverage |
+|---|---|
+| REST endpoints | 99 routes across 11 route groups |
+| Request/response schemas | Full JSON schemas with examples |
+| Error responses | Consistent error envelope on every endpoint |
+| Authentication | Bearer JWT — all secured endpoints annotated |
+| Rate limits | Documented per-endpoint in descriptions |
+| Webhooks | 6 events with HMAC verification example |
+| WebSocket events | 8 server-push events with payload examples |
+| Blockchain formats | Stellar payment tx, Soroban contract call formats |
+
+### Running the spec locally
+
+```bash
+# Start server (spec served at /openapi.yaml, UI at /api-docs)
+npm run dev
+```
+
+### Validating the spec
+
+```bash
+# Lint openapi.yaml with Spectral (must pass before merging)
+npm run docs:validate
+
+# Build openapi.json from openapi.yaml (for tooling that requires JSON)
+npm run docs:build
+```
+
+### Running doc smoke tests
+
+```bash
+npm test -- --testPathPattern=tests/docs.spec.ts
+```
+
+### Contributing to API docs
+
+The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
+`/api/docs` swagger JSDoc comments for new endpoints — use `openapi.yaml` directly.
+
+#### Checklist for every new endpoint
+
+1. Add the path + HTTP method under `paths:` in `openapi.yaml`.
+2. Set a unique `operationId` (camelCase, verb + noun, e.g. `createCampaign`).
+3. Assign at least one `tags` entry.
+4. Document `security: [{bearerAuth: []}]` if the route calls `authenticate`.
+5. Add `requestBody` with a concrete `example`.
+6. Document all success responses and common errors (401, 403, 404, 422, 429).
+7. If the endpoint emits a WebSocket event or webhook, add/update the
+   `x-websocket-events` or `x-webhooks` section.
+8. Run `npm run docs:validate` and fix any Spectral errors before opening a PR.
+
+#### Style conventions
+
+- Keep descriptions concise — one sentence of purpose, one of auth, one of rate limit.
+- Use `$ref: '#/components/schemas/ErrorResponse'` for all error responses.
+- Amounts are `type: string` (decimal string) to preserve precision.
+- Dates are `type: string, format: date-time` (ISO 8601).
 
 ### API Endpoints
 
