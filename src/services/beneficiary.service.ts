@@ -5,6 +5,7 @@ import { AppError } from '../middleware/error';
 import logger from '../config/logger';
 import { Queue } from 'bullmq';
 import { config } from '../config';
+import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 
 // KYC queue instance
 const kycQueue = new Queue('kyc-queue', {
@@ -360,6 +361,14 @@ export class BeneficiaryService {
     }
 
     logger.info(`KYC reviewed: ${submissionId} with status ${status} by user ${userId}, fraudScore: ${fraudScore}`);
+
+    dispatchWebhookEvent('KYC_STATUS_CHANGED', {
+      submissionId,
+      beneficiaryId: submission.beneficiaryId,
+      userId: submission.userId,
+      status,
+      fraudScore,
+    }).catch((err) => logger.error('Webhook dispatch error (kyc.status_changed):', err));
 
     return updated;
   }

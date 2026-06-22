@@ -4,6 +4,7 @@ import { CampaignStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
 import { ModerationService } from './moderation.service';
+import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 
 export class CampaignService {
   static async createCampaign(data: CampaignInput, userId: string, organizationId: string): Promise<any> {
@@ -367,6 +368,14 @@ export class CampaignService {
     });
 
     logger.info(`Milestone added to campaign ${campaignId} by user ${userId}`);
+
+    dispatchWebhookEvent('CAMPAIGN_MILESTONE_REACHED', {
+      milestoneId: milestone.id,
+      campaignId,
+      title: milestone.title,
+      targetAmount: milestone.targetAmount,
+      order: milestone.order,
+    }).catch((err) => logger.error('Webhook dispatch error (campaign.milestone_reached):', err));
 
     return milestone;
   }

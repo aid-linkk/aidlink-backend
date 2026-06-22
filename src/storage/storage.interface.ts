@@ -16,6 +16,7 @@ export interface PresignedUrlOptions {
 export interface IStorageAdapter {
   upload(key: string, buffer: Buffer, options: UploadOptions): Promise<UploadResult>;
   delete(key: string): Promise<void>;
+  download(key: string): Promise<Buffer>;
   getSignedUrl(key: string, expiresIn?: number): Promise<string>;
   getPresignedUploadUrl(key: string, options: PresignedUrlOptions): Promise<string>;
 }

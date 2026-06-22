@@ -24,8 +24,11 @@ import analyticsRoutes from './routes/analytics.routes';
 import searchRoutes from './routes/search.routes';
 import uploadRoutes from './routes/upload.routes';
 import organizationRoutes from './routes/organization.routes';
+import webhookRoutes from './routes/webhook.routes';
+import receiptRoutes from './routes/receipt.routes';
 import { sorobanIndexer } from './blockchain/soroban.indexer';
 import { initializeWebSocket } from './websocket/socket.server';
+import { stopRecoveryWorker } from './workers/recovery.worker';
 
 const app: Application = express();
 const httpServer = createServer(app);
@@ -75,10 +78,12 @@ app.use(`/api/${config.apiVersion}/donations`, donationRoutes);
 app.use(`/api/${config.apiVersion}/distributions`, distributionRoutes);
 app.use(`/api/${config.apiVersion}/notifications`, notificationRoutes);
 app.use(`/api/${config.apiVersion}/admin`, adminRoutes);
+app.use(`/api/${config.apiVersion}/admin/receipts`, receiptRoutes);
 app.use(`/api/${config.apiVersion}/analytics`, analyticsRoutes);
 app.use(`/api/${config.apiVersion}/search`, searchRoutes);
 app.use(`/api/${config.apiVersion}/upload`, uploadRoutes);
 app.use(`/api/${config.apiVersion}/organizations`, organizationRoutes);
+app.use(`/api/${config.apiVersion}/admin/webhooks`, webhookRoutes);
 
 // Swagger documentation
 const swaggerOptions = {
@@ -142,6 +147,25 @@ const startServer = async (): Promise<void> => {
         .then(() => logger.info('Campaign moderation worker started'))
         .catch((error) => logger.error('Failed to start moderation worker:', error));
     }
+    
+    // Start tax-receipt worker (generation, email delivery, batch processing).
+    // Dynamically imported so the BullMQ worker only connects when enabled.
+    if (config.receipts.enabled) {
+      import('./workers/receipt.worker.js')
+        .then(({ startReceiptWorker }) => startReceiptWorker())
+        .catch((error) => logger.error('Failed to start receipt worker:', error));
+    }
+
+    // Start webhook delivery worker
+    import('./workers/webhook.worker.js')
+      .then(() => logger.info('Webhook delivery worker started'))
+      .catch((error) => logger.error('Failed to start webhook worker:', error));
+
+    // Start recovery worker (auto-retry scheduled cases)
+    import('./workers/recovery.worker.js')
+      .then(({ startRecoveryWorker }) => startRecoveryWorker())
+      .catch((error) => logger.error('Failed to start recovery worker:', error));
+
 
     // Start HTTP server
     httpServer.listen(config.port, () => {
@@ -162,6 +186,9 @@ const gracefulShutdown = async (signal: string): Promise<void> => {
   try {
     // Stop blockchain indexer
     await sorobanIndexer.stop();
+
+    // Stop recovery worker
+    stopRecoveryWorker();
 
     // Disconnect from database
     await disconnectDatabase();

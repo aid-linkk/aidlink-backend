@@ -262,6 +262,33 @@ GET /campaigns/:id/stats
 Authorization: Bearer <access_token>
 ```
 
+#### Get Trending Campaigns
+
+```http
+GET /campaigns/trending?period=last24h&sortBy=trendScore&limit=10
+Authorization: Bearer <access_token>
+```
+
+Returns top campaigns by donation velocity, donor growth, or impact.
+
+#### Get Campaign Impact Metrics
+
+```http
+GET /campaigns/:id/impact-metrics
+Authorization: Bearer <access_token>
+```
+
+Returns comprehensive impact metrics: total donations, donor growth, distributions, beneficiaries reached, conversion rates.
+
+#### Get Campaign Historical Statistics
+
+```http
+GET /campaigns/:id/statistics/historical?granularity=hourly&startDate=2024-01-01&endDate=2024-01-31
+Authorization: Bearer <access_token>
+```
+
+Returns monthly or hourly rollup data for trend charts.
+
 ### Organizations
 
 #### Create Organization
@@ -536,6 +563,24 @@ Authorization: Bearer <access_token>
   "status": "APPROVED",
   "reviewNotes": "Documents verified successfully"
 }
+```
+
+### Analytics
+
+#### Get Aggregated Campaign Analytics (Admin)
+
+```http
+GET /analytics/campaigns?page=1&limit=10&status=ACTIVE&sortBy=createdAt&sortOrder=desc
+Authorization: Bearer <admin_access_token>
+```
+
+Returns aggregated campaign metrics from rollup tables for admin dashboards.
+
+#### Get Campaign Analytics
+
+```http
+GET /analytics/campaign/:campaignId
+Authorization: Bearer <access_token>
 ```
 
 ### Distributions

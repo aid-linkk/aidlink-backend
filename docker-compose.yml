@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -40,7 +38,7 @@ services:
   # Backend API
   api:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile
     container_name: aidlink-api
     environment:
@@ -74,7 +72,7 @@ services:
   # Email Worker
   email-worker:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile
     container_name: aidlink-email-worker
     command: node dist/workers/email.worker.js
@@ -97,7 +95,7 @@ services:
   # Blockchain Worker
   blockchain-worker:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile
     container_name: aidlink-blockchain-worker
     command: node dist/workers/blockchain.worker.js
@@ -117,7 +115,7 @@ services:
   # KYC Worker
   kyc-worker:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile
     container_name: aidlink-kyc-worker
     command: node dist/workers/kyc.worker.js

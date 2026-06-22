@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { AdminController } from '../controllers/admin.controller';
 import { ModerationController } from '../controllers/moderation.controller';
 import { OrganizationController } from '../controllers/organization.controller';
+import { RecoveryController } from '../controllers/recovery.controller';
 import { authenticate } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
@@ -185,5 +186,23 @@ router.post(
   validate(organizationRejectSchema),
   OrganizationController.requestMoreInfo
 );
+
+// ─── Recovery Workflow (Admin) ───────────────────────────────────
+
+router.get('/recoveries/reconciliation', authenticate, RecoveryController.reconciliation);
+router.get('/recoveries', authenticate, RecoveryController.listCases);
+router.get('/recoveries/:id', authenticate, RecoveryController.getCase);
+
+router.post('/recoveries/failed-refund', authenticate, RecoveryController.createFailedRefundCase);
+router.post('/recoveries/failed-distribution', authenticate, RecoveryController.createFailedDistributionCase);
+router.post('/recoveries/:id/donor-credit', authenticate, RecoveryController.issueDonorCredit);
+
+router.post('/refunds/:id/retry', authenticate, RecoveryController.retryRefund);
+router.post('/refunds/:id/update-destination', authenticate, RecoveryController.updateRefundDestination);
+
+router.post('/distributions/:id/retry', authenticate, RecoveryController.retryDistribution);
+router.post('/distributions/:id/flag-recovery', authenticate, RecoveryController.flagDistributionRecovery);
+
+router.post('/campaigns/:id/settle', authenticate, RecoveryController.settleCampaign);
 
 export default router;

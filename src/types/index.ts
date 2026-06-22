@@ -134,3 +134,70 @@ export interface DistributionInput {
   method: DistributionMethod;
   description?: string;
 }
+
+export interface TrendingCampaignFilters {
+  period?: 'last24h' | 'last7d' | 'last30d';
+  sortBy?: 'trendScore' | 'donationVelocity' | 'distributionImpact';
+  limit?: number;
+}
+
+export interface TrendingCampaign {
+  campaignId: string;
+  title: string;
+  imageUrl: string | null;
+  status: string;
+  currentAmount: number;
+  targetAmount: number;
+  trendScore: number;
+  donationVelocity: number;
+  donorGrowth: number;
+  distributionImpact: number;
+  period: string;
+  rank: number;
+  organization: {
+    id: string;
+    name: string;
+    logo: string | null;
+  };
+}
+
+export interface ImpactMetrics {
+  campaignId: string;
+  title: string;
+  totalDonations: number;
+  totalRaised: number;
+  donorGrowth: number;
+  totalDistributions: number;
+  totalDistributedAmount: number;
+  beneficiariesReached: number;
+  conversionRate: number;
+  avgDonationAmount: number;
+  progressPercentage: number;
+  impactScore: number;
+}
+
+export interface HistoricalStats {
+  campaignId: string;
+  granularity: 'hourly' | 'monthly';
+  data: Array<{
+    timestamp: Date;
+    donationCount: number;
+    donationVolume: number;
+    uniqueDonors: number;
+    distributionCount: number;
+    distributionVolume: number;
+    itemsDistributed: number;
+    donorGrowth?: number;
+    distributionReach?: number;
+    campaignActivity?: number;
+    activeDonors: number;
+  }>;
+}
+
+export interface CampaignAnalyticsFilters {
+  status?: string;
+  startDate?: Date;
+  endDate?: Date;
+  sortBy?: string;
+  sortOrder?: 'asc' | 'desc';
+}

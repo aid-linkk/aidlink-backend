@@ -3,9 +3,15 @@ import { DistributionInput, PaginatedResponse } from '../types';
 import { DistributionStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
+import { dispatchWebhookEvent } from '../controllers/webhook.controller';
+import { AnalyticsService } from './analytics.service';
 
 export class DistributionService {
-  static async createDistribution(data: DistributionInput, userId: string, userRole: Role): Promise<any> {
+  static async createDistribution(
+    data: DistributionInput,
+    userId: string,
+    userRole: Role
+  ): Promise<any> {
     const campaign = await prisma.campaign.findUnique({
       where: { id: data.campaignId },
     });
@@ -38,7 +44,10 @@ export class DistributionService {
 
     // Check permissions
     if (campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to create distributions for this campaign', 403);
+      throw new AppError(
+        'You do not have permission to create distributions for this campaign',
+        403
+      );
     }
 
     const distribution = await prisma.distribution.create({
@@ -79,10 +88,23 @@ export class DistributionService {
 
     logger.info(`Distribution confirmed: ${id} with tx ${txHash}`);
 
+    dispatchWebhookEvent('DISTRIBUTION_COMPLETED', {
+      distributionId: id,
+      campaignId: distribution.campaignId,
+      beneficiaryId: distribution.beneficiaryId,
+      amount: updated.amount,
+      currency: updated.currency,
+      blockchainTxHash: txHash,
+    }).catch((err) => logger.error('Webhook dispatch error (distribution.completed):', err));
+
     return updated;
   }
 
-  static async getDistributions(campaignId?: string, beneficiaryId?: string, pagination?: any): Promise<PaginatedResponse<any>> {
+  static async getDistributions(
+    campaignId?: string,
+    beneficiaryId?: string,
+    pagination?: any
+  ): Promise<PaginatedResponse<any>> {
     const { page = 1, limit = 10, sortBy = 'createdAt', sortOrder = 'desc' } = pagination || {};
     const skip = (page - 1) * limit;
 
@@ -133,7 +155,12 @@ export class DistributionService {
     };
   }
 
-  static async updateDistributionStatus(id: string, status: DistributionStatus, userId: string, userRole: Role): Promise<any> {
+  static async updateDistributionStatus(
+    id: string,
+    status: DistributionStatus,
+    userId: string,
+    userRole: Role
+  ): Promise<any> {
     const distribution = await prisma.distribution.findUnique({
       where: { id },
       include: { campaign: true },
@@ -159,10 +186,20 @@ export class DistributionService {
 
     logger.info(`Distribution status updated: ${id} to ${status} by user ${userId}`);
 
+    // Invalidate cache when distribution status changes
+    AnalyticsService.invalidateCampaignCache(distribution.campaignId).catch((err) =>
+      logger.error('Failed to invalidate campaign cache on status update', err)
+    );
+
     return updated;
   }
 
-  static async addProofDocument(id: string, proofDocumentUrl: string, userId: string, userRole: Role): Promise<any> {
+  static async addProofDocument(
+    id: string,
+    proofDocumentUrl: string,
+    userId: string,
+    userRole: Role
+  ): Promise<any> {
     const distribution = await prisma.distribution.findUnique({
       where: { id },
       include: { campaign: true },

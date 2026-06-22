@@ -25,6 +25,11 @@ export class LocalAdapter implements IStorageAdapter {
     await fs.unlink(filePath).catch(() => {});
   }
 
+  async download(key: string): Promise<Buffer> {
+    const filePath = path.join(this.uploadDir, key);
+    return fs.readFile(filePath);
+  }
+
   async getSignedUrl(key: string, _expiresIn?: number): Promise<string> {
     return `${this.baseUrl}/${key}`;
   }

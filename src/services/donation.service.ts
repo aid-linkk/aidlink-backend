@@ -3,6 +3,9 @@ import { DonationInput, DonationFilters, PaginatedResponse } from '../types';
 import { DonationStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
+import { config } from '../config';
+import { dispatchWebhookEvent } from '../controllers/webhook.controller';
+import { AnalyticsService } from './analytics.service';
 
 export class DonationService {
   static async createDonation(data: DonationInput, userId?: string): Promise<any> {
@@ -70,10 +73,31 @@ export class DonationService {
 
     logger.info(`Donation confirmed: ${id} with tx ${txHash}`);
 
+    dispatchWebhookEvent('DONATION_CONFIRMED', {
+      donationId: id,
+      campaignId: donation.campaignId,
+      amount: updated.amount,
+      currency: updated.currency,
+      blockchainTxHash: txHash,
+    }).catch((err) => logger.error('Webhook dispatch error (donation.confirmed):', err));
+
+    if (config.receipts.enabled && donation.userId) {
+      import('../workers/receipt.worker.js')
+        .then(({ enqueueReceiptGeneration }) => enqueueReceiptGeneration(id))
+        .catch((error) =>
+          logger.error(`Failed to enqueue receipt generation for donation ${id}:`, error),
+        );
+    }
+
     return updated;
   }
 
-  static async getDonations(filters: DonationFilters, pagination: any): Promise<PaginatedResponse<any>> {
+  static async getDonations(
+    filters: DonationFilters = {},
+    pagination: any
+  ): Promise<PaginatedResponse<any>> {
+    filters = filters ?? {};
+
     const { page = 1, limit = 10, sortBy = 'createdAt', sortOrder = 'desc' } = pagination;
     const skip = (page - 1) * limit;
 
@@ -91,12 +115,16 @@ export class DonationService {
       where.status = filters.status;
     }
 
-    if (filters.startDate) {
-      where.createdAt = { gte: filters.startDate };
-    }
+    if (filters.startDate || filters.endDate) {
+      where.createdAt = {};
 
-    if (filters.endDate) {
-      where.createdAt = { lte: filters.endDate };
+      if (filters.startDate) {
+        where.createdAt.gte = filters.startDate;
+      }
+
+      if (filters.endDate) {
+        where.createdAt.lte = filters.endDate;
+      }
     }
 
     const [donations, total] = await Promise.all([
@@ -186,6 +214,11 @@ export class DonationService {
       throw new AppError('You do not have permission to refund this donation', 403);
     }
 
+    // Prevent negative campaign balance
+    if (donation.campaign.currentAmount < donation.amount) {
+      throw new AppError('Refund amount exceeds campaign current balance', 400);
+    }
+
     const updated = await prisma.$transaction(async (tx) => {
       // Update donation status
       const updatedDonation = await tx.donation.update({
@@ -209,6 +242,11 @@ export class DonationService {
     });
 
     logger.info(`Donation refunded: ${id} by user ${userId}`);
+
+    // Update cache: invalidate on refund
+    AnalyticsService.invalidateCampaignCache(donation.campaignId).catch((err) =>
+      logger.error('Failed to invalidate campaign cache on refund', err)
+    );
 
     return updated;
   }

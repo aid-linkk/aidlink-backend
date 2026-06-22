@@ -32,6 +32,21 @@ const prismaMock = {
     update: jest.fn(),
     count: jest.fn(),
   },
+  taxReceipt: {
+    findUnique: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    delete: jest.fn(),
+    count: jest.fn(),
+  },
+  receiptBatchJob: {
+    findUnique: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn(),
+  },
   beneficiaryAssignment: {
     upsert: jest.fn(),
   },
@@ -48,6 +63,29 @@ const prismaMock = {
     findUnique: jest.fn(),
     findMany: jest.fn(),
     count: jest.fn(),
+  },
+  auditLog: {
+    create: jest.fn().mockResolvedValue({}),
+    findMany: jest.fn().mockResolvedValue([]),
+    count: jest.fn().mockResolvedValue(0),
+  },
+  notification: {
+    create: jest.fn().mockResolvedValue({}),
+    findMany: jest.fn().mockResolvedValue([]),
+  },
+  recoveryCase: {
+    findUnique: jest.fn(),
+    findFirst: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn().mockResolvedValue(0),
+    groupBy: jest.fn().mockResolvedValue([]),
+  },
+  donorCredit: {
+    create: jest.fn(),
+    findMany: jest.fn().mockResolvedValue([]),
+    aggregate: jest.fn().mockResolvedValue({ _sum: { amount: 0 }, _count: { id: 0 } }),
   },
   $transaction: jest.fn().mockImplementation(async (cb) => {
     if (typeof cb === 'function') {

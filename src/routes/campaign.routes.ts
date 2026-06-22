@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { CampaignController } from '../controllers/campaign.controller';
 import { ModerationController } from '../controllers/moderation.controller';
+import { AnalyticsController } from '../controllers/analytics.controller';
 import { authenticate } from '../middleware/auth';
 import { campaignCreateLimiter, reportLimiter } from '../middleware/rateLimit';
 import { validate } from '../middleware/validation';
@@ -88,6 +89,35 @@ router.post('/', campaignCreateLimiter, validate(campaignSchema), CampaignContro
  *         description: Campaigns retrieved successfully
  */
 router.get('/', CampaignController.getCampaigns);
+
+/**
+ * @swagger
+ * /api/v1/campaigns/trending:
+ *   get:
+ *     summary: Get trending campaigns by donation velocity, donor growth, or impact
+ *     tags: [Campaigns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: period
+ *         schema:
+ *           type: string
+ *           enum: [last24h, last7d, last30d]
+ *       - in: query
+ *         name: sortBy
+ *         schema:
+ *           type: string
+ *           enum: [trendScore, donationVelocity, distributionImpact]
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Trending campaigns retrieved successfully
+ */
+router.get('/trending', AnalyticsController.getTrendingCampaigns);
 
 /**
  * @swagger
@@ -282,6 +312,61 @@ router.post('/:campaignId/beneficiaries', CampaignController.assignBeneficiary);
  *         description: Campaign statistics retrieved successfully
  */
 router.get('/:id/stats', CampaignController.getCampaignStats);
+
+/**
+ * @swagger
+ * /api/v1/campaigns/{id}/impact-metrics:
+ *   get:
+ *     summary: Get campaign impact metrics from aggregated data
+ *     tags: [Campaigns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Campaign impact metrics retrieved successfully
+ */
+router.get('/:id/impact-metrics', AnalyticsController.getCampaignImpactMetrics);
+
+/**
+ * @swagger
+ * /api/v1/campaigns/{id}/statistics/historical:
+ *   get:
+ *     summary: Get monthly or weekly rollup data for trend charts
+ *     tags: [Campaigns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: granularity
+ *         schema:
+ *           type: string
+ *           enum: [hourly, monthly]
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *     responses:
+ *       200:
+ *         description: Historical statistics retrieved successfully
+ */
+router.get('/:id/statistics/historical', AnalyticsController.getCampaignHistoricalStats);
 
 /**
  * @swagger
