@@ -3,6 +3,7 @@ import { NotificationType, NotificationStatus } from '@prisma/client';
 import logger from '../config/logger';
 import nodemailer from 'nodemailer';
 import { config } from '../config';
+import { sendNotificationWithCount, sendUnreadCount } from '../websocket/socket.server';
 
 export class NotificationService {
   private static transporter = nodemailer.createTransport({
@@ -33,7 +34,20 @@ export class NotificationService {
       },
     });
 
-    logger.info(`Notification created: ${notification.id} for user ${userId}`);
+    logger.info('Notification created: ' + notification.id + ' for user ' + userId);
+
+    // Broadcast real-time notification with unread count
+    try {
+      const unreadCount = await prisma.notification.count({
+        where: {
+          userId,
+          status: NotificationStatus.UNREAD,
+        },
+      });
+      sendNotificationWithCount(userId, notification, unreadCount);
+    } catch (wsError) {
+      logger.error('Error broadcasting notification via WebSocket:', wsError);
+    }
 
     return notification;
   }
@@ -122,13 +136,23 @@ export class NotificationService {
       throw new Error('You do not have permission to update this notification');
     }
 
-    return prisma.notification.update({
+    const updated = await prisma.notification.update({
       where: { id: notificationId },
       data: {
         status: NotificationStatus.READ,
         readAt: new Date(),
       },
     });
+
+    // Broadcast updated unread count after marking as read
+    try {
+      const unreadCount = await this.getUnreadCount(userId);
+      sendUnreadCount(userId, unreadCount);
+    } catch (wsError) {
+      logger.error('Error broadcasting unread count via WebSocket:', wsError);
+    }
+
+    return updated;
   }
 
   static async markAllAsRead(userId: string): Promise<void> {
@@ -142,6 +166,13 @@ export class NotificationService {
         readAt: new Date(),
       },
     });
+
+    // Broadcast unread count = 0 after marking all as read
+    try {
+      sendUnreadCount(userId, 0);
+    } catch (wsError) {
+      logger.error('Error broadcasting unread count via WebSocket:', wsError);
+    }
   }
 
   static async deleteNotification(notificationId: string, userId: string): Promise<void> {
