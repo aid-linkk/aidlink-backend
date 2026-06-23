@@ -5,7 +5,7 @@ import { AppError } from '../middleware/error';
 import logger from '../config/logger';
 import { ModerationService } from './moderation.service';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
-import { getOrSet, invalidateCampaignCache, invalidateSearchCache } from '../utils/cache';
+import { getOrSet, buildKey, invalidateCampaignCache, invalidateSearchCache } from '../utils/cache';
 
 export class CampaignService {
   static async createCampaign(data: CampaignInput, userId: string, organizationId: string): Promise<any> {

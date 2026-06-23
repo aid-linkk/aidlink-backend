@@ -2,7 +2,7 @@ import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../types';
 import { AppError } from '../middleware/error';
 import prisma from '../config/database';
-import { getCacheMetrics } from '../utils/cache';
+import { getCacheHealth } from '../utils/cache';
 import { Role, UserStatus, CampaignStatus, DonationStatus, DistributionStatus, KYCStatus } from '@prisma/client';
 
 export class AdminController {
@@ -362,7 +362,7 @@ export class AdminController {
             pendingTransactions: pendingTx,
             confirmedTransactions: confirmedTx,
           },
-          cache: await getCacheMetrics(),
+          cache: await getCacheHealth(),
           timestamp: new Date().toISOString(),
         },
       });
