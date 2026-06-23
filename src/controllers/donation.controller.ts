@@ -47,6 +47,7 @@ export class DonationController {
         campaignId: req.query.campaignId as string,
         userId: req.query.userId as string,
         status: req.query.status as string,
+        currency: req.query.currency as string,
         startDate: req.query.startDate ? new Date(req.query.startDate as string) : undefined,
         endDate: req.query.endDate ? new Date(req.query.endDate as string) : undefined,
       };
@@ -112,6 +113,7 @@ export class DonationController {
         userId: req.user.id,
         campaignId: req.query.campaignId as string,
         status: req.query.status as string,
+        currency: req.query.currency as string,
         startDate: req.query.startDate ? new Date(req.query.startDate as string) : undefined,
         endDate: req.query.endDate ? new Date(req.query.endDate as string) : undefined,
       };
@@ -141,6 +143,7 @@ export class DonationController {
       const filters = {
         campaignId,
         status: req.query.status as string,
+        currency: req.query.currency as string,
         startDate: req.query.startDate ? new Date(req.query.startDate as string) : undefined,
         endDate: req.query.endDate ? new Date(req.query.endDate as string) : undefined,
       };

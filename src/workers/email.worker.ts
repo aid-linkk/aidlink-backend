@@ -80,7 +80,8 @@ function createWorker(): Worker {
           await NotificationService.sendDonationReceivedNotification(
             data.userId,
             data.campaignTitle,
-            data.amount
+            data.amount,
+            data.currency || 'XLM'
           );
           break;
 
@@ -95,7 +96,8 @@ function createWorker(): Worker {
         case 'DISTRIBUTION_SENT':
           await NotificationService.sendDistributionSentNotification(
             data.userId,
-            data.amount
+            data.amount,
+            data.currency || 'XLM'
           );
           break;
 

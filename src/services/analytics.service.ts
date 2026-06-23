@@ -49,12 +49,31 @@ export class AnalyticsService {
       throw new Error('Campaign not found');
     }
 
-    // Calculate donation statistics
-    const totalDonations = campaign.donations.length;
-    const totalRaised = campaign.donations.reduce((sum, d) => sum + Number(d.amount), 0);
-    const avgDonation = totalDonations > 0 ? totalRaised / totalDonations : 0;
+    // Calculate donation statistics grouped by currency
+    const donationsByCurrency = campaign.donations.reduce((acc, d) => {
+      const curr = d.currency || 'XLM';
+      if (!acc[curr]) acc[curr] = { total: 0, count: 0 };
+      acc[curr].total += Number(d.amount);
+      acc[curr].count += 1;
+      return acc;
+    }, {} as Record<string, { total: number; count: number }>);
 
-    // Calculate distribution statistics
+    const totalDonations = campaign.donations.length;
+    const avgDonation = totalDonations > 0
+      ? Object.values(donationsByCurrency).reduce((s, c) => s + c.total, 0) / totalDonations
+      : 0;
+
+    // Calculate distribution statistics grouped by currency
+    const distributionsByCurrency = campaign.distributions.reduce((acc, d) => {
+      const curr = d.currency || 'XLM';
+      if (!acc[curr]) acc[curr] = { total: 0, count: 0 };
+      if (d.status === 'COMPLETED') {
+        acc[curr].total += Number(d.amount);
+        acc[curr].count += 1;
+      }
+      return acc;
+    }, {} as Record<string, { total: number; count: number }>);
+
     const totalDistributed = campaign.distributions
       .filter((d) => d.status === 'COMPLETED')
       .reduce((sum, d) => sum + Number(d.amount), 0);
@@ -91,14 +110,16 @@ export class AnalyticsService {
       },
       donations: {
         total: totalDonations,
-        totalRaised,
+        totalRaised: Object.values(donationsByCurrency).reduce((s, c) => s + c.total, 0),
         avgDonation,
         count: campaign._count.donations,
+        byCurrency: donationsByCurrency,
       },
       distributions: {
         total: campaign._count.distributions,
         totalDistributed,
-        completed: campaign.distributions.filter((d) => d.status === 'COMPLETED').length,
+        completed: campaign.distributions.filter((d: any) => d.status === 'COMPLETED').length,
+        byCurrency: distributionsByCurrency,
       },
       beneficiaries: {
         total: campaign._count.beneficiaries,
@@ -124,6 +145,15 @@ export class AnalyticsService {
     const totalDonated = donations.reduce((sum, d) => sum + Number(d.amount), 0);
     const campaignsSupported = new Set(donations.map((d) => d.campaignId)).size;
 
+    // Group donations by currency
+    const donationsByCurrency = donations.reduce((acc, d) => {
+      const curr = d.currency || 'XLM';
+      if (!acc[curr]) acc[curr] = { total: 0, count: 0 };
+      acc[curr].total += Number(d.amount);
+      acc[curr].count += 1;
+      return acc;
+    }, {} as Record<string, { total: number; count: number }>);
+
     // Monthly donation trend
     const monthlyDonations = await prisma.$queryRaw`
       SELECT 
@@ -143,6 +173,7 @@ export class AnalyticsService {
       totalDonations: donations.length,
       campaignsSupported,
       avgDonation: donations.length > 0 ? totalDonated / donations.length : 0,
+      byCurrency: donationsByCurrency,
       recentDonations: donations.slice(0, 10),
       monthlyTrend: monthlyDonations,
     };
@@ -167,23 +198,35 @@ export class AnalyticsService {
     });
 
     const totalCampaigns = campaigns.length;
-    const activeCampaigns = campaigns.filter((c) => c.status === 'ACTIVE').length;
+    const activeCampaigns = campaigns.filter((c: any) => c.status === 'ACTIVE').length;
     const totalRaised = campaigns.reduce(
-      (sum, c) => sum + c.donations.reduce((dSum, d) => dSum + Number(d.amount), 0),
+      (sum: any, c: any) => sum + c.donations.reduce((dSum: any, d: any) => dSum + Number(d.amount), 0),
       0
     );
-    const totalBeneficiaries = campaigns.reduce((sum, c) => sum + c._count.beneficiaries, 0);
-    const totalDistributions = campaigns.reduce((sum, c) => sum + c._count.distributions, 0);
+    const totalBeneficiaries = campaigns.reduce((sum: any, c: any) => sum + c._count.beneficiaries, 0);
+    const totalDistributions = campaigns.reduce((sum: any, c: any) => sum + c._count.distributions, 0);
+
+    // Group raised funds by currency
+    const fundsByCurrency = campaigns.reduce((acc, c: any) => {
+      for (const d of c.donations) {
+        const curr = d.currency || 'XLM';
+        if (!acc[curr]) acc[curr] = { total: 0, count: 0 };
+        acc[curr].total += Number(d.amount);
+        acc[curr].count += 1;
+      }
+      return acc;
+    }, {} as Record<string, { total: number; count: number }>);
 
     return {
       campaigns: {
         total: totalCampaigns,
         active: activeCampaigns,
-        completed: campaigns.filter((c) => c.status === 'COMPLETED').length,
+        completed: campaigns.filter((c: any) => c.status === 'COMPLETED').length,
       },
       funds: {
         totalRaised,
         avgPerCampaign: totalCampaigns > 0 ? totalRaised / totalCampaigns : 0,
+        byCurrency: fundsByCurrency,
       },
       impact: {
         totalBeneficiaries,

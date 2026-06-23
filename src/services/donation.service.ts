@@ -26,6 +26,10 @@ export class DonationService {
         ...data,
         userId,
         status: DonationStatus.PENDING,
+        baseCurrency: data.baseCurrency || 'USD',
+        exchangeRate: data.exchangeRate ? data.exchangeRate : undefined,
+        convertedAmount: data.convertedAmount ? data.convertedAmount : undefined,
+        conversionTimestamp: (data.exchangeRate && data.convertedAmount) ? new Date() : undefined,
       },
     });
 
@@ -114,6 +118,10 @@ export class DonationService {
 
     if (filters.status) {
       where.status = filters.status;
+    }
+
+    if (filters.currency) {
+      where.currency = filters.currency;
     }
 
     if (filters.startDate || filters.endDate) {

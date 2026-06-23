@@ -78,6 +78,7 @@ export interface DonationFilters {
   campaignId?: string;
   userId?: string;
   status?: string;
+  currency?: string;
   startDate?: Date;
   endDate?: Date;
 }
@@ -125,6 +126,9 @@ export interface DonationInput {
   donorEmail?: string;
   message?: string;
   isAnonymous?: boolean;
+  exchangeRate?: number;
+  convertedAmount?: number;
+  baseCurrency?: string;
 }
 
 export interface DistributionInput {

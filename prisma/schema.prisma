@@ -400,6 +400,12 @@ model Donation {
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 
+  // Conversion metadata for multi-currency analytics
+  baseCurrency       String?        @default("USD")
+  exchangeRate       Decimal?       @db.Decimal(20, 8)
+  convertedAmount    Decimal?       @db.Decimal(20, 8)
+  conversionTimestamp DateTime?
+
   campaign   Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   user       User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
   taxReceipt TaxReceipt?
@@ -409,6 +415,7 @@ model Donation {
   @@index([status])
   @@index([blockchainTxHash])
   @@index([createdAt])
+  @@index([currency])
 }
 
 // ============================================

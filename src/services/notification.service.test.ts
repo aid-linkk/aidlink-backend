@@ -355,8 +355,18 @@ describe('NotificationService', () => {
     });
 
     it('sendDonationReceivedNotification', async () => {
+      await NotificationService.sendDonationReceivedNotification('user-1', 'Campaign Title', 100, 'USDC');
+      expect(prismaMock.notification.create).toHaveBeenCalled();
+      const callArgs = prismaMock.notification.create.mock.calls[0][0];
+      expect(callArgs.data.message).toContain('100 USDC');
+      expect(callArgs.data.message).not.toContain('XLM');
+    });
+
+    it('sendDonationReceivedNotification defaults to XLM', async () => {
       await NotificationService.sendDonationReceivedNotification('user-1', 'Campaign Title', 100);
       expect(prismaMock.notification.create).toHaveBeenCalled();
+      const callArgs = prismaMock.notification.create.mock.calls[0][0];
+      expect(callArgs.data.message).toContain('100 XLM');
     });
 
     it('sendCampaignUpdateNotification', async () => {
@@ -365,8 +375,18 @@ describe('NotificationService', () => {
     });
 
     it('sendDistributionSentNotification', async () => {
+      await NotificationService.sendDistributionSentNotification('user-1', 50, 'EUR');
+      expect(prismaMock.notification.create).toHaveBeenCalled();
+      const callArgs = prismaMock.notification.create.mock.calls[0][0];
+      expect(callArgs.data.message).toContain('50 EUR');
+      expect(callArgs.data.message).not.toContain('XLM');
+    });
+
+    it('sendDistributionSentNotification defaults to XLM', async () => {
       await NotificationService.sendDistributionSentNotification('user-1', 50);
       expect(prismaMock.notification.create).toHaveBeenCalled();
+      const callArgs = prismaMock.notification.create.mock.calls[0][0];
+      expect(callArgs.data.message).toContain('50 XLM');
     });
 
     it('sendKYCApprovedNotification', async () => {
