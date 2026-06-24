@@ -7,6 +7,7 @@ import { Queue } from 'bullmq';
 import { config } from '../config';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 import { getOrSet, invalidateBeneficiaryCache, buildKey } from '../utils/cache';
+import { assessFraud, getThirdPartyFraudScore } from './kycFraud.service';
 
 // KYC queue instance
 const kycQueue = new Queue('kyc-queue', {
@@ -317,8 +318,8 @@ export class BeneficiaryService {
       throw new AppError('You do not have permission to review KYC submissions', 403);
     }
 
-    // Compute fraud score before persisting
-    const fraudScore = await BeneficiaryService.computeFraudScore(submission);
+    // Compute fraud score and signals before persisting
+    const fraudAssessment = await BeneficiaryService.computeFraudScore(submission);
 
     const updated = await prisma.$transaction(async (tx: any) => {
       const updatedSubmission = await tx.kYCSubmission.update({
@@ -328,7 +329,9 @@ export class BeneficiaryService {
           reviewNotes,
           reviewedBy: userId,
           reviewedAt: new Date(),
-          fraudScore,
+          fraudScore: fraudAssessment.fraudScore,
+          fraudSignals: fraudAssessment.fraudSignals,
+          fraudReason: fraudAssessment.fraudReason,
         },
       });
 
@@ -359,61 +362,58 @@ export class BeneficiaryService {
     });
 
     // Enqueue fraud detection for high-risk submissions
-    if (fraudScore > 50) {
+    if (fraudAssessment.fraudScore > 50) {
       await enqueueKYCJob('FRAUD_DETECTION', {
         beneficiaryId: submission.beneficiaryId,
         submissionId,
-        fraudScore,
+        fraudScore: fraudAssessment.fraudScore,
       });
     }
 
-    logger.info(`KYC reviewed: ${submissionId} with status ${status} by user ${userId}, fraudScore: ${fraudScore}`);
+    logger.info(`KYC reviewed: ${submissionId} with status ${status} by user ${userId}, fraudScore: ${fraudAssessment.fraudScore}`);
 
     dispatchWebhookEvent('KYC_STATUS_CHANGED', {
       submissionId,
       beneficiaryId: submission.beneficiaryId,
       userId: submission.userId,
       status,
-      fraudScore,
+      fraudScore: fraudAssessment.fraudScore,
     }).catch((err) => logger.error('Webhook dispatch error (kyc.status_changed):', err));
 
     return updated;
   }
 
-  private static async computeFraudScore(submission: any): Promise<number> {
-    let fraudScore = 0;
+  private static async computeFraudScore(submission: any): Promise<any> {
+    const input = {
+      submissionId: submission.id,
+      beneficiaryId: submission.beneficiaryId,
+      userId: submission.userId,
+      documentUrl: submission.documentUrl,
+      documentType: submission.documentType,
+      selfieUrl: submission.selfieUrl,
+      additionalDocs: submission.additionalDocs,
+      ipAddress: submission.ipAddress,
+      userAgent: submission.userAgent,
+      claimedCountry: submission.beneficiary?.country,
+      claimedCity: submission.beneficiary?.city,
+    };
 
-    // Factor 1: prior rejections
-    const priorRejections = await prisma.kYCSubmission.count({
-      where: {
-        beneficiaryId: submission.beneficiaryId,
-        status: KYCStatus.REJECTED,
-      },
-    });
-    if (priorRejections > 0) fraudScore += priorRejections * 20;
+    // Get internal fraud assessment
+    const assessment = await assessFraud(input);
 
-    // Factor 2: document URL reuse across rejected submissions
-    const docReuse = await prisma.kYCSubmission.count({
-      where: {
-        documentUrl: submission.documentUrl,
-        status: KYCStatus.REJECTED,
-        id: { not: submission.id },
-      },
-    });
-    if (docReuse > 0) fraudScore += 20;
+    // Attempt third-party enrichment (graceful fallback if unavailable)
+    const thirdParty = await getThirdPartyFraudScore(input);
+    if (thirdParty && thirdParty.score > 0) {
+      // Blend internal and third-party scores (70% internal, 30% third-party)
+      assessment.fraudScore = Math.min(
+        Math.round(assessment.fraudScore * 0.7 + thirdParty.score * 0.3),
+        100,
+      );
+      assessment.fraudSignals.push(...thirdParty.signals);
+      assessment.fraudReason += ' (enriched with third-party data)';
+    }
 
-    // Factor 3: excessive submissions in past 7 days
-    const recentSubmissions = await prisma.kYCSubmission.count({
-      where: {
-        beneficiaryId: submission.beneficiaryId,
-        createdAt: {
-          gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-        },
-      },
-    });
-    if (recentSubmissions > 2) fraudScore += 15;
-
-    return Math.min(Math.max(fraudScore, 0), 100);
+    return assessment;
   }
 
   static async getBeneficiaryByUserId(userId: string): Promise<any> {
