@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { CampaignController } from '../controllers/campaign.controller';
 import { ModerationController } from '../controllers/moderation.controller';
+import { MilestoneController } from '../controllers/milestone.controller';
 import { AnalyticsController } from '../controllers/analytics.controller';
 import { authenticate } from '../middleware/auth';
+import milestoneSubmissionRoutes from './milestone.routes';
 import { campaignCreateLimiter, reportLimiter } from '../middleware/rateLimit';
 import { validate } from '../middleware/validation';
 import { campaignSchema, fraudReportSchema, appealSchema } from '../utils/validation';
@@ -451,5 +453,35 @@ router.post('/:id/reports', reportLimiter, validate(fraudReportSchema), Moderati
  */
 router.post('/:id/appeals', validate(appealSchema), ModerationController.submitAppeal);
 router.get('/:id/appeals', ModerationController.getCampaignAppeals);
+
+// ─── Milestone verification (Organization) ─────────────────────
+
+router.use('/:campaignId/milestones/:milestoneId/submissions', milestoneSubmissionRoutes);
+
+/**
+ * @swagger
+ * /api/v1/campaigns/{campaignId}/milestones/{milestoneId}/verification-report:
+ *   get:
+ *     summary: Public-facing verification report for a milestone
+ *     tags: [Milestones]
+ *     parameters:
+ *       - in: path
+ *         name: campaignId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: milestoneId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Verification report retrieved
+ */
+router.get(
+  '/:campaignId/milestones/:milestoneId/verification-report',
+  MilestoneController.getVerificationReport
+);
 
 export default router;

@@ -448,6 +448,73 @@ export class NotificationService {
     await this.sendNotificationEmail(userId, notification);
   }
 
+  // ─── Milestone verification templates ─────────────────────────
+
+  static async sendMilestoneSubmissionReceivedNotification(
+    verifierUserId: string,
+    campaignTitle: string,
+    milestoneTitle: string,
+    submissionId: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      verifierUserId,
+      NotificationType.MILESTONE_SUBMISSION_RECEIVED,
+      'Milestone Submission Ready for Review',
+      `A new milestone submission for "${milestoneTitle}" in campaign "${campaignTitle}" is awaiting your review.`,
+      { submissionId, campaignTitle, milestoneTitle }
+    );
+    await this.sendNotificationEmail(verifierUserId, notification);
+  }
+
+  static async sendMilestoneApprovedNotification(
+    organizationUserId: string,
+    milestoneTitle: string,
+    impactSummary?: string
+  ): Promise<void> {
+    const message = impactSummary
+      ? `Your milestone "${milestoneTitle}" has been verified. Verifier summary: ${impactSummary}`
+      : `Your milestone "${milestoneTitle}" has been verified.`;
+
+    const notification = await this.createNotification(
+      organizationUserId,
+      NotificationType.MILESTONE_APPROVED,
+      'Milestone Verified',
+      message,
+      { milestoneTitle }
+    );
+    await this.sendNotificationEmail(organizationUserId, notification);
+  }
+
+  static async sendMilestoneRejectedNotification(
+    organizationUserId: string,
+    milestoneTitle: string,
+    reason: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      organizationUserId,
+      NotificationType.MILESTONE_REJECTED,
+      'Milestone Submission Rejected',
+      `Your submission for milestone "${milestoneTitle}" was rejected. Reason: ${reason}`,
+      { milestoneTitle, reason }
+    );
+    await this.sendNotificationEmail(organizationUserId, notification);
+  }
+
+  static async sendMilestoneRevisionRequestedNotification(
+    organizationUserId: string,
+    milestoneTitle: string,
+    reason: string
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      organizationUserId,
+      NotificationType.MILESTONE_REVISION_REQUESTED,
+      'Revision Requested for Milestone Submission',
+      `Additional information is needed for your milestone "${milestoneTitle}" submission. ${reason} Please update and resubmit.`,
+      { milestoneTitle, reason }
+    );
+    await this.sendNotificationEmail(organizationUserId, notification);
+  }
+
   static async sendDonorFraudSuspensionNotification(
     userId: string,
     campaignTitle: string

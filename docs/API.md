@@ -262,6 +262,306 @@ GET /campaigns/:id/stats
 Authorization: Bearer <access_token>
 ```
 
+### Milestone Verification
+
+Milestones go through a structured verification workflow: organization submits evidence → verifier reviews → approved or rejected.
+
+**Submission states:** `DRAFT` → `SUBMITTED` → `UNDER_REVIEW` → `APPROVED` / `REJECTED` / `REVISION_REQUESTED`
+
+**Milestone verification states:** `PENDING_SUBMISSION` → `SUBMITTED` → `UNDER_REVIEW` → `VERIFIED` / `REJECTED`
+
+#### Create Submission Draft
+
+```http
+POST /campaigns/:campaignId/milestones/:milestoneId/submissions
+Authorization: Bearer <access_token>
+```
+
+Role: Campaign owner / organization. Creates a `DRAFT` submission. Only one active submission (SUBMITTED, UNDER_REVIEW, or APPROVED) can exist per milestone at a time.
+
+**Request Body:**
+```json
+{
+  "description": "We distributed 300 food kits across 5 villages during March 2026.",
+  "evidenceUrls": [
+    "https://storage.aidlink.io/photo1.jpg",
+    "https://storage.aidlink.io/report.pdf"
+  ],
+  "metricsData": {
+    "beneficiariesReached": 300,
+    "villagesCovered": 5
+  },
+  "submissionNotes": "Distribution was completed ahead of schedule."
+}
+```
+
+**Response `201`:**
+```json
+{
+  "success": true,
+  "message": "Submission created",
+  "data": {
+    "id": "sub_id",
+    "milestoneId": "milestone_id",
+    "campaignId": "campaign_id",
+    "organizationId": "org_id",
+    "status": "DRAFT",
+    "description": "...",
+    "evidenceUrls": ["..."],
+    "metricsData": {},
+    "submittedAt": null,
+    "createdAt": "2026-03-01T10:00:00Z"
+  }
+}
+```
+
+#### Update Submission
+
+```http
+PUT /campaigns/:campaignId/milestones/:milestoneId/submissions/:submissionId
+Authorization: Bearer <access_token>
+```
+
+Only editable when status is `DRAFT` or `REVISION_REQUESTED`. All fields optional.
+
+**Request Body:**
+```json
+{
+  "description": "Updated description",
+  "evidenceUrls": ["https://storage.aidlink.io/new-photo.jpg"],
+  "metricsData": { "beneficiariesReached": 320 },
+  "submissionNotes": "Added GPS coordinates"
+}
+```
+
+#### Submit for Review
+
+```http
+POST /campaigns/:campaignId/milestones/:milestoneId/submissions/:submissionId/submit
+Authorization: Bearer <access_token>
+```
+
+Transitions `DRAFT` → `SUBMITTED` (or `REVISION_REQUESTED` → `SUBMITTED` on resubmission). Notifies all verifiers and admins. Records history event.
+
+**Response `200`:**
+```json
+{
+  "success": true,
+  "message": "Submission sent for review",
+  "data": {
+    "id": "sub_id",
+    "status": "SUBMITTED",
+    "submittedAt": "2026-03-01T12:00:00Z"
+  }
+}
+```
+
+#### Get Submission
+
+```http
+GET /campaigns/:campaignId/milestones/:milestoneId/submissions/:submissionId
+Authorization: Bearer <access_token>
+```
+
+Campaign owner sees their own submission. Admins and verifiers can see any.
+
+**Response `200`:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "sub_id",
+    "status": "UNDER_REVIEW",
+    "description": "...",
+    "evidenceUrls": ["..."],
+    "metricsData": {},
+    "submittedAt": "2026-03-01T12:00:00Z",
+    "reviews": [...],
+    "history": [
+      { "event": "SUBMITTED", "actor": "user_id", "timestamp": "..." },
+      { "event": "REVIEW_STARTED", "actor": "verifier_id", "timestamp": "..." }
+    ]
+  }
+}
+```
+
+#### List Submissions for Milestone
+
+```http
+GET /campaigns/:campaignId/milestones/:milestoneId/submissions
+Authorization: Bearer <access_token>
+```
+
+Returns all submissions for the milestone, ordered newest first. Each item includes the latest review and history entry.
+
+#### Get Verification Report (Public)
+
+```http
+GET /campaigns/:campaignId/milestones/:milestoneId/verification-report
+```
+
+No authentication required. Returns the public-facing verification status, approved metrics, and verifier summary for a milestone.
+
+**Response `200`:**
+```json
+{
+  "success": true,
+  "data": {
+    "milestoneId": "milestone_id",
+    "title": "Distribute 300 food kits",
+    "verificationStatus": "VERIFIED",
+    "approvedAt": "2026-03-05T09:00:00Z",
+    "metricsApproved": { "beneficiariesReached": 300, "villagesCovered": 5 },
+    "impactSummary": "300 beneficiaries confirmed via distribution records.",
+    "verifierNotes": "Evidence well documented with GPS coordinates."
+  }
+}
+```
+
+#### Admin — List Submissions
+
+```http
+GET /admin/milestone-submissions?status=SUBMITTED&campaignId=...&startDate=...&endDate=...&page=1&limit=20
+Authorization: Bearer <admin_or_verifier_token>
+```
+
+Role: `ADMIN` or `VERIFIER`. Returns paginated submissions filterable by status, campaign, and date range.
+
+**Query params:**
+
+| Param | Type | Description |
+|---|---|---|
+| `status` | string | Filter by `DRAFT`, `SUBMITTED`, `UNDER_REVIEW`, `APPROVED`, `REJECTED`, `REVISION_REQUESTED` |
+| `campaignId` | string | Filter by campaign |
+| `startDate` | ISO date | Filter by `submittedAt` >= date |
+| `endDate` | ISO date | Filter by `submittedAt` <= date |
+| `page` | number | Default `1` |
+| `limit` | number | Default `20` |
+
+#### Admin — Get Submission Detail
+
+```http
+GET /admin/milestone-submissions/:submissionId
+Authorization: Bearer <admin_or_verifier_token>
+```
+
+Returns full submission with all reviews and complete history.
+
+#### Admin — Submit Review
+
+```http
+POST /admin/milestone-submissions/:submissionId/reviews
+Authorization: Bearer <admin_or_verifier_token>
+```
+
+Role: `ADMIN` or `VERIFIER`. Transitions submission to `UNDER_REVIEW` on first review, then to final state on decision. Notifies the organization and broadcasts WebSocket event.
+
+**Request Body:**
+```json
+{
+  "decision": "APPROVED",
+  "verifierNotes": "All evidence reviewed and confirmed.",
+  "metricsConfirmed": { "beneficiariesReached": 300 },
+  "impactSummary": "300 beneficiaries confirmed via distribution records."
+}
+```
+
+`decision` values: `APPROVED` | `REJECTED` | `REVISION_REQUESTED`
+
+`reason` is required when decision is `REJECTED` or `REVISION_REQUESTED`.
+
+**Request Body (rejection):**
+```json
+{
+  "decision": "REJECTED",
+  "reason": "Evidence does not match reported dates."
+}
+```
+
+**Request Body (revision):**
+```json
+{
+  "decision": "REVISION_REQUESTED",
+  "reason": "Please provide GPS coordinates for each distribution point."
+}
+```
+
+**Response `201`:**
+```json
+{
+  "success": true,
+  "message": "Review submitted",
+  "data": {
+    "id": "review_id",
+    "submissionId": "sub_id",
+    "verifierId": "verifier_id",
+    "decision": "APPROVED",
+    "impactSummary": "...",
+    "metricsConfirmed": {},
+    "reviewedAt": "2026-03-05T09:00:00Z"
+  }
+}
+```
+
+#### Admin — List Reviews for Submission
+
+```http
+GET /admin/milestone-submissions/:submissionId/reviews
+Authorization: Bearer <admin_or_verifier_token>
+```
+
+Returns all reviews for a submission ordered newest first. Useful when multiple verifiers review the same submission.
+
+#### Admin — Get Milestone Verification Status
+
+```http
+GET /admin/milestones/:milestoneId/verification-status
+Authorization: Bearer <admin_or_verifier_token>
+```
+
+Returns current verification status, full submission history, and latest review for a milestone.
+
+**Response `200`:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "milestone_id",
+    "title": "Distribute 300 food kits",
+    "verificationStatus": "VERIFIED",
+    "achieved": true,
+    "achievedAt": "2026-03-05T09:00:00Z",
+    "submissions": [
+      {
+        "id": "sub_id",
+        "status": "APPROVED",
+        "submittedAt": "...",
+        "reviews": [...],
+        "history": [
+          { "event": "SUBMITTED", "actor": "user_id", "timestamp": "..." },
+          { "event": "REVIEW_STARTED", "actor": "verifier_id", "timestamp": "..." },
+          { "event": "APPROVED", "actor": "verifier_id", "timestamp": "..." }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### WebSocket Events — Milestone Verification
+
+```javascript
+// Org receives when verifier makes a decision
+socket.on('milestone:reviewed', (data) => {
+  // data: { submissionId, milestoneId, decision }
+});
+
+// All campaign subscribers receive when org submits
+socket.on('milestone:submitted', (data) => {
+  // data: { submissionId, milestoneId, campaignId }
+});
+```
+
 #### Get Trending Campaigns
 
 ```http

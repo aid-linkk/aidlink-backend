@@ -152,6 +152,28 @@ export const resolveAppealSchema = z.object({
   adminNotes: z.string().max(2000).optional(),
 });
 
+export const milestoneSubmissionSchema = z.object({
+  description: z.string().min(10, 'Description must be at least 10 characters').max(5000),
+  evidenceUrls: z
+    .array(z.string().url('Each evidence URL must be a valid URL'))
+    .min(1, 'At least one evidence URL is required')
+    .max(20),
+  metricsData: z.record(z.unknown()).default({}),
+  submissionNotes: z.string().max(2000).optional(),
+});
+
+export const milestoneSubmissionUpdateSchema = milestoneSubmissionSchema
+  .partial()
+  .refine((v: object) => Object.keys(v).length > 0, 'At least one field is required');
+
+export const milestoneReviewSchema = z.object({
+  decision: z.enum(['APPROVED', 'REJECTED', 'REVISION_REQUESTED']),
+  reason: z.string().min(1).max(2000).optional(),
+  verifierNotes: z.string().max(2000).optional(),
+  metricsConfirmed: z.record(z.unknown()).optional(),
+  impactSummary: z.string().max(2000).optional(),
+});
+
 export const generateBatchReceiptsSchema = z
   .object({
     organizationId: z.string().min(1).optional(),

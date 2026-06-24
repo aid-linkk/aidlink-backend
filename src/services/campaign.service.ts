@@ -139,6 +139,16 @@ export class CampaignService {
         },
         milestones: {
           orderBy: { order: 'asc' },
+          include: {
+            submissions: {
+              where: { status: { in: ['SUBMITTED', 'UNDER_REVIEW', 'APPROVED'] } },
+              orderBy: { createdAt: 'desc' },
+              take: 1,
+              include: {
+                reviews: { orderBy: { createdAt: 'desc' }, take: 1 },
+              },
+            },
+          },
         },
       },
     });

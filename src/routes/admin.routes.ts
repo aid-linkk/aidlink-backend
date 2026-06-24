@@ -2,8 +2,9 @@ import { Router } from 'express';
 import { AdminController } from '../controllers/admin.controller';
 import { ModerationController } from '../controllers/moderation.controller';
 import { OrganizationController } from '../controllers/organization.controller';
+import { MilestoneController } from '../controllers/milestone.controller';
 import { RecoveryController } from '../controllers/recovery.controller';
-import { authenticate } from '../middleware/auth';
+import { authenticate, authorize } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
 import {
@@ -12,6 +13,7 @@ import {
   resolveAppealSchema,
   organizationReviewSchema,
   organizationRejectSchema,
+  milestoneReviewSchema,
 } from '../utils/validation';
 
 const router = Router();
@@ -185,6 +187,44 @@ router.post(
   authenticate,
   validate(organizationRejectSchema),
   OrganizationController.requestMoreInfo
+);
+
+// ─── Milestone verification (Admin / Verifier) ─────────────────
+
+router.get(
+  '/milestone-submissions',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER'),
+  MilestoneController.listAdminSubmissions
+);
+
+router.get(
+  '/milestone-submissions/:submissionId',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER'),
+  MilestoneController.getAdminSubmission
+);
+
+router.post(
+  '/milestone-submissions/:submissionId/reviews',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER'),
+  validate(milestoneReviewSchema),
+  MilestoneController.createReview
+);
+
+router.get(
+  '/milestone-submissions/:submissionId/reviews',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER'),
+  MilestoneController.listSubmissionReviews
+);
+
+router.get(
+  '/milestones/:milestoneId/verification-status',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER'),
+  MilestoneController.getMilestoneVerificationStatus
 );
 
 // ─── Recovery Workflow (Admin) ───────────────────────────────────
