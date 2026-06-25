@@ -1,0 +1,54 @@
+<!-- Tax Receipt Email Template -->
+{{> greeting name=donorName fallback="Supporter"}}
+
+<p style="margin: 0 0 16px 0; font-size: 16px; color: #1f7a5a; font-weight: 600;">
+  Your Tax Receipt is Ready
+</p>
+
+<p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+  Thank you for your donation to <strong>{{organizationName}}</strong>.
+  Your official tax receipt ({{receiptNumber}}) is attached to this email.
+</p>
+
+<!-- Receipt Details Box -->
+<table
+  role="presentation"
+  cellspacing="0"
+  cellpadding="0"
+  border="0"
+  width="100%"
+  style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; margin: 16px 0;"
+>
+  <tr>
+    <td style="padding: 16px;">
+      <p style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: #333;">Receipt Details</p>
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+        <tr>
+          <td style="padding: 4px 0; color: #666; font-size: 14px; width: 45%;">Receipt Number</td>
+          <td style="padding: 4px 0; color: #333; font-size: 14px;">{{receiptNumber}}</td>
+        </tr>
+        <tr>
+          <td style="padding: 4px 0; color: #666; font-size: 14px;">Organization</td>
+          <td style="padding: 4px 0; color: #333; font-size: 14px;">{{organizationName}}</td>
+        </tr>
+        <tr>
+          <td style="padding: 4px 0; color: #666; font-size: 14px;">Amount</td>
+          <td style="padding: 4px 0; color: #333; font-size: 14px;">{{formatCurrency amount currency}}</td>
+        </tr>
+        <tr>
+          <td style="padding: 4px 0; color: #666; font-size: 14px;">Donation Date</td>
+          <td style="padding: 4px 0; color: #333; font-size: 14px;">{{formatDate donationDate}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+
+{{#if downloadLink}}
+  {{> button link=downloadLink label="Download Your Receipt"}}
+{{/if}}
+
+<p style="margin: 0; color: #666; font-size: 14px; line-height: 1.6;">
+  You can also download your receipt anytime from your
+  <a href="{{donorPortalLink}}" style="color: #1f7a5a;">AidLink donor portal</a>.
+</p>

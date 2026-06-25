@@ -1,0 +1,41 @@
+extends:
+  - spectral:oas
+
+rules:
+  # Require operationId on every operation
+  operation-operationId: error
+
+  # Require a description or summary on every operation
+  operation-description: warn
+
+  # Require tags on every operation
+  operation-tags: error
+
+  # All success responses must have a description
+  operation-success-response: error
+
+  # Request bodies must define a schema
+  oas3-request-body-schema: warn
+
+  # Parameters must have a description
+  parameter-description: warn
+
+  # All $ref pointers must resolve
+  oas3-valid-schema-example: warn
+
+  # No unused components schemas
+  oas3-unused-component: warn
+
+  # Require info.contact
+  info-contact: warn
+
+  # Require info.license
+  info-license: warn
+
+overrides:
+  - files:
+      - "openapi.yaml"
+    rules:
+      # Downgrade example validation to warn to avoid noisy false-positives on
+      # free-form `data` objects in SuccessResponse
+      oas3-valid-schema-example: warn

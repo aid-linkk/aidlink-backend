@@ -7,15 +7,18 @@ jest.mock('../config/database', () => {
     default: {
       campaign: {
         findUnique: jest.fn(),
+        findMany: jest.fn(),
+        create: jest.fn(),
         update: jest.fn(),
         delete: jest.fn(),
         count: jest.fn(),
       },
-      donation: { aggregate: jest.fn() },
+      organization: { findUnique: jest.fn() },
+      donation: { aggregate: jest.fn(), findMany: jest.fn() },
       distribution: { aggregate: jest.fn() },
       beneficiary: { findUnique: jest.fn() },
-      beneficiaryAssignment: { upsert: jest.fn() },
-      milestone: { create: jest.fn(), deleteMany: jest.fn() },
+      beneficiaryAssignment: { upsert: jest.fn(), findMany: jest.fn() },
+      milestone: { create: jest.fn(), findMany: jest.fn(), deleteMany: jest.fn() },
       $transaction: jest.fn(),
     },
   };
@@ -25,6 +28,12 @@ jest.mock('../config/database', () => {
 jest.mock('../config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), error: jest.fn(), warn: jest.fn() },
+}));
+
+jest.mock('./moderation.service', () => ({
+  ModerationService: {
+    getModerationView: jest.fn().mockResolvedValue({ suspensionSummary: null, canAppeal: false }),
+  },
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -401,6 +410,163 @@ describe('CampaignService', () => {
       await expect(
         CampaignService.assignBeneficiary('campaign-1', 'ben-1', { ...assignData, priority: 1.5 }, 'user-1', Role.DONOR),
       ).rejects.toThrow('Priority must be a non-negative integer');
+    });
+  });
+
+  // ─── createCampaign ─────────────────────────────────────────────
+
+  describe('createCampaign', () => {
+    const campaignInput = {
+      title: 'New Campaign',
+      description: 'A brand new campaign for testing',
+      targetAmount: 5000,
+      startDate: new Date('2025-06-01'),
+      endDate: new Date('2025-12-31'),
+      organizationId: 'org-1',
+    };
+
+    it('creates campaign successfully', async () => {
+      const organization = { id: 'org-1', userId: 'user-1', name: 'Test Org' };
+      prismaMock.organization.findUnique.mockResolvedValue(organization);
+      prismaMock.campaign.create.mockResolvedValue(baseCampaign({ title: 'New Campaign', status: CampaignStatus.DRAFT }));
+
+      const result = await CampaignService.createCampaign(campaignInput, 'user-1', 'org-1');
+
+      expect(result.title).toBe('New Campaign');
+      expect(result.status).toBe(CampaignStatus.DRAFT);
+    });
+
+    it('rejects non-existent organization', async () => {
+      prismaMock.organization.findUnique.mockResolvedValue(null);
+
+      await expect(
+        CampaignService.createCampaign(campaignInput, 'user-1', 'org-1')
+      ).rejects.toThrow('Organization not found');
+    });
+
+    it('rejects unauthorized organization access', async () => {
+      const organization = { id: 'org-1', userId: 'other-user', name: 'Test Org' };
+      prismaMock.organization.findUnique.mockResolvedValue(organization);
+
+      await expect(
+        CampaignService.createCampaign(campaignInput, 'user-1', 'org-1')
+      ).rejects.toThrow('You do not have permission to create campaigns for this organization');
+    });
+  });
+
+  // ─── getCampaigns ───────────────────────────────────────────────
+
+  describe('getCampaigns', () => {
+    it('returns paginated list of campaigns', async () => {
+      const campaigns = [baseCampaign(), baseCampaign({ id: 'campaign-2', title: 'Campaign 2' })];
+      prismaMock.campaign.findMany.mockResolvedValue(campaigns);
+      prismaMock.campaign.count.mockResolvedValue(2);
+
+      const result = await CampaignService.getCampaigns({}, { page: 1, limit: 10 });
+
+      expect(result.data).toHaveLength(2);
+      expect(result.pagination.total).toBe(2);
+    });
+
+    it('filters by status', async () => {
+      prismaMock.campaign.findMany.mockResolvedValue([]);
+      prismaMock.campaign.count.mockResolvedValue(0);
+
+      await CampaignService.getCampaigns({ status: CampaignStatus.ACTIVE }, { page: 1, limit: 10 });
+
+      expect(prismaMock.campaign.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ status: CampaignStatus.ACTIVE }) })
+      );
+    });
+
+    it('handles empty results', async () => {
+      prismaMock.campaign.findMany.mockResolvedValue([]);
+      prismaMock.campaign.count.mockResolvedValue(0);
+
+      const result = await CampaignService.getCampaigns({}, { page: 1, limit: 10 });
+
+      expect(result.data).toHaveLength(0);
+      expect(result.pagination.total).toBe(0);
+    });
+  });
+
+  // ─── getCampaignById ────────────────────────────────────────────
+
+  describe('getCampaignById', () => {
+    it('returns campaign with relations and moderation view', async () => {
+      const campaign = baseCampaign({
+        organization: { id: 'org-1', name: 'Test Org' },
+        donations: [],
+        beneficiaries: [],
+        milestones: [],
+      });
+      prismaMock.campaign.findUnique.mockResolvedValue(campaign);
+
+      const result = await CampaignService.getCampaignById('campaign-1');
+
+      expect(result.id).toBe('campaign-1');
+      expect(result.suspensionSummary).toBeNull();
+      expect(result.canAppeal).toBe(false);
+    });
+
+    it('returns 404 for missing campaign', async () => {
+      prismaMock.campaign.findUnique.mockResolvedValue(null);
+
+      await expect(CampaignService.getCampaignById('missing')).rejects.toThrow('Campaign not found');
+    });
+  });
+
+  // ─── updateCampaignStatus ───────────────────────────────────────
+
+  describe('updateCampaignStatus', () => {
+    it('updates status by owner', async () => {
+      prismaMock.campaign.findUnique.mockResolvedValue(baseCampaign());
+      prismaMock.campaign.update.mockResolvedValue(baseCampaign({ status: CampaignStatus.ACTIVE }));
+
+      const result = await CampaignService.updateCampaignStatus('campaign-1', CampaignStatus.ACTIVE, 'user-1', Role.DONOR);
+
+      expect(result.status).toBe(CampaignStatus.ACTIVE);
+    });
+
+    it('updates status by admin', async () => {
+      prismaMock.campaign.findUnique.mockResolvedValue(baseCampaign());
+      prismaMock.campaign.update.mockResolvedValue(baseCampaign({ status: CampaignStatus.ACTIVE }));
+
+      const result = await CampaignService.updateCampaignStatus('campaign-1', CampaignStatus.ACTIVE, 'admin-1', Role.ADMIN);
+
+      expect(result.status).toBe(CampaignStatus.ACTIVE);
+    });
+
+    it('rejects non-owner non-admin', async () => {
+      prismaMock.campaign.findUnique.mockResolvedValue(baseCampaign());
+
+      await expect(
+        CampaignService.updateCampaignStatus('campaign-1', CampaignStatus.ACTIVE, 'other-user', Role.DONOR)
+      ).rejects.toThrow('You do not have permission to update this campaign status');
+    });
+
+    it('rejects suspension via this endpoint', async () => {
+      prismaMock.campaign.findUnique.mockResolvedValue(baseCampaign());
+
+      await expect(
+        CampaignService.updateCampaignStatus('campaign-1', CampaignStatus.SUSPENDED, 'user-1', Role.ADMIN)
+      ).rejects.toThrow('Use the moderation endpoint to suspend a campaign');
+    });
+
+    it('rejects update when campaign is suspended', async () => {
+      prismaMock.campaign.findUnique.mockResolvedValue(baseCampaign({ status: CampaignStatus.SUSPENDED }));
+
+      await expect(
+        CampaignService.updateCampaignStatus('campaign-1', CampaignStatus.ACTIVE, 'user-1', Role.ADMIN)
+      ).rejects.toThrow('Suspended campaigns can only be reinstated by an admin or via an approved appeal');
+    });
+
+    it('returns 404 for missing campaign', async () => {
+      prismaMock.campaign.findUnique.mockResolvedValue(null);
+
+      await expect(
+        CampaignService.updateCampaignStatus('missing', CampaignStatus.ACTIVE, 'user-1', Role.DONOR)
+      ).rejects.toThrow('Campaign not found');
     });
   });
 });

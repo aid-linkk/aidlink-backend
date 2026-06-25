@@ -1,0 +1,48 @@
+<!-- Generic / Fallback Email Template -->
+{{> greeting name=userName fallback="there"}}
+
+{{#if title}}
+  <p style="margin: 0 0 16px 0; font-size: 16px; color: #1f7a5a; font-weight: 600;">
+    {{title}}
+  </p>
+{{/if}}
+
+<p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+  {{message}}
+</p>
+
+{{#if actionLink}}
+  {{> button link=actionLink label=(defaultName actionLabel "View Details")}}
+{{/if}}
+
+{{#if metadata}}
+  <!-- Additional context rendered as key-value pairs -->
+  <table
+    role="presentation"
+    cellspacing="0"
+    cellpadding="0"
+    border="0"
+    width="100%"
+    style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; margin: 16px 0;"
+  >
+    <tr>
+      <td style="padding: 16px;">
+        {{#each metadata}}
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+            <tr>
+              <td style="padding: 2px 0; color: #666; font-size: 13px; width: 40%;">{{@key}}</td>
+              <td style="padding: 2px 0; color: #333; font-size: 13px;">{{this}}</td>
+            </tr>
+          </table>
+        {{/each}}
+      </td>
+    </tr>
+  </table>
+{{/if}}
+
+{{#if errorNotice}}
+  <!-- Shown when a specific template failed to render -->
+  <p style="margin: 12px 0 0 0; color: #999; font-size: 11px;">
+    {{errorNotice}}
+  </p>
+{{/if}}

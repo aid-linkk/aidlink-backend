@@ -1,0 +1,45 @@
+<!-- KYC Rejected Email Template -->
+{{> greeting name=userName fallback="there"}}
+
+<p style="margin: 0 0 16px 0; font-size: 16px; color: #d92d20; font-weight: 600;">
+  KYC Verification Requires Attention
+</p>
+
+<p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+  Your identity verification was <strong>not approved</strong>. Please review the details below and take the necessary steps.
+</p>
+
+{{#if rejectionReason}}
+  <div style="background-color: #fef3f2; border: 1px solid #fecaca; border-radius: 6px; padding: 16px; margin: 16px 0;">
+    <p style="margin: 0 0 6px 0; font-weight: 600; color: #b42318; font-size: 14px;">Reason</p>
+    <p style="margin: 0; color: #b42318; font-size: 14px; line-height: 1.6;">
+      {{rejectionReason}}
+    </p>
+  </div>
+{{/if}}
+
+{{#if correctionSteps}}
+  <div style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 16px; margin: 16px 0;">
+    <p style="margin: 0 0 6px 0; font-weight: 600; color: #333; font-size: 14px;">How to Resolve</p>
+    <p style="margin: 0; color: #444; font-size: 14px; line-height: 1.6;">
+      {{correctionSteps}}
+    </p>
+  </div>
+{{/if}}
+
+{{#if requiredDocuments}}
+  <p style="margin: 0 0 6px 0; font-weight: 600; color: #333; font-size: 14px;">Required Documents</p>
+  <p style="margin: 0 0 12px 0; color: #444; font-size: 14px; line-height: 1.6;">
+    {{requiredDocuments}}
+  </p>
+{{/if}}
+
+{{#if resubmitLink}}
+  {{> button link=resubmitLink label="Resubmit Verification"}}
+{{/if}}
+
+{{#if appealInstructions}}
+  <p style="margin: 12px 0 0 0; color: #666; font-size: 13px; line-height: 1.6;">
+    {{appealInstructions}}
+  </p>
+{{/if}}

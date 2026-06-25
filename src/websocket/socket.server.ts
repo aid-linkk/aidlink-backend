@@ -93,10 +93,30 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
       logger.info(`Client disconnected: ${socket.id}`);
     });
 
-    // Send welcome message
+    // Send welcome message with initial unread count
     socket.emit('connected', {
       message: 'Successfully connected to AidLink real-time updates',
       userId,
+    });
+
+    // Send initial unread notification count on connect
+    prisma.notification.count({
+      where: { userId, status: 'UNREAD' },
+    }).then(function(count) {
+      socket.emit('notification:unread_count', { unreadCount: count });
+    }).catch(function(err) {
+      logger.error('Error fetching initial unread count:', err);
+    });
+
+    // Handle unread count requests from clients
+    socket.on('notification:get_unread_count', function() {
+      prisma.notification.count({
+        where: { userId, status: 'UNREAD' },
+      }).then(function(count) {
+        socket.emit('notification:unread_count', { unreadCount: count });
+      }).catch(function(err) {
+        logger.error('Error fetching unread count:', err);
+      });
     });
   });
 
@@ -221,6 +241,15 @@ export const sendDistributionUpdate = async (distributionId: string): Promise<vo
 
 export const sendNotification = (userId: string, notification: any): void => {
   broadcastToUser(userId, 'notification:new', notification);
+};
+
+export const sendNotificationWithCount = (userId: string, notification: any, unreadCount: number): void => {
+  broadcastToUser(userId, 'notification:new', notification);
+  broadcastToUser(userId, 'notification:unread_count', { unreadCount });
+};
+
+export const sendUnreadCount = (userId: string, unreadCount: number): void => {
+  broadcastToUser(userId, 'notification:unread_count', { unreadCount });
 };
 
 // ─── Moderation events ─────────────────────────────────────────

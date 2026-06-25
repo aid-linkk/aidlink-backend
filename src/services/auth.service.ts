@@ -10,6 +10,7 @@ import { AppError } from '../middleware/error';
 import { NotificationService } from './notification.service';
 import { config } from '../config';
 import logger from '../config/logger';
+import { EmailPreferenceService } from './email-preference.service';
 
 const TOKEN_EXPIRY_HOURS = parseInt(process.env.VERIFICATION_TOKEN_EXPIRY_HOURS || '24', 10);
 const RESEND_RATE_LIMIT = parseInt(process.env.VERIFICATION_RESEND_RATE_LIMIT || '3', 10);
@@ -80,7 +81,13 @@ export class AuthService {
       },
     });
 
-    await createVerificationLog(user.id, 'SENT', tokenHash, meta?.ipAddress, meta?.userAgent);
+    // Create default email preferences (non-blocking)
+    EmailPreferenceService.createDefault(user.id).catch((err) =>
+      logger.error('Failed to create email preferences for new user:', err)
+    );
+
+    // Generate tokens
+    const tokens = this.generateTokens(user.id, user.email, user.role);
 
     // Send email async — don't block registration response
     sendVerificationEmail(normalizedEmail, username || normalizedEmail.split('@')[0], token).catch(
@@ -232,6 +239,11 @@ export class AuthService {
           emailVerified: true,
         },
       });
+
+      // Create default email preferences for new wallet user (non-blocking)
+      EmailPreferenceService.createDefault(user.id).catch((err) =>
+        logger.error('Failed to create email preferences for wallet user:', err)
+      );
     }
 
     await prisma.user.update({ where: { id: user.id }, data: { lastLogin: new Date() } });

@@ -91,10 +91,9 @@ export const reportLimiter = createRateLimiter(
   'Too many reports submitted, please try again later'
 );
 
-// Broad IP-level limiter for resend endpoint (fine-grained per-email limiting is in AuthService via Redis)
-export const resendVerificationLimiter = createRateLimiter(
-  60 * 60 * 1000, // 1 hour
-  10, // 10 requests per IP per hour
-  'Too many resend attempts, please try again later'
+export const receiptDownloadLimiter = createRateLimiter(
+  60 * 1000, // 1 minute
+  20, // 20 receipt downloads per minute
+  'Too many receipt download requests, please try again later'
 );
 

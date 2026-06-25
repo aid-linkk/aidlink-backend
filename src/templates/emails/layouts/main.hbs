@@ -1,0 +1,54 @@
+<!-- AidLink Main Email Layout -->
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>{{subject}}</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f4f6f8; font-family: 'Segoe UI', Arial, Helvetica, sans-serif;">
+  <table
+    role="presentation"
+    cellspacing="0"
+    cellpadding="0"
+    border="0"
+    width="100%"
+    style="background-color: #f4f6f8;"
+  >
+    <tr>
+      <td align="center" style="padding: 24px 12px;">
+        <table
+          role="presentation"
+          cellspacing="0"
+          cellpadding="0"
+          border="0"
+          width="100%"
+          style="max-width: 600px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);"
+        >
+          <!-- Header -->
+          <tr>
+            <td style="padding: 0;">
+              {{> header}}
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding: 24px;">
+              {{{body}}}
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 0;">
+              {{> footer}}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

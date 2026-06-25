@@ -1,0 +1,68 @@
+<!-- Distribution Sent Email Template -->
+{{> greeting name=userName fallback="Beneficiary"}}
+
+<p style="margin: 0 0 16px 0; font-size: 16px; color: #1f7a5a; font-weight: 600;">
+  Distribution Sent
+</p>
+
+<p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+  A distribution has been sent to you{{#if campaignName}} as part of <strong>{{campaignName}}</strong>{{/if}}.
+</p>
+
+<!-- Distribution Details Box -->
+<table
+  role="presentation"
+  cellspacing="0"
+  cellpadding="0"
+  border="0"
+  width="100%"
+  style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; margin: 16px 0;"
+>
+  <tr>
+    <td style="padding: 16px;">
+      <p style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: #333;">Distribution Details</p>
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+        <tr>
+          <td style="padding: 4px 0; color: #666; font-size: 14px; width: 50%;">Amount</td>
+          <td style="padding: 4px 0; color: #333; font-size: 14px;">{{formatCurrency amount currency}}</td>
+        </tr>
+        {{#if batchName}}
+          <tr>
+            <td style="padding: 4px 0; color: #666; font-size: 14px;">Batch</td>
+            <td style="padding: 4px 0; color: #333; font-size: 14px;">{{batchName}}</td>
+          </tr>
+        {{/if}}
+        {{#if itemsDelivered}}
+          <tr>
+            <td style="padding: 4px 0; color: #666; font-size: 14px;">Items Delivered</td>
+            <td style="padding: 4px 0; color: #333; font-size: 14px;">{{itemsDelivered}}</td>
+          </tr>
+        {{/if}}
+        {{#if beneficiariesReached}}
+          <tr>
+            <td style="padding: 4px 0; color: #666; font-size: 14px;">Beneficiaries Reached</td>
+            <td style="padding: 4px 0; color: #333; font-size: 14px;">{{beneficiariesReached}}</td>
+          </tr>
+        {{/if}}
+        {{#if deliveryDate}}
+          <tr>
+            <td style="padding: 4px 0; color: #666; font-size: 14px;">Delivery Date</td>
+            <td style="padding: 4px 0; color: #333; font-size: 14px;">{{formatDate deliveryDate}}</td>
+          </tr>
+        {{/if}}
+      </table>
+    </td>
+  </tr>
+</table>
+
+{{#if impactStory}}
+  <p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+    <em>"{{impactStory}}"</em>
+  </p>
+{{/if}}
+
+{{#if nextMilestone}}
+  <p style="margin: 0; color: #666; font-size: 14px; line-height: 1.6;">
+    <strong>Next milestone:</strong> {{nextMilestone}}
+  </p>
+{{/if}}

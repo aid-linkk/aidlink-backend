@@ -34,6 +34,10 @@ export const config = {
     user: process.env.SMTP_USER!,
     password: process.env.SMTP_PASSWORD!,
     from: process.env.EMAIL_FROM || 'noreply@aidlink.org',
+    queueEnabled: process.env.EMAIL_QUEUE_ENABLED === 'true',
+    appUrl: process.env.APP_URL || 'http://localhost:3000',
+    logoUrl: process.env.EMAIL_LOGO_URL || 'https://aidlink.org/logo.png',
+    supportEmail: process.env.SUPPORT_EMAIL || 'support@aidlink.org',
   },
   
   soroban: {
@@ -70,6 +74,16 @@ export const config = {
     healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL || '30000', 10),
   },
 
+  receipts: {
+    enabled: process.env.RECEIPTS_ENABLED !== 'false',
+    storagePrefix: process.env.RECEIPT_STORAGE_PREFIX || 'receipts',
+    senderEmail: process.env.RECEIPT_SENDER_EMAIL || process.env.EMAIL_FROM || 'noreply@aidlink.org',
+    urlExpirySeconds: parseInt(process.env.RECEIPT_URL_EXPIRY_SECONDS || '86400', 10),
+    defaultRegion: process.env.RECEIPT_DEFAULT_REGION || 'US',
+    regionalRequirements: process.env.REGIONAL_TAX_REQUIREMENTS,
+    maxBatchSize: parseInt(process.env.RECEIPT_MAX_BATCH_SIZE || '1000', 10),
+  },
+
   moderation: {
     // Feature flag: when false, the worker still records reports but never
     // auto-suspends. Admins can always suspend/reinstate manually.
@@ -83,6 +97,19 @@ export const config = {
     fraudReportWindowHours: parseInt(process.env.MODERATION_FRAUD_REPORT_WINDOW_HOURS || '24', 10),
     // Notify donors when a campaign is suspended for a fraud-related reason.
     notifyDonorsOnFraudSuspension: process.env.MODERATION_NOTIFY_DONORS_ON_FRAUD !== 'false',
+  },
+
+  analytics: {
+    // Cron patterns for rollup jobs (configurable via env vars)
+    hourlyRollupCron: process.env.ANALYTICS_HOURLY_CRON || '5 * * * *',
+    monthlyRollupCron: process.env.ANALYTICS_MONTHLY_CRON || '0 2 1 * *',
+    trendingRefreshCron: process.env.ANALYTICS_TRENDING_CRON || '*/15 * * * *',
+    // Feature flag to disable analytics worker
+    analyticsWorkerEnabled: process.env.ANALYTICS_WORKER_ENABLED !== 'false',
+    // Cache TTL for campaign stats in seconds
+    campaignStatsCacheTTL: parseInt(process.env.ANALYTICS_CACHE_TTL || '3600', 10),
+    // Number of trending campaigns to track
+    trendingCampaignsCount: parseInt(process.env.ANALYTICS_TRENDING_COUNT || '20', 10),
   },
 };
 

@@ -1,16 +1,80 @@
 import { Worker, Job } from 'bullmq';
+import { z } from 'zod';
 import { config } from '../config';
 import { NotificationService } from '../services/notification.service';
 import logger from '../config/logger';
 
-const emailWorker = new Worker(
-  'email-queue',
-  async (job: Job) => {
-    const { type, data } = job.data;
+// ── Job Data Schemas ────────────────────────────────────────────────
 
-    logger.info(`Processing email job: ${job.id}, type: ${type}`);
+const DonationReceivedSchema = z.object({
+  type: z.literal('DONATION_RECEIVED'),
+  data: z.object({
+    userId: z.string(),
+    campaignTitle: z.string().min(1),
+    amount: z.number().positive(),
+  }),
+});
 
-    try {
+const CampaignUpdateSchema = z.object({
+  type: z.literal('CAMPAIGN_UPDATE'),
+  data: z.object({
+    userId: z.string(),
+    campaignTitle: z.string().min(1),
+    update: z.string().min(1),
+  }),
+});
+
+const DistributionSentSchema = z.object({
+  type: z.literal('DISTRIBUTION_SENT'),
+  data: z.object({
+    userId: z.string(),
+    amount: z.number().positive(),
+  }),
+});
+
+const KYCApprovedSchema = z.object({
+  type: z.literal('KYC_APPROVED'),
+  data: z.object({
+    userId: z.string(),
+  }),
+});
+
+const KYCRejectedSchema = z.object({
+  type: z.literal('KYC_REJECTED'),
+  data: z.object({
+    userId: z.string(),
+    reason: z.string().min(1),
+  }),
+});
+
+const EmailJobSchema = z.union([
+  DonationReceivedSchema,
+  CampaignUpdateSchema,
+  DistributionSentSchema,
+  KYCApprovedSchema,
+  KYCRejectedSchema,
+]);
+
+type EmailJobData = z.infer<typeof EmailJobSchema>;
+
+// ── Worker Instance ─────────────────────────────────────────────────
+
+let emailWorker: Worker | null = null;
+
+function createWorker(): Worker {
+  return new Worker(
+    'email-queue',
+    async (job: Job<EmailJobData>) => {
+      const parsed = EmailJobSchema.safeParse(job.data);
+      if (!parsed.success) {
+        logger.error(`Invalid email job data for job ${job.id}:`, parsed.error.flatten());
+        throw new Error(`Invalid job data: ${parsed.error.message}`);
+      }
+
+      const { type, data } = parsed.data;
+
+      logger.info(`Processing email job: ${job.id}, type: ${type}`);
+
       switch (type) {
         case 'DONATION_RECEIVED':
           await NotificationService.sendDonationReceivedNotification(
@@ -47,31 +111,53 @@ const emailWorker = new Worker(
           break;
 
         default:
-          throw new Error(`Unknown email job type: ${type}`);
+          throw new Error(`Unknown email job type: ${(parsed.data as any).type}`);
       }
 
       logger.info(`Email job completed: ${job.id}`);
-    } catch (error) {
-      logger.error(`Email job failed: ${job.id}`, error);
-      throw error;
-    }
-  },
-  {
-    connection: {
-      host: config.bullmq.redisHost,
-      port: config.bullmq.redisPort,
-      password: config.bullmq.redisPassword,
     },
-    concurrency: 5,
+    {
+      connection: {
+        host: config.bullmq.redisHost,
+        port: config.bullmq.redisPort,
+        password: config.bullmq.redisPassword,
+      },
+      concurrency: 5,
+    }
+  );
+}
+
+// ── Lifecycle ───────────────────────────────────────────────────────
+
+export function startEmailWorker(): Worker {
+  if (emailWorker) {
+    logger.warn('Email worker is already running');
+    return emailWorker;
   }
-);
 
-emailWorker.on('completed', (job) => {
-  logger.info(`Email job completed: ${job.id}`);
-});
+  emailWorker = createWorker();
 
-emailWorker.on('failed', (job, err) => {
-  logger.error(`Email job failed: ${job?.id}`, err);
-});
+  emailWorker.on('completed', (job) => {
+    logger.info(`Email job completed: ${job.id}`);
+  });
+
+  emailWorker.on('failed', (job, err) => {
+    logger.error(`Email job failed: ${job?.id}`, err);
+  });
+
+  emailWorker.on('error', (err) => {
+    logger.error('Email worker error:', err);
+  });
+
+  logger.info('Email worker started (email-queue, concurrency=5)');
+  return emailWorker;
+}
+
+export async function stopEmailWorker(): Promise<void> {
+  if (!emailWorker) return;
+  await emailWorker.close();
+  emailWorker = null;
+  logger.info('Email worker stopped');
+}
 
 export default emailWorker;

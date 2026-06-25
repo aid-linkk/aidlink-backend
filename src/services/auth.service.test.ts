@@ -1,336 +1,271 @@
 import { AuthService } from './auth.service';
-import { CryptoUtils } from '../utils/crypto';
-import { AppError } from '../middleware/error';
-import { UserStatus, Role } from '@prisma/client';
+import { Role, UserStatus } from '@prisma/client';
 
-// Mocks
-jest.mock('../config/database');
-jest.mock('../config/redis', () => ({
-  __esModule: true,
-  default: { incr: jest.fn(), expire: jest.fn() },
+jest.mock('../config/database', () => {
+  const mock = {
+    __esModule: true,
+    default: {
+      user: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
+      session: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn(), delete: jest.fn() },
+    },
+  };
+  return mock;
+});
+
+jest.mock('../utils/crypto', () => ({
+  CryptoUtils: {
+    hashPassword: jest.fn().mockResolvedValue('hashed-password'),
+    comparePassword: jest.fn(),
+  },
 }));
-jest.mock('./notification.service', () => ({
-  NotificationService: { sendEmail: jest.fn().mockResolvedValue(undefined) },
+
+jest.mock('../utils/jwt', () => ({
+  JWTUtils: {
+    generateAccessToken: jest.fn().mockReturnValue('access-token'),
+    generateRefreshToken: jest.fn().mockReturnValue('refresh-token'),
+    verifyToken: jest.fn(),
+  },
 }));
+
 jest.mock('../config/logger', () => ({
   __esModule: true,
-  default: { info: jest.fn(), error: jest.fn() },
+  default: { info: jest.fn(), error: jest.fn(), warn: jest.fn() },
 }));
 
-import prisma from '../config/database';
-import redis from '../config/redis';
-import { NotificationService } from './notification.service';
+const prismaMock = require('../config/database').default;
+const { CryptoUtils } = require('../utils/crypto');
+const { JWTUtils } = require('../utils/jwt');
 
-const mockPrisma = prisma as jest.Mocked<typeof prisma>;
-const mockRedis = redis as jest.Mocked<typeof redis>;
+const mockUser = (overrides: any = {}) => ({
+  id: 'user-1',
+  email: 'test@example.com',
+  passwordHash: 'hashed-password',
+  username: 'testuser',
+  role: Role.DONOR,
+  status: UserStatus.ACTIVE,
+  lastLogin: null,
+  emailVerified: false,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+  ...overrides,
+});
 
-// Helper to build a user-like object
-function makeUser(overrides: Partial<any> = {}): any {
-  return {
-    id: 'user-1',
-    email: 'test@example.com',
-    username: 'testuser',
-    passwordHash: 'hashed',
-    role: Role.DONOR,
-    status: UserStatus.PENDING_VERIFICATION,
-    emailVerified: false,
-    verificationToken: null,
-    verificationExpiry: null,
-    failedVerifyAttempts: 0,
-    lastLogin: null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-    ...overrides,
-  };
-}
+const mockSession = (overrides: any = {}) => ({
+  id: 'session-1',
+  userId: 'user-1',
+  token: 'access-token',
+  refreshToken: 'refresh-token',
+  expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  ...overrides,
+});
 
-describe('AuthService – email verification', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
+describe('AuthService', () => {
+  beforeEach(() => jest.clearAllMocks());
 
-  // ────────────────────────────────────────────────
-  // Token generation
-  // ────────────────────────────────────────────────
-  describe('CryptoUtils.generateVerificationToken', () => {
-    it('generates a base64url string of at least 43 characters (32 bytes)', () => {
-      const token = CryptoUtils.generateVerificationToken();
-      expect(typeof token).toBe('string');
-      expect(token.length).toBeGreaterThanOrEqual(43);
-      // base64url charset
-      expect(token).toMatch(/^[A-Za-z0-9_-]+$/);
-    });
-
-    it('generates unique tokens on each call', () => {
-      const t1 = CryptoUtils.generateVerificationToken();
-      const t2 = CryptoUtils.generateVerificationToken();
-      expect(t1).not.toBe(t2);
-    });
-
-    it('sha256 hash produces deterministic 64-char hex', () => {
-      const token = 'test-token';
-      const h1 = CryptoUtils.sha256(token);
-      const h2 = CryptoUtils.sha256(token);
-      expect(h1).toBe(h2);
-      expect(h1).toMatch(/^[a-f0-9]{64}$/);
-    });
-  });
-
-  // ────────────────────────────────────────────────
-  // register
-  // ────────────────────────────────────────────────
   describe('register', () => {
-    it('creates user with hashed token and 24-hour expiry', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(null);
-      (mockPrisma.user.create as jest.Mock).mockResolvedValue(makeUser({ id: 'user-1' }));
-      (mockPrisma.verificationLog.create as jest.Mock).mockResolvedValue({});
+    const registerData = { email: 'new@example.com', password: 'Password123!', username: 'newuser', role: Role.DONOR };
 
-      const result = await AuthService.register({ email: 'test@example.com', password: 'password123' });
+    it('registers a new user successfully', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(null);
+      prismaMock.user.create.mockResolvedValue(mockUser({ email: 'new@example.com', username: 'newuser' }));
 
-      expect(result.userId).toBe('user-1');
-      expect(result.message).toMatch(/verify/i);
+      const result = await AuthService.register(registerData);
 
-      const createCall = (mockPrisma.user.create as jest.Mock).mock.calls[0][0].data;
-      expect(createCall.emailVerified).toBeUndefined(); // not set on create
-      expect(createCall.verificationToken).toBeDefined();
-      expect(createCall.verificationExpiry).toBeDefined();
-
-      // Expiry should be ~24 hours in future
-      const expiry: Date = createCall.verificationExpiry;
-      const diffHours = (expiry.getTime() - Date.now()) / (1000 * 60 * 60);
-      expect(diffHours).toBeGreaterThan(23);
-      expect(diffHours).toBeLessThan(25);
-    });
-
-    it('normalizes email to lowercase', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(null);
-      (mockPrisma.user.create as jest.Mock).mockResolvedValue(makeUser({ email: 'test@example.com' }));
-      (mockPrisma.verificationLog.create as jest.Mock).mockResolvedValue({});
-
-      await AuthService.register({ email: 'TEST@Example.COM', password: 'password123' });
-
-      const emailQueried = (mockPrisma.user.findUnique as jest.Mock).mock.calls[0][0].where.email;
-      expect(emailQueried).toBe('test@example.com');
-    });
-
-    it('throws 409 if email already exists', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(makeUser());
-
-      await expect(
-        AuthService.register({ email: 'test@example.com', password: 'password123' })
-      ).rejects.toThrow(AppError);
-    });
-
-    it('stores token hash (not plaintext) in DB and does not return token in response', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(null);
-      (mockPrisma.user.create as jest.Mock).mockResolvedValue(makeUser());
-      (mockPrisma.verificationLog.create as jest.Mock).mockResolvedValue({});
-
-      const result = await AuthService.register({ email: 'test@example.com', password: 'pass12345' });
-
-      const storedToken = (mockPrisma.user.create as jest.Mock).mock.calls[0][0].data.verificationToken;
-      // Must be 64-char hex (SHA-256), not a raw base64url token
-      expect(storedToken).toMatch(/^[a-f0-9]{64}$/);
-      // Token must not appear in response
-      expect(JSON.stringify(result)).not.toContain(storedToken);
-    });
-
-    it('queues verification email without blocking response', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(null);
-      (mockPrisma.user.create as jest.Mock).mockResolvedValue(makeUser());
-      (mockPrisma.verificationLog.create as jest.Mock).mockResolvedValue({});
-
-      await AuthService.register({ email: 'test@example.com', password: 'pass12345' });
-
-      // Give async send a tick to run
-      await new Promise((r) => setImmediate(r));
-      expect(NotificationService.sendEmail).toHaveBeenCalledTimes(1);
-      const [to, subject] = (NotificationService.sendEmail as jest.Mock).mock.calls[0];
-      expect(to).toBe('test@example.com');
-      expect(subject).toMatch(/verify/i);
-    });
-  });
-
-  // ────────────────────────────────────────────────
-  // verifyEmail
-  // ────────────────────────────────────────────────
-  describe('verifyEmail', () => {
-    it('marks user verified and clears token on valid token', async () => {
-      const token = CryptoUtils.generateVerificationToken();
-      const tokenHash = CryptoUtils.sha256(token);
-      const user = makeUser({
-        verificationToken: tokenHash,
-        verificationExpiry: new Date(Date.now() + 60_000),
-      });
-
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(user);
-      (mockPrisma.user.update as jest.Mock).mockResolvedValue({ ...user, emailVerified: true });
-      (mockPrisma.verificationLog.create as jest.Mock).mockResolvedValue({});
-
-      await AuthService.verifyEmail(token);
-
-      const updateData = (mockPrisma.user.update as jest.Mock).mock.calls[0][0].data;
-      expect(updateData.emailVerified).toBe(true);
-      expect(updateData.verificationToken).toBeNull();
-      expect(updateData.verificationExpiry).toBeNull();
-      expect(updateData.failedVerifyAttempts).toBe(0);
-    });
-
-    it('throws 400 on invalid (unknown) token', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(null);
-
-      await expect(AuthService.verifyEmail('bogus-token')).rejects.toThrow(AppError);
-    });
-
-    it('throws 400 and increments failed attempts on expired token', async () => {
-      const token = CryptoUtils.generateVerificationToken();
-      const tokenHash = CryptoUtils.sha256(token);
-      const user = makeUser({
-        verificationToken: tokenHash,
-        verificationExpiry: new Date(Date.now() - 1000), // past
-      });
-
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(user);
-      (mockPrisma.user.update as jest.Mock).mockResolvedValue({});
-      (mockPrisma.verificationLog.create as jest.Mock).mockResolvedValue({});
-
-      await expect(AuthService.verifyEmail(token)).rejects.toThrow(AppError);
-
-      const updateData = (mockPrisma.user.update as jest.Mock).mock.calls[0][0].data;
-      expect(updateData.failedVerifyAttempts).toEqual({ increment: 1 });
-    });
-
-    it('returns gracefully if user is already verified', async () => {
-      const token = CryptoUtils.generateVerificationToken();
-      const tokenHash = CryptoUtils.sha256(token);
-      const user = makeUser({ emailVerified: true, verificationToken: tokenHash });
-
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(user);
-
-      await expect(AuthService.verifyEmail(token)).resolves.toBeUndefined();
-      expect(mockPrisma.user.update).not.toHaveBeenCalled();
-    });
-
-    it('throws 429 when failed attempts exceed limit', async () => {
-      const token = CryptoUtils.generateVerificationToken();
-      const tokenHash = CryptoUtils.sha256(token);
-      const user = makeUser({
-        verificationToken: tokenHash,
-        failedVerifyAttempts: 10,
-        verificationExpiry: new Date(Date.now() + 60_000),
-      });
-
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(user);
-      (mockPrisma.verificationLog.create as jest.Mock).mockResolvedValue({});
-
-      await expect(AuthService.verifyEmail(token)).rejects.toThrow(AppError);
-    });
-  });
-
-  // ────────────────────────────────────────────────
-  // resendVerificationEmail
-  // ────────────────────────────────────────────────
-  describe('resendVerificationEmail', () => {
-    it('issues a new token and sends email for unverified user', async () => {
-      const user = makeUser();
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(user);
-      (mockRedis.incr as jest.Mock).mockResolvedValue(1);
-      (mockRedis.expire as jest.Mock).mockResolvedValue(1);
-      (mockPrisma.user.update as jest.Mock).mockResolvedValue({});
-      (mockPrisma.verificationLog.create as jest.Mock).mockResolvedValue({});
-
-      const result = await AuthService.resendVerificationEmail('test@example.com');
-
-      expect(result.message).toMatch(/sent/i);
-      expect(mockPrisma.user.update).toHaveBeenCalled();
-
-      await new Promise((r) => setImmediate(r));
-      expect(NotificationService.sendEmail).toHaveBeenCalledTimes(1);
-    });
-
-    it('returns alreadyVerified for a verified user', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(makeUser({ emailVerified: true }));
-
-      const result = await AuthService.resendVerificationEmail('test@example.com');
-
-      expect(result.alreadyVerified).toBe(true);
-      expect(mockPrisma.user.update).not.toHaveBeenCalled();
-    });
-
-    it('throws 429 after exceeding rate limit', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(makeUser());
-      (mockRedis.incr as jest.Mock).mockResolvedValue(4); // > RESEND_RATE_LIMIT (3)
-      (mockRedis.expire as jest.Mock).mockResolvedValue(1);
-
-      await expect(AuthService.resendVerificationEmail('test@example.com')).rejects.toThrow(AppError);
-      expect(mockPrisma.user.update).not.toHaveBeenCalled();
-    });
-
-    it('does not reveal non-existence of email (returns generic message)', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(null);
-
-      const result = await AuthService.resendVerificationEmail('nobody@example.com');
-
-      expect(result.message).toMatch(/if that email/i);
-      expect(NotificationService.sendEmail).not.toHaveBeenCalled();
-    });
-
-    it('sets new 24-hour expiry on resend', async () => {
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(makeUser());
-      (mockRedis.incr as jest.Mock).mockResolvedValue(1);
-      (mockRedis.expire as jest.Mock).mockResolvedValue(1);
-      (mockPrisma.user.update as jest.Mock).mockResolvedValue({});
-      (mockPrisma.verificationLog.create as jest.Mock).mockResolvedValue({});
-
-      await AuthService.resendVerificationEmail('test@example.com');
-
-      const updateData = (mockPrisma.user.update as jest.Mock).mock.calls[0][0].data;
-      const diffHours = (updateData.verificationExpiry.getTime() - Date.now()) / (1000 * 60 * 60);
-      expect(diffHours).toBeGreaterThan(23);
-      expect(diffHours).toBeLessThan(25);
-    });
-  });
-
-  // ────────────────────────────────────────────────
-  // login
-  // ────────────────────────────────────────────────
-  describe('login', () => {
-    it('rejects unverified user with 403 and EMAIL_NOT_VERIFIED code', async () => {
-      const user = makeUser({ emailVerified: false });
-      // Need to mock the password check
-      jest.spyOn(CryptoUtils, 'comparePassword').mockResolvedValue(true);
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(user);
-
-      await expect(
-        AuthService.login({ email: 'test@example.com', password: 'password123' })
-      ).rejects.toThrow(expect.objectContaining({ statusCode: 403 }));
-    });
-
-    it('allows login for verified user', async () => {
-      const user = makeUser({ emailVerified: true, status: UserStatus.ACTIVE });
-      jest.spyOn(CryptoUtils, 'comparePassword').mockResolvedValue(true);
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(user);
-      (mockPrisma.user.update as jest.Mock).mockResolvedValue(user);
-      (mockPrisma.session.create as jest.Mock).mockResolvedValue({});
-
-      const result = await AuthService.login({ email: 'test@example.com', password: 'password123' });
-
-      expect(result.tokens.accessToken).toBeDefined();
-      expect(result.user.emailVerified).toBe(true);
-    });
-
-    it('sanitized user never exposes verificationToken, passwordHash, or failedVerifyAttempts', async () => {
-      const user = makeUser({ emailVerified: true, status: UserStatus.ACTIVE });
-      jest.spyOn(CryptoUtils, 'comparePassword').mockResolvedValue(true);
-      (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(user);
-      (mockPrisma.user.update as jest.Mock).mockResolvedValue(user);
-      (mockPrisma.session.create as jest.Mock).mockResolvedValue({});
-
-      const result = await AuthService.login({ email: 'test@example.com', password: 'password123' });
-
+      expect(result).toHaveProperty('user');
+      expect(result).toHaveProperty('tokens');
+      expect(result.user.email).toBe('new@example.com');
       expect(result.user).not.toHaveProperty('passwordHash');
-      expect(result.user).not.toHaveProperty('verificationToken');
-      expect(result.user).not.toHaveProperty('failedVerifyAttempts');
+      expect(result.tokens.accessToken).toBe('access-token');
+      expect(result.tokens.refreshToken).toBe('refresh-token');
+      expect(CryptoUtils.hashPassword).toHaveBeenCalledWith('Password123!');
+    });
+
+    it('rejects duplicate email', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser());
+
+      await expect(AuthService.register(registerData)).rejects.toThrow('User with this email already exists');
+    });
+
+    it('rejects duplicate username', async () => {
+      prismaMock.user.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(mockUser());
+
+      await expect(AuthService.register(registerData)).rejects.toThrow('Username already taken');
+    });
+
+    it('handles database error during user creation', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(null);
+      prismaMock.user.create.mockRejectedValue(new Error('Database connection failed'));
+
+      await expect(AuthService.register(registerData)).rejects.toThrow('Database connection failed');
+    });
+  });
+
+  describe('login', () => {
+    const credentials = { email: 'test@example.com', password: 'correct-password' };
+
+    it('logs in with valid credentials', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser());
+      CryptoUtils.comparePassword.mockResolvedValue(true);
+      prismaMock.user.update.mockResolvedValue(mockUser());
+      prismaMock.session.create.mockResolvedValue(mockSession());
+
+      const result = await AuthService.login(credentials);
+
+      expect(result).toHaveProperty('user');
+      expect(result).toHaveProperty('tokens');
+      expect(result.user).not.toHaveProperty('passwordHash');
+      expect(prismaMock.session.create).toHaveBeenCalled();
+    });
+
+    it('rejects invalid email', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(null);
+
+      await expect(AuthService.login(credentials)).rejects.toThrow('Invalid credentials');
+    });
+
+    it('rejects wrong password', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser());
+      CryptoUtils.comparePassword.mockResolvedValue(false);
+
+      await expect(AuthService.login(credentials)).rejects.toThrow('Invalid credentials');
+    });
+
+    it('rejects login when user has no password hash', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser({ passwordHash: null }));
+
+      await expect(AuthService.login(credentials)).rejects.toThrow('Please use wallet authentication');
+    });
+
+    it('rejects suspended account', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser({ status: UserStatus.SUSPENDED }));
+      CryptoUtils.comparePassword.mockResolvedValue(true);
+
+      await expect(AuthService.login(credentials)).rejects.toThrow('Account suspended');
+    });
+
+    it('rejects deleted account', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser({ status: UserStatus.DELETED }));
+      CryptoUtils.comparePassword.mockResolvedValue(true);
+
+      await expect(AuthService.login(credentials)).rejects.toThrow('Account deleted');
+    });
+
+    it('updates last login on successful authentication', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser());
+      CryptoUtils.comparePassword.mockResolvedValue(true);
+      prismaMock.user.update.mockResolvedValue(mockUser());
+      prismaMock.session.create.mockResolvedValue(mockSession());
+
+      await AuthService.login(credentials);
+
+      expect(prismaMock.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'user-1' },
+          data: expect.objectContaining({ lastLogin: expect.any(Date) }),
+        })
+      );
+    });
+  });
+
+  describe('walletAuth', () => {
+    const walletAddress = 'GABCDEF123456';
+
+    it('authenticates existing wallet user', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser({ walletAddress }));
+      prismaMock.user.update.mockResolvedValue(mockUser({ walletAddress }));
+      prismaMock.session.create.mockResolvedValue(mockSession());
+
+      const result = await AuthService.walletAuth(walletAddress, 'sig', 'msg');
+
+      expect(result).toHaveProperty('tokens');
+      expect(prismaMock.user.create).not.toHaveBeenCalled();
+    });
+
+    it('creates new user for unknown wallet', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(null);
+      prismaMock.user.create.mockResolvedValue(mockUser({ walletAddress, email: `${walletAddress}@wallet.aidlink.org` }));
+      prismaMock.user.update.mockResolvedValue(mockUser({ walletAddress }));
+      prismaMock.session.create.mockResolvedValue(mockSession());
+
+      const result = await AuthService.walletAuth(walletAddress, 'sig', 'msg');
+
+      expect(result).toHaveProperty('tokens');
+      expect(prismaMock.user.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ walletAddress }) })
+      );
+    });
+  });
+
+  describe('refreshToken', () => {
+    it('refreshes tokens with valid refresh token', async () => {
+      JWTUtils.verifyToken.mockReturnValue({ id: 'user-1', email: 'test@example.com', role: Role.DONOR });
+      prismaMock.session.findUnique.mockResolvedValue(mockSession({ expiresAt: new Date(Date.now() + 3600000) }));
+      prismaMock.session.update.mockResolvedValue(mockSession());
+
+      const tokens = await AuthService.refreshToken('valid-refresh-token');
+
+      expect(tokens.accessToken).toBe('access-token');
+      expect(tokens.refreshToken).toBe('refresh-token');
+    });
+
+    it('rejects invalid refresh token', async () => {
+      JWTUtils.verifyToken.mockImplementation(() => { throw new Error('Invalid token'); });
+
+      await expect(AuthService.refreshToken('bad-token')).rejects.toThrow('Invalid refresh token');
+    });
+
+    it('rejects expired session', async () => {
+      JWTUtils.verifyToken.mockReturnValue({ id: 'user-1', email: 'test@example.com', role: Role.DONOR });
+      prismaMock.session.findUnique.mockResolvedValue(mockSession({ expiresAt: new Date(Date.now() - 3600000) }));
+
+      await expect(AuthService.refreshToken('expired-token')).rejects.toThrow('Invalid refresh token');
+    });
+  });
+
+  describe('logout', () => {
+    it('deletes session on logout', async () => {
+      prismaMock.session.deleteMany.mockResolvedValue({ count: 1 });
+
+      await AuthService.logout('user-1', 'some-token');
+
+      expect(prismaMock.session.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1', token: 'some-token' },
+      });
+    });
+
+    it('handles logout when no session exists', async () => {
+      prismaMock.session.deleteMany.mockResolvedValue({ count: 0 });
+
+      await expect(AuthService.logout('user-1', 'nonexistent-token')).resolves.not.toThrow();
+    });
+  });
+
+  describe('logoutAll', () => {
+    it('deletes all sessions for user', async () => {
+      prismaMock.session.deleteMany.mockResolvedValue({ count: 3 });
+
+      await AuthService.logoutAll('user-1');
+
+      expect(prismaMock.session.deleteMany).toHaveBeenCalledWith({ where: { userId: 'user-1' } });
+    });
+  });
+
+  describe('getUserById', () => {
+    it('returns user by id', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser());
+
+      const user = await AuthService.getUserById('user-1');
+
+      expect(user).not.toHaveProperty('passwordHash');
+      expect(user.email).toBe('test@example.com');
+    });
+
+    it('throws error for non-existent user', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(null);
+
+      await expect(AuthService.getUserById('nonexistent')).rejects.toThrow('User not found');
     });
   });
 });

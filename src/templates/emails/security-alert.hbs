@@ -1,0 +1,83 @@
+<!-- Security Alert Email Template -->
+{{> greeting name=userName fallback="there"}}
+
+<p style="margin: 0 0 16px 0; font-size: 16px; color: #d92d20; font-weight: 600;">
+  &#9888; Security Alert
+</p>
+
+<!-- Alert Type Banner -->
+<table
+  role="presentation"
+  cellspacing="0"
+  cellpadding="0"
+  border="0"
+  width="100%"
+  style="background-color: #fef3f2; border: 1px solid #fecaca; border-radius: 6px; margin: 16px 0;"
+>
+  <tr>
+    <td style="padding: 16px;">
+      <p style="margin: 0 0 6px 0; font-weight: 600; color: #b42318; font-size: 14px;">
+        {{#ifEq alertType "suspicious_login"}}
+          Suspicious Login Detected
+        {{else ifEq alertType "account_change"}}
+          Account Change Detected
+        {{else}}
+          Security Event
+        {{/ifEq}}
+      </p>
+      <p style="margin: 0; color: #b42318; font-size: 14px; line-height: 1.6;">
+        {{whatHappened}}
+      </p>
+    </td>
+  </tr>
+</table>
+
+<!-- Event Details -->
+<table
+  role="presentation"
+  cellspacing="0"
+  cellpadding="0"
+  border="0"
+  width="100%"
+  style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; margin: 16px 0;"
+>
+  <tr>
+    <td style="padding: 16px;">
+      <p style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600; color: #333;">Event Details</p>
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+        <tr>
+          <td style="padding: 4px 0; color: #666; font-size: 14px; width: 40%;">Time</td>
+          <td style="padding: 4px 0; color: #333; font-size: 14px;">{{formatDateTime timestamp}}</td>
+        </tr>
+        {{#if ipAddress}}
+          <tr>
+            <td style="padding: 4px 0; color: #666; font-size: 14px;">IP Address</td>
+            <td style="padding: 4px 0; color: #333; font-size: 14px;">{{ipAddress}}</td>
+          </tr>
+        {{/if}}
+        {{#if location}}
+          <tr>
+            <td style="padding: 4px 0; color: #666; font-size: 14px;">Location</td>
+            <td style="padding: 4px 0; color: #333; font-size: 14px;">{{location}}</td>
+          </tr>
+        {{/if}}
+      </table>
+    </td>
+  </tr>
+</table>
+
+{{#if recommendedActions}}
+  <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 16px; margin: 16px 0;">
+    <p style="margin: 0 0 6px 0; font-weight: 600; color: #1e40af; font-size: 14px;">Recommended Actions</p>
+    <p style="margin: 0; color: #1e40af; font-size: 14px; line-height: 1.6;">
+      {{recommendedActions}}
+    </p>
+  </div>
+{{/if}}
+
+{{#if supportContact}}
+  <p style="margin: 12px 0 0 0; color: #666; font-size: 14px; line-height: 1.6;">
+    If you did not perform this action, please contact us immediately at
+    <a href="mailto:{{supportContact}}" style="color: #1f7a5a; font-weight: 600;">{{supportContact}}</a>.
+  </p>
+{{/if}}

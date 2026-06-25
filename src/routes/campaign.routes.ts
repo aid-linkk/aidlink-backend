@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import { CampaignController } from '../controllers/campaign.controller';
 import { ModerationController } from '../controllers/moderation.controller';
+import { MilestoneController } from '../controllers/milestone.controller';
+import { AnalyticsController } from '../controllers/analytics.controller';
 import { authenticate } from '../middleware/auth';
+import milestoneSubmissionRoutes from './milestone.routes';
 import { campaignCreateLimiter, reportLimiter } from '../middleware/rateLimit';
 import { validate } from '../middleware/validation';
 import { campaignSchema, fraudReportSchema, appealSchema } from '../utils/validation';
@@ -88,6 +91,35 @@ router.post('/', campaignCreateLimiter, validate(campaignSchema), CampaignContro
  *         description: Campaigns retrieved successfully
  */
 router.get('/', CampaignController.getCampaigns);
+
+/**
+ * @swagger
+ * /api/v1/campaigns/trending:
+ *   get:
+ *     summary: Get trending campaigns by donation velocity, donor growth, or impact
+ *     tags: [Campaigns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: period
+ *         schema:
+ *           type: string
+ *           enum: [last24h, last7d, last30d]
+ *       - in: query
+ *         name: sortBy
+ *         schema:
+ *           type: string
+ *           enum: [trendScore, donationVelocity, distributionImpact]
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Trending campaigns retrieved successfully
+ */
+router.get('/trending', AnalyticsController.getTrendingCampaigns);
 
 /**
  * @swagger
@@ -285,6 +317,61 @@ router.get('/:id/stats', CampaignController.getCampaignStats);
 
 /**
  * @swagger
+ * /api/v1/campaigns/{id}/impact-metrics:
+ *   get:
+ *     summary: Get campaign impact metrics from aggregated data
+ *     tags: [Campaigns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Campaign impact metrics retrieved successfully
+ */
+router.get('/:id/impact-metrics', AnalyticsController.getCampaignImpactMetrics);
+
+/**
+ * @swagger
+ * /api/v1/campaigns/{id}/statistics/historical:
+ *   get:
+ *     summary: Get monthly or weekly rollup data for trend charts
+ *     tags: [Campaigns]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: granularity
+ *         schema:
+ *           type: string
+ *           enum: [hourly, monthly]
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *     responses:
+ *       200:
+ *         description: Historical statistics retrieved successfully
+ */
+router.get('/:id/statistics/historical', AnalyticsController.getCampaignHistoricalStats);
+
+/**
+ * @swagger
  * /api/v1/campaigns/{id}/reports:
  *   post:
  *     summary: Report a campaign for fraud or policy violation
@@ -366,5 +453,35 @@ router.post('/:id/reports', reportLimiter, validate(fraudReportSchema), Moderati
  */
 router.post('/:id/appeals', validate(appealSchema), ModerationController.submitAppeal);
 router.get('/:id/appeals', ModerationController.getCampaignAppeals);
+
+// ─── Milestone verification (Organization) ─────────────────────
+
+router.use('/:campaignId/milestones/:milestoneId/submissions', milestoneSubmissionRoutes);
+
+/**
+ * @swagger
+ * /api/v1/campaigns/{campaignId}/milestones/{milestoneId}/verification-report:
+ *   get:
+ *     summary: Public-facing verification report for a milestone
+ *     tags: [Milestones]
+ *     parameters:
+ *       - in: path
+ *         name: campaignId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: milestoneId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Verification report retrieved
+ */
+router.get(
+  '/:campaignId/milestones/:milestoneId/verification-report',
+  MilestoneController.getVerificationReport
+);
 
 export default router;

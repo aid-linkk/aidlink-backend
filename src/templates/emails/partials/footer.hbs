@@ -1,0 +1,20 @@
+<!-- AidLink Email Footer Partial -->
+<div style="border-top: 1px solid #e0e0e0; padding: 20px 24px; text-align: center; color: #999; font-size: 12px; line-height: 1.6;">
+  <p style="margin: 0 0 8px 0;">
+    &copy; {{currentYear}} AidLink. All rights reserved.
+  </p>
+  <p style="margin: 0 0 8px 0;">
+    This is an automated message from AidLink.
+    {{#if supportEmail}}
+      If you need help, contact us at
+      <a href="mailto:{{supportEmail}}" style="color: #1f7a5a;">{{supportEmail}}</a>.
+    {{/if}}
+  </p>
+  {{#if managePreferencesLink}}
+    <p style="margin: 0;">
+      <a href="{{managePreferencesLink}}" style="color: #1f7a5a; text-decoration: underline;">
+        Manage your email preferences
+      </a>
+    </p>
+  {{/if}}
+</div>

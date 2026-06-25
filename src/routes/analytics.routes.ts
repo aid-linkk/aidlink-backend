@@ -65,4 +65,16 @@ router.post(
   AnalyticsController.generateReport
 );
 
+/**
+ * @route   GET /api/v1/analytics/campaigns
+ * @desc    Admin endpoint to query aggregated campaign metrics
+ * @access  Private (Admin)
+ */
+router.get(
+  '/campaigns',
+  authenticate,
+  analyticsLimiter,
+  AnalyticsController.getAggregatedCampaignAnalytics
+);
+
 export default router;

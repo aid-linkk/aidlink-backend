@@ -69,11 +69,11 @@ export class DonationController {
     }
   }
 
-  static async getDonationById(req: Request, res: Response, next: NextFunction): Promise<void> {
+  static async getDonationById(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
-      const result = await DonationService.getDonationById(id);
-      
+      const result = await DonationService.getDonationById(id, req.user?.id);
+
       res.status(200).json({
         success: true,
         data: result,
@@ -123,8 +123,8 @@ export class DonationController {
         sortOrder: req.query.sortOrder as string || 'desc',
       };
 
-      const result = await DonationService.getDonations(filters, pagination);
-      
+      const result = await DonationService.getDonations(filters, pagination, req.user.id);
+
       res.status(200).json({
         success: true,
         ...result,
