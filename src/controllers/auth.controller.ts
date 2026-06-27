@@ -120,4 +120,40 @@ export class AuthController {
       next(error);
     }
   }
+
+  static async verifyEmail(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { token } = req.query;
+
+      if (!token || typeof token !== 'string') {
+        throw new AppError('Verification token is required', 400);
+      }
+
+      await AuthService.verifyEmail(token);
+
+      res.status(200).json({
+        success: true,
+        message: 'Email verified successfully',
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async resendVerification(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      if (!req.user) {
+        throw new AppError('Authentication required', 401);
+      }
+
+      await AuthService.resendVerificationEmail(req.user.id);
+
+      res.status(200).json({
+        success: true,
+        message: 'Verification email sent',
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }

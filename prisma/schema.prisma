@@ -45,27 +45,20 @@ model User {
   updatedAt     DateTime   @updatedAt
 
   // Relations
-  sessions       Session[]
-  organizations  Organization?
-  beneficiary    Beneficiary?
-  donations      Donation[]
-  campaigns      Campaign[]
-  auditLogs      AuditLog[]
-  notifications  Notification[]
- kycSubmissions KYCSubmission[]
-  pledges        Pledge[]
-  sessions         Session[]
-  organizations    Organization?
-  beneficiary      Beneficiary?
-  donations        Donation[]
-  campaigns        Campaign[]
-  auditLogs        AuditLog[]
-  notifications    Notification[]
-  kycSubmissions   KYCSubmission[]
-  donorCredits   DonorCredit[]
-  taxReceipts      TaxReceipt[]
-  receiptBatchJobs ReceiptBatchJob[]
-  emailPreference  EmailPreference?
+  sessions                Session[]
+  organizations           Organization?
+  beneficiary             Beneficiary?
+  donations               Donation[]
+  campaigns               Campaign[]
+  auditLogs               AuditLog[]
+  notifications           Notification[]
+  kycSubmissions          KYCSubmission[]
+  pledges                 Pledge[]
+  donorCredits            DonorCredit[]
+  taxReceipts             TaxReceipt[]
+  receiptBatchJobs        ReceiptBatchJob[]
+  emailPreference         EmailPreference?
+  emailVerificationTokens EmailVerificationToken[]
 
   @@index([email])
   @@index([walletAddress])
@@ -1138,6 +1131,8 @@ model PledgeAttempt {
   @@index([pledgeId])
   @@index([status])
   @@map("pledge_attempts")
+}
+
 // ============================================
 // TAX RECEIPTS
 // ============================================
@@ -1213,4 +1208,18 @@ model ReceiptBatchJob {
   @@index([createdBy])
   @@index([status])
   @@index([createdAt])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
 }
