@@ -6,6 +6,7 @@ import logger from '../config/logger';
 import { config } from '../config';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 import { AnalyticsService } from './analytics.service';
+import { sanitizeString } from '../utils/sanitization';
 
 export class DonationService {
   static async createDonation(data: DonationInput, userId?: string): Promise<any> {
@@ -24,6 +25,7 @@ export class DonationService {
     const donation = await prisma.donation.create({
       data: {
         ...data,
+        donorMessage: data.donorMessage ? sanitizeString(data.donorMessage) : undefined,
         userId,
         status: DonationStatus.PENDING,
       },

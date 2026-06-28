@@ -139,6 +139,27 @@ describe('NotificationService', () => {
         })
       );
     });
+
+    it('sanitizes notification title, message, and metadata before create', async () => {
+      prismaMock.notification.create.mockImplementation(async ({ data }) => ({
+        ...mockNotification(),
+        title: data.title,
+        message: data.message,
+        metadata: data.metadata,
+      }));
+
+      const result = await NotificationService.createNotification(
+        'user-1',
+        NotificationType.SECURITY_ALERT,
+        '<img src=x onerror=alert(1)>',
+        '<script>alert(1)</script>',
+        { reason: '<b>test</b>', count: 5 },
+      );
+
+      expect(result.title).toBe('&lt;img src=x onerror=alert(1)&gt;');
+      expect(result.message).toBe('&lt;script&gt;alert(1)&lt;/script&gt;');
+      expect(result.metadata).toEqual({ reason: '&lt;b&gt;test&lt;/b&gt;', count: 5 });
+    });
   });
 
   describe('sendEmail', () => {

@@ -46,6 +46,30 @@ describe('DonationService', () => {
       expect(result.status).toBe('PENDING');
     });
 
+    it('sanitizes donorMessage when creating a donation', async () => {
+      const mockCampaign = { id: '1', status: 'ACTIVE' };
+      const unsanitizedMessage = '<script>alert("xss")</script>';
+      const sanitizedMessage = '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;';
+
+      (prisma.campaign.findUnique as jest.Mock).mockResolvedValue(mockCampaign);
+      (prisma.donation.create as jest.Mock).mockImplementation(async ({ data }) => ({
+        id: '1',
+        campaignId: '1',
+        amount: 100,
+        status: 'PENDING',
+        donorMessage: data.donorMessage,
+      }));
+
+      const result = await DonationService.createDonation({
+        campaignId: '1',
+        amount: 100,
+        currency: 'XLM',
+        donorMessage: unsanitizedMessage,
+      });
+
+      expect(result.donorMessage).toBe(sanitizedMessage);
+    });
+
     it('should throw error if campaign not found', async () => {
       (prisma.campaign.findUnique as jest.Mock).mockResolvedValue(null);
 

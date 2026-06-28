@@ -6,6 +6,7 @@ import { config } from '../config';
 import { sendNotificationWithCount, sendUnreadCount } from '../websocket/socket.server';
 import { EmailTemplateService } from './emailTemplate.service';
 import { EmailPreferenceService } from './email-preference.service';
+import { sanitizeObject, sanitizeString } from '../utils/sanitization';
 
 export class NotificationService {
   private static transporter = nodemailer.createTransport({
@@ -65,9 +66,9 @@ export class NotificationService {
       data: {
         userId,
         type,
-        title,
-        message,
-        metadata,
+        title: sanitizeString(title),
+        message: sanitizeString(message),
+        metadata: metadata ? sanitizeObject(metadata) : undefined,
         sentVia: [],
       },
     });
