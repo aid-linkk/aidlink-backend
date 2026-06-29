@@ -1,6 +1,8 @@
 import { Response, NextFunction } from 'express';
 import { SearchService, SearchFilters } from '../services/search.service';
 import { AuthRequest } from '../types';
+import { beneficiarySearchSchema } from '../utils/validation';
+import { AppError } from '../middleware/error';
 
 export class SearchController {
   static async searchCampaigns(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
@@ -57,19 +59,31 @@ export class SearchController {
 
   static async searchBeneficiaries(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const filters: SearchFilters = {
-        query: req.query.query as string,
-        dateFrom: req.query.dateFrom ? new Date(req.query.dateFrom as string) : undefined,
-        dateTo: req.query.dateTo ? new Date(req.query.dateTo as string) : undefined,
-        status: req.query.status as string,
-        country: req.query.country as string,
-        sortBy: req.query.sortBy as string,
-        sortOrder: req.query.sortOrder as 'asc' | 'desc',
-        page: req.query.page ? parseInt(req.query.page as string) : 1,
-        limit: req.query.limit ? parseInt(req.query.limit as string) : 20,
-      };
+      const parsed = beneficiarySearchSchema.safeParse(req.query);
+      if (!parsed.success) {
+        const message = parsed.error.errors
+          .map((e) => `${e.path.join('.') || 'query'}: ${e.message}`)
+          .join('; ');
+        throw new AppError(`Invalid search parameters: ${message}`, 400);
+      }
 
-      const results = await SearchService.searchBeneficiaries(filters);
+      const results = await SearchService.searchBeneficiaries({
+        query: parsed.data.q,
+        country: parsed.data.country,
+        city: parsed.data.city,
+        needsCategory: parsed.data.needsCategory,
+        verificationStatus: parsed.data.verificationStatus,
+        riskScoreMin: parsed.data.riskScoreMin,
+        riskScoreMax: parsed.data.riskScoreMax,
+        ageMin: parsed.data.ageMin,
+        ageMax: parsed.data.ageMax,
+        familySizeMin: parsed.data.familySizeMin,
+        familySizeMax: parsed.data.familySizeMax,
+        sortBy: parsed.data.sortBy,
+        sortOrder: parsed.data.sortOrder,
+        page: parsed.data.page,
+        limit: parsed.data.limit,
+      });
 
       res.status(200).json({
         success: true,

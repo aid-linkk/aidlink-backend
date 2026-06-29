@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { SearchController } from '../controllers/search.controller';
-import { authenticate } from '../middleware/auth';
+import { authenticate, authorize } from '../middleware/auth';
 import { searchLimiter } from '../middleware/rateLimit';
 
 const router = Router();
@@ -31,12 +31,17 @@ router.get(
 
 /**
  * @route   GET /api/v1/search/beneficiaries
- * @desc    Search beneficiaries with advanced filtering
- * @access  Private
+ * @desc    Search beneficiaries with advanced filtering, pagination, sorting and facets
+ * @query   q, country, city, needsCategory, verificationStatus,
+ *          riskScoreMin, riskScoreMax, ageMin, ageMax, familySizeMin, familySizeMax,
+ *          page, limit, sortBy (relevance|createdAt|updatedAt|riskScore|age|familySize),
+ *          sortOrder (asc|desc)
+ * @access  Private (Admin, Verifier) — exposes beneficiary PII
  */
 router.get(
   '/beneficiaries',
   authenticate,
+  authorize('ADMIN', 'VERIFIER'),
   searchLimiter,
   SearchController.searchBeneficiaries
 );

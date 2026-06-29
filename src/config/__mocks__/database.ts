@@ -44,6 +44,7 @@ const prismaMock: any = {
     create: jest.fn(),
     update: jest.fn(),
     count: jest.fn(),
+    groupBy: jest.fn().mockResolvedValue([]),
   },
   taxReceipt: {
     findUnique: jest.fn(),

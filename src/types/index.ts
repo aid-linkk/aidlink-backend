@@ -105,6 +105,7 @@ export interface BeneficiaryInput {
   familySize?: number;
   needsDescription: string;
   needsAssessment?: string;
+  needsCategory?: string;
 }
 
 export interface CampaignInput {

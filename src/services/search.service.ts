@@ -1,5 +1,4 @@
 import prisma from '../config/database';
-import logger from '../config/logger';
 import { getOrSet, buildKey } from '../utils/cache';
 
 export interface SearchFilters {
@@ -15,6 +14,121 @@ export interface SearchFilters {
   sortOrder?: 'asc' | 'desc';
   page?: number;
   limit?: number;
+}
+
+export type BeneficiarySortField =
+  | 'relevance'
+  | 'createdAt'
+  | 'updatedAt'
+  | 'riskScore'
+  | 'age'
+  | 'familySize';
+
+export interface BeneficiarySearchFilters {
+  query?: string;
+  country?: string;
+  city?: string;
+  needsCategory?: string;
+  verificationStatus?: string;
+  riskScoreMin?: number;
+  riskScoreMax?: number;
+  ageMin?: number;
+  ageMax?: number;
+  familySizeMin?: number;
+  familySizeMax?: number;
+  sortBy?: BeneficiarySortField;
+  sortOrder?: 'asc' | 'desc';
+  page?: number;
+  limit?: number;
+}
+
+interface NumericBucket {
+  label: string;
+  min: number;
+  max: number;
+}
+
+const RISK_SCORE_BUCKETS: NumericBucket[] = [
+  { label: '0-25', min: 0, max: 25 },
+  { label: '26-50', min: 26, max: 50 },
+  { label: '51-75', min: 51, max: 75 },
+  { label: '76+', min: 76, max: Number.POSITIVE_INFINITY },
+];
+
+type BeneficiaryFacetDimension =
+  | 'country'
+  | 'city'
+  | 'needsCategory'
+  | 'status'
+  | 'risk'
+  | 'family'
+  | 'age';
+
+const AGE_BUCKETS: NumericBucket[] = [
+  { label: '0-17', min: 0, max: 17 },
+  { label: '18-25', min: 18, max: 25 },
+  { label: '26-35', min: 26, max: 35 },
+  { label: '36-50', min: 36, max: 50 },
+  { label: '51-65', min: 51, max: 65 },
+  { label: '66+', min: 66, max: Number.POSITIVE_INFINITY },
+];
+
+const FAMILY_SIZE_BUCKETS: NumericBucket[] = [
+  { label: '1', min: 1, max: 1 },
+  { label: '2-3', min: 2, max: 3 },
+  { label: '4-5', min: 4, max: 5 },
+  { label: '6+', min: 6, max: Number.POSITIVE_INFINITY },
+];
+
+function subtractYears(date: Date, years: number): Date {
+  const d = new Date(date);
+  d.setFullYear(d.getFullYear() - years);
+  return d;
+}
+
+function ageRangeToDobFilter(
+  ageMin: number | undefined,
+  ageMax: number | undefined,
+  now: Date
+): { gt?: Date; lte?: Date } | undefined {
+  const dob: { gt?: Date; lte?: Date } = {};
+  if (ageMin !== undefined) {
+    // At least `ageMin` years old => born on or before (now - ageMin years).
+    dob.lte = subtractYears(now, ageMin);
+  }
+  if (ageMax !== undefined) {
+    // At most `ageMax` years old => born after (now - (ageMax + 1) years).
+    dob.gt = subtractYears(now, ageMax + 1);
+  }
+  return Object.keys(dob).length ? dob : undefined;
+}
+
+type GroupCount = { _count: { _all: number } } & Record<string, unknown>;
+
+function toValueFacet(
+  groups: GroupCount[],
+  field: string
+): Array<{ value: unknown; count: number }> {
+  return groups
+    .filter((g) => g[field] !== null && g[field] !== undefined)
+    .map((g) => ({ value: g[field], count: g._count._all }))
+    .sort((a, b) => b.count - a.count);
+}
+
+function bucketize(
+  groups: GroupCount[],
+  field: string,
+  buckets: NumericBucket[]
+): Array<{ range: string; count: number }> {
+  const counts = buckets.map(() => 0);
+  for (const group of groups) {
+    const raw = group[field];
+    if (raw === null || raw === undefined) continue;
+    const value = Number(raw);
+    const index = buckets.findIndex((b) => value >= b.min && value <= b.max);
+    if (index >= 0) counts[index] += group._count._all;
+  }
+  return buckets.map((b, i) => ({ range: b.label, count: counts[i] }));
 }
 
 export class SearchService {
@@ -177,20 +291,24 @@ export class SearchService {
     };
   }
 
-  static async searchBeneficiaries(filters: SearchFilters) {
+  static buildBeneficiaryWhere(
+    filters: BeneficiarySearchFilters,
+    now: Date,
+    exclude: ReadonlySet<string> = new Set()
+  ): any {
     const {
       query,
-      dateFrom,
-      dateTo,
-      status,
       country,
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-      page = 1,
-      limit = 20,
+      city,
+      needsCategory,
+      verificationStatus,
+      riskScoreMin,
+      riskScoreMax,
+      ageMin,
+      ageMax,
+      familySizeMin,
+      familySizeMax,
     } = filters;
-
-    const skip = (page - 1) * limit;
 
     const where: any = {};
 
@@ -200,29 +318,121 @@ export class SearchService {
         { lastName: { contains: query, mode: 'insensitive' } },
         { idDocumentNumber: { contains: query, mode: 'insensitive' } },
         { phoneNumber: { contains: query, mode: 'insensitive' } },
+        { needsAssessment: { contains: query, mode: 'insensitive' } },
       ];
     }
 
-    if (status) {
-      where.status = status;
+    if (verificationStatus && !exclude.has('status')) where.status = verificationStatus;
+    if (country && !exclude.has('country')) where.country = country;
+    if (city && !exclude.has('city')) where.city = city;
+    if (needsCategory && !exclude.has('needsCategory')) where.needsCategory = needsCategory;
+
+    if (!exclude.has('risk') && (riskScoreMin !== undefined || riskScoreMax !== undefined)) {
+      where.riskScore = {};
+      if (riskScoreMin !== undefined) where.riskScore.gte = riskScoreMin;
+      if (riskScoreMax !== undefined) where.riskScore.lte = riskScoreMax;
     }
 
-    if (country) {
-      where.country = country;
+    if (!exclude.has('family') && (familySizeMin !== undefined || familySizeMax !== undefined)) {
+      where.familySize = {};
+      if (familySizeMin !== undefined) where.familySize.gte = familySizeMin;
+      if (familySizeMax !== undefined) where.familySize.lte = familySizeMax;
     }
 
-    if (dateFrom || dateTo) {
-      where.createdAt = {};
-      if (dateFrom) where.createdAt.gte = dateFrom;
-      if (dateTo) where.createdAt.lte = dateTo;
+    if (!exclude.has('age')) {
+      const dobFilter = ageRangeToDobFilter(ageMin, ageMax, now);
+      if (dobFilter) where.dateOfBirth = dobFilter;
     }
 
-    const [beneficiaries, total] = await Promise.all([
+    return where;
+  }
+
+  static buildBeneficiaryOrderBy(
+    sortBy: BeneficiarySortField,
+    sortOrder: 'asc' | 'desc'
+  ): any[] {
+    const tiebreaker = { id: 'asc' as const };
+    switch (sortBy) {
+      case 'age':
+        // Older age => earlier dateOfBirth, so invert the requested order.
+        return [{ dateOfBirth: sortOrder === 'desc' ? 'asc' : 'desc' }, tiebreaker];
+      case 'relevance':
+        // No full-text relevance scoring available; fall back to recency.
+        return [{ createdAt: sortOrder }, tiebreaker];
+      case 'createdAt':
+      case 'updatedAt':
+      case 'riskScore':
+      case 'familySize':
+        return [{ [sortBy]: sortOrder }, tiebreaker];
+      default:
+        return [{ createdAt: 'desc' }, tiebreaker];
+    }
+  }
+
+  static beneficiaryFacetQueries(filters: BeneficiarySearchFilters, now: Date): any[] {
+    const whereExcluding = (dimension: BeneficiaryFacetDimension) =>
+      this.buildBeneficiaryWhere(filters, now, new Set<string>([dimension]));
+
+    const ageBase = whereExcluding('age');
+    const ageQueries = AGE_BUCKETS.map((bucket) => {
+      const dob = ageRangeToDobFilter(
+        bucket.min > 0 ? bucket.min : undefined,
+        Number.isFinite(bucket.max) ? bucket.max : undefined,
+        now
+      );
+      const where = dob ? { AND: [ageBase, { dateOfBirth: dob }] } : ageBase;
+      return prisma.beneficiary.count({ where });
+    });
+
+    return [
+      prisma.beneficiary.groupBy({ by: ['country'], where: whereExcluding('country'), _count: { _all: true } }),
+      prisma.beneficiary.groupBy({ by: ['city'], where: whereExcluding('city'), _count: { _all: true } }),
+      prisma.beneficiary.groupBy({ by: ['needsCategory'], where: whereExcluding('needsCategory'), _count: { _all: true } }),
+      prisma.beneficiary.groupBy({ by: ['status'], where: whereExcluding('status'), _count: { _all: true } }),
+      prisma.beneficiary.groupBy({ by: ['riskScore'], where: whereExcluding('risk'), _count: { _all: true } }),
+      prisma.beneficiary.groupBy({ by: ['familySize'], where: whereExcluding('family'), _count: { _all: true } }),
+      ...ageQueries,
+    ];
+  }
+
+  static assembleBeneficiaryFacets(results: any[]) {
+    const [countryGroups, cityGroups, needsGroups, statusGroups, riskGroups, familyGroups, ...ageCounts] =
+      results;
+
+    return {
+      countries: toValueFacet(countryGroups as GroupCount[], 'country'),
+      cities: toValueFacet(cityGroups as GroupCount[], 'city'),
+      needsCategories: toValueFacet(needsGroups as GroupCount[], 'needsCategory'),
+      verificationStatuses: toValueFacet(statusGroups as GroupCount[], 'status'),
+      riskScoreRanges: bucketize(riskGroups as GroupCount[], 'riskScore', RISK_SCORE_BUCKETS),
+      ageRanges: AGE_BUCKETS.map((bucket, i) => ({
+        range: bucket.label,
+        count: (ageCounts[i] as number) ?? 0,
+      })),
+      familySizeRanges: bucketize(familyGroups as GroupCount[], 'familySize', FAMILY_SIZE_BUCKETS),
+    };
+  }
+
+  static async searchBeneficiaries(filters: BeneficiarySearchFilters) {
+    const {
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+      page = 1,
+      limit = 20,
+    } = filters;
+
+    const now = new Date();
+    const skip = (page - 1) * limit;
+    const where = this.buildBeneficiaryWhere(filters, now);
+    const orderBy = this.buildBeneficiaryOrderBy(sortBy, sortOrder);
+    const facetQueries = this.beneficiaryFacetQueries(filters, now);
+
+    const [beneficiaries, total, ...facetResults] = await prisma.$transaction([
       prisma.beneficiary.findMany({
         where,
         skip,
         take: limit,
-        orderBy: { [sortBy]: sortOrder },
+        orderBy,
         include: {
           user: {
             select: {
@@ -238,6 +448,7 @@ export class SearchService {
         },
       }),
       prisma.beneficiary.count({ where }),
+      ...facetQueries,
     ]);
 
     return {
@@ -248,6 +459,7 @@ export class SearchService {
         total,
         totalPages: Math.ceil(total / limit),
       },
+      facets: this.assembleBeneficiaryFacets(facetResults),
     };
   }
 
@@ -257,8 +469,6 @@ export class SearchService {
     if (!query) {
       throw new Error('Query is required for global search');
     }
-
-    const skip = (page - 1) * limit;
 
     // Search across multiple entities
     const [campaigns, donations, beneficiaries] = await Promise.all([
@@ -333,7 +543,15 @@ export class SearchService {
       case 'donation':
         return this.searchDonations(filters);
       case 'beneficiary':
-        return this.searchBeneficiaries(filters);
+        return this.searchBeneficiaries({
+          query: filters.query,
+          country: filters.country,
+          verificationStatus: filters.status,
+          sortBy: filters.sortBy as BeneficiarySortField,
+          sortOrder: filters.sortOrder,
+          page: filters.page,
+          limit: filters.limit,
+        });
       case 'global':
         return this.globalSearch(filters);
       default:
