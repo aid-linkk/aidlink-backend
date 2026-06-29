@@ -6,8 +6,20 @@ jest.mock('../config/database', () => {
     __esModule: true,
     default: {
       user: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
-      session: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn(), delete: jest.fn() },
-      emailVerificationToken: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
+      session: {
+        findUnique: jest.fn(),
+        create: jest.fn(),
+        update: jest.fn(),
+        deleteMany: jest.fn(),
+        delete: jest.fn(),
+      },
+      emailVerificationToken: {
+        findUnique: jest.fn(),
+        create: jest.fn(),
+        update: jest.fn(),
+        delete: jest.fn(),
+        deleteMany: jest.fn(),
+      },
       notification: { create: jest.fn() },
     },
   };
@@ -81,11 +93,18 @@ describe('AuthService', () => {
   beforeEach(() => jest.clearAllMocks());
 
   describe('register', () => {
-    const registerData = { email: 'new@example.com', password: 'Password123!', username: 'newuser', role: Role.DONOR };
+    const registerData = {
+      email: 'new@example.com',
+      password: 'Password123!',
+      username: 'newuser',
+      role: Role.DONOR,
+    };
 
     it('registers a new user successfully', async () => {
       prismaMock.user.findUnique.mockResolvedValue(null);
-      prismaMock.user.create.mockResolvedValue(mockUser({ email: 'new@example.com', username: 'newuser' }));
+      prismaMock.user.create.mockResolvedValue(
+        mockUser({ email: 'new@example.com', username: 'newuser' })
+      );
       prismaMock.emailVerificationToken.create.mockResolvedValue(mockVerificationToken());
       prismaMock.notification.create.mockResolvedValue({});
 
@@ -103,13 +122,13 @@ describe('AuthService', () => {
     it('rejects duplicate email', async () => {
       prismaMock.user.findUnique.mockResolvedValue(mockUser());
 
-      await expect(AuthService.register(registerData)).rejects.toThrow('User with this email already exists');
+      await expect(AuthService.register(registerData)).rejects.toThrow(
+        'User with this email already exists'
+      );
     });
 
     it('rejects duplicate username', async () => {
-      prismaMock.user.findUnique
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce(mockUser());
+      prismaMock.user.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(mockUser());
 
       await expect(AuthService.register(registerData)).rejects.toThrow('Username already taken');
     });
@@ -118,7 +137,9 @@ describe('AuthService', () => {
       prismaMock.user.findUnique.mockResolvedValue(null);
       prismaMock.user.create.mockRejectedValue(new Error('Database connection failed'));
 
-      await expect(AuthService.register(registerData)).rejects.toThrow('Database connection failed');
+      await expect(AuthService.register(registerData)).rejects.toThrow(
+        'Database connection failed'
+      );
     });
   });
 
@@ -139,6 +160,19 @@ describe('AuthService', () => {
       expect(prismaMock.session.create).toHaveBeenCalled();
     });
 
+    it('generates tokens with the canonical id payload field', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser());
+      CryptoUtils.comparePassword.mockResolvedValue(true);
+      prismaMock.user.update.mockResolvedValue(mockUser());
+      prismaMock.session.create.mockResolvedValue(mockSession());
+
+      await AuthService.login(credentials);
+
+      expect(JWTUtils.generateAccessToken).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'user-1', email: 'test@example.com', role: Role.DONOR })
+      );
+    });
+
     it('rejects invalid email', async () => {
       prismaMock.user.findUnique.mockResolvedValue(null);
 
@@ -155,7 +189,9 @@ describe('AuthService', () => {
     it('rejects login when user has no password hash', async () => {
       prismaMock.user.findUnique.mockResolvedValue(mockUser({ passwordHash: null }));
 
-      await expect(AuthService.login(credentials)).rejects.toThrow('Please use wallet authentication');
+      await expect(AuthService.login(credentials)).rejects.toThrow(
+        'Please use wallet authentication'
+      );
     });
 
     it('rejects suspended account', async () => {
@@ -205,7 +241,9 @@ describe('AuthService', () => {
 
     it('creates new user for unknown wallet', async () => {
       prismaMock.user.findUnique.mockResolvedValue(null);
-      prismaMock.user.create.mockResolvedValue(mockUser({ walletAddress, email: `${walletAddress}@wallet.aidlink.org` }));
+      prismaMock.user.create.mockResolvedValue(
+        mockUser({ walletAddress, email: `${walletAddress}@wallet.aidlink.org` })
+      );
       prismaMock.user.update.mockResolvedValue(mockUser({ walletAddress }));
       prismaMock.session.create.mockResolvedValue(mockSession());
 
@@ -220,8 +258,14 @@ describe('AuthService', () => {
 
   describe('refreshToken', () => {
     it('refreshes tokens with valid refresh token', async () => {
-      JWTUtils.verifyToken.mockReturnValue({ id: 'user-1', email: 'test@example.com', role: Role.DONOR });
-      prismaMock.session.findUnique.mockResolvedValue(mockSession({ expiresAt: new Date(Date.now() + 3600000) }));
+      JWTUtils.verifyToken.mockReturnValue({
+        id: 'user-1',
+        email: 'test@example.com',
+        role: Role.DONOR,
+      });
+      prismaMock.session.findUnique.mockResolvedValue(
+        mockSession({ expiresAt: new Date(Date.now() + 3600000) })
+      );
       prismaMock.session.update.mockResolvedValue(mockSession());
 
       const tokens = await AuthService.refreshToken('valid-refresh-token');
@@ -231,16 +275,26 @@ describe('AuthService', () => {
     });
 
     it('rejects invalid refresh token', async () => {
-      JWTUtils.verifyToken.mockImplementation(() => { throw new Error('Invalid token'); });
+      JWTUtils.verifyToken.mockImplementation(() => {
+        throw new Error('Invalid token');
+      });
 
       await expect(AuthService.refreshToken('bad-token')).rejects.toThrow('Invalid refresh token');
     });
 
     it('rejects expired session', async () => {
-      JWTUtils.verifyToken.mockReturnValue({ id: 'user-1', email: 'test@example.com', role: Role.DONOR });
-      prismaMock.session.findUnique.mockResolvedValue(mockSession({ expiresAt: new Date(Date.now() - 3600000) }));
+      JWTUtils.verifyToken.mockReturnValue({
+        id: 'user-1',
+        email: 'test@example.com',
+        role: Role.DONOR,
+      });
+      prismaMock.session.findUnique.mockResolvedValue(
+        mockSession({ expiresAt: new Date(Date.now() - 3600000) })
+      );
 
-      await expect(AuthService.refreshToken('expired-token')).rejects.toThrow('Invalid refresh token');
+      await expect(AuthService.refreshToken('expired-token')).rejects.toThrow(
+        'Invalid refresh token'
+      );
     });
   });
 
@@ -328,7 +382,9 @@ describe('AuthService', () => {
     it('rejects invalid token', async () => {
       prismaMock.emailVerificationToken.findUnique.mockResolvedValue(null);
 
-      await expect(AuthService.verifyEmail('bad-token')).rejects.toThrow('Invalid verification token');
+      await expect(AuthService.verifyEmail('bad-token')).rejects.toThrow(
+        'Invalid verification token'
+      );
     });
 
     it('rejects expired token', async () => {
@@ -337,7 +393,9 @@ describe('AuthService', () => {
       );
       prismaMock.emailVerificationToken.delete.mockResolvedValue({});
 
-      await expect(AuthService.verifyEmail('expired-token')).rejects.toThrow('Verification token has expired');
+      await expect(AuthService.verifyEmail('expired-token')).rejects.toThrow(
+        'Verification token has expired'
+      );
     });
 
     it('rejects already used token', async () => {
@@ -345,7 +403,9 @@ describe('AuthService', () => {
         mockVerificationToken({ usedAt: new Date() })
       );
 
-      await expect(AuthService.verifyEmail('used-token')).rejects.toThrow('Verification token already used');
+      await expect(AuthService.verifyEmail('used-token')).rejects.toThrow(
+        'Verification token already used'
+      );
     });
   });
 
@@ -367,13 +427,17 @@ describe('AuthService', () => {
     it('throws if email already verified', async () => {
       prismaMock.user.findUnique.mockResolvedValue(mockUser({ emailVerified: true }));
 
-      await expect(AuthService.resendVerificationEmail('user-1')).rejects.toThrow('Email already verified');
+      await expect(AuthService.resendVerificationEmail('user-1')).rejects.toThrow(
+        'Email already verified'
+      );
     });
 
     it('throws if user not found', async () => {
       prismaMock.user.findUnique.mockResolvedValue(null);
 
-      await expect(AuthService.resendVerificationEmail('nonexistent')).rejects.toThrow('User not found');
+      await expect(AuthService.resendVerificationEmail('nonexistent')).rejects.toThrow(
+        'User not found'
+      );
     });
   });
 });

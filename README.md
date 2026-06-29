@@ -16,18 +16,21 @@ Production-grade backend for AidLink - a blockchain-powered humanitarian aid pla
 ## Core Systems
 
 ### 1. Authentication System
-- JWT-based authentication
+
+- JWT-based authentication with the canonical `id` claim used for both HTTP and WebSocket auth
 - Wallet-based authentication (Stellar/Soroban)
 - Role-based access control (RBAC)
 - Session management with Redis
 
 ### 2. Campaign Engine
+
 - Campaign creation and management
 - Real-time fund tracking
 - Beneficiary assignment
 - Distribution tracking and verification
 
 ### 3. Beneficiary Verification
+
 - KYC workflow integration
 - Fraud detection algorithms
 - Verification queue with BullMQ
@@ -35,18 +38,21 @@ Production-grade backend for AidLink - a blockchain-powered humanitarian aid pla
 - Risk score calculation
 
 ### 4. Blockchain Indexer
+
 - Soroban event listeners
 - Transaction indexing
 - Contract synchronization
 - Real-time blockchain monitoring
 
 ### 5. Notification System
+
 - Email notifications (Nodemailer)
 - Real-time alerts (WebSockets)
 - Push notification support
 - Notification preferences
 
 ### 6. Analytics & Reporting
+
 - Campaign analytics and performance metrics
 - Donor analytics and donation trends
 - Organization analytics
@@ -54,6 +60,7 @@ Production-grade backend for AidLink - a blockchain-powered humanitarian aid pla
 - Custom report generation
 
 ### 7. Advanced Search
+
 - Global search across all entities
 - Campaign search with filtering
 - Donation search with filtering
@@ -62,6 +69,7 @@ Production-grade backend for AidLink - a blockchain-powered humanitarian aid pla
 - Sorting and pagination
 
 ### 8. Admin Dashboard
+
 - Platform statistics overview
 - User management
 - Audit log viewing
@@ -153,16 +161,16 @@ The raw OpenAPI 3.x spec is available at `/openapi.yaml`.
 
 ### What's documented
 
-| Section | Coverage |
-|---|---|
-| REST endpoints | 99 routes across 11 route groups |
-| Request/response schemas | Full JSON schemas with examples |
-| Error responses | Consistent error envelope on every endpoint |
-| Authentication | Bearer JWT — all secured endpoints annotated |
-| Rate limits | Documented per-endpoint in descriptions |
-| Webhooks | 6 events with HMAC verification example |
-| WebSocket events | 8 server-push events with payload examples |
-| Blockchain formats | Stellar payment tx, Soroban contract call formats |
+| Section                  | Coverage                                          |
+| ------------------------ | ------------------------------------------------- |
+| REST endpoints           | 99 routes across 11 route groups                  |
+| Request/response schemas | Full JSON schemas with examples                   |
+| Error responses          | Consistent error envelope on every endpoint       |
+| Authentication           | Bearer JWT — all secured endpoints annotated      |
+| Rate limits              | Documented per-endpoint in descriptions           |
+| Webhooks                 | 6 events with HMAC verification example           |
+| WebSocket events         | 8 server-push events with payload examples        |
+| Blockchain formats       | Stellar payment tx, Soroban contract call formats |
 
 ### Running the spec locally
 
@@ -214,6 +222,7 @@ The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
 ### API Endpoints
 
 #### Authentication (`/api/v1/auth`)
+
 - `POST /register` - Register a new user
 - `POST /login` - User login
 - `POST /wallet-auth` - Wallet-based authentication
@@ -222,6 +231,7 @@ The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
 - `GET /profile` - Get user profile
 
 #### Campaigns (`/api/v1/campaigns`)
+
 - `POST /` - Create a new campaign
 - `GET /` - Get all campaigns
 - `GET /:id` - Get campaign by ID
@@ -231,6 +241,7 @@ The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
 - `POST /:id/milestones` - Add milestone to campaign
 
 #### Beneficiaries (`/api/v1/beneficiaries`)
+
 - `POST /` - Create a beneficiary profile
 - `GET /` - Get all beneficiaries
 - `GET /my-profile` - Get current user's beneficiary profile
@@ -242,6 +253,7 @@ The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
 - `PATCH /kyc/:submissionId/review` - Review KYC submission
 
 #### Donations (`/api/v1/donations`)
+
 - `POST /` - Create a new donation
 - `GET /` - Get all donations
 - `GET /my-donations` - Get current user's donations
@@ -251,6 +263,7 @@ The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
 - `POST /:id/refund` - Refund a donation
 
 #### Distributions (`/api/v1/distributions`)
+
 - `POST /` - Create a new distribution
 - `GET /` - Get all distributions
 - `GET /campaign/:campaignId` - Get distributions for a campaign
@@ -260,6 +273,7 @@ The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
 - `POST /:id/proof` - Add proof document
 
 #### Notifications (`/api/v1/notifications`)
+
 - `POST /` - Create a notification
 - `GET /` - Get user notifications
 - `GET /unread-count` - Get unread notification count
@@ -271,6 +285,7 @@ The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
 - `POST /distribution` - Send distribution notification
 
 #### Admin (`/api/v1/admin`)
+
 - `GET /dashboard` - Get dashboard statistics
 - `GET /activity` - Get recent activity
 - `GET /users` - Get all users
@@ -280,6 +295,7 @@ The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
 - `GET /health` - Get system health
 
 #### Analytics (`/api/v1/analytics`)
+
 - `GET /campaign/:campaignId` - Get campaign analytics
 - `GET /donor` - Get donor analytics
 - `GET /organization/:organizationId` - Get organization analytics
@@ -287,6 +303,7 @@ The canonical spec lives in **`openapi.yaml`** at the repo root. Do **not** edit
 - `POST /report/:reportType` - Generate a report
 
 #### Search (`/api/v1/search`)
+
 - `GET /campaigns` - Search campaigns
 - `GET /donations` - Search donations
 - `GET /beneficiaries` - Search beneficiaries
