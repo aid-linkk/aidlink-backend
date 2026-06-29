@@ -58,38 +58,50 @@ export async function createFailedRefundCase(
   });
   if (existing) return existing;
 
-  const rc = await prisma.recoveryCase.create({
-    data: {
-      type: RecoveryCaseType.FAILED_REFUND,
-      donationId,
-      failureReason,
-      ...(failureMetadata !== undefined ? { failureMetadata } : {}),
-      status: RecoveryStatus.PENDING,
-      maxRetries: MAX_RETRIES,
-      nextRetryAt: nextRetryAt(0),
-    },
-  });
-
-  await writeAuditLog(null, AuditAction.RECOVERY_CASE_CREATED, 'RecoveryCase', rc.id, {
-    type: rc.type,
-    donationId,
-    failureReason,
-  });
-
-  // Notify donor
+  // Pre-fetch donor info for notification (before transaction)
   const donation = await prisma.donation.findUnique({
     where: { id: donationId },
     include: { user: { select: { id: true } } },
   });
-  if (donation?.userId) {
-    await NotificationService.createNotification(
-      donation.userId,
-      NotificationType.REFUND_FAILED,
-      'Refund Transfer Failed',
-      `Your refund for donation ${donationId} could not be processed: ${failureReason}. We are retrying automatically.`,
-      { recoveryCaseId: rc.id }
-    );
-  }
+
+  const rc = await prisma.$transaction(async (tx) => {
+    const created = await tx.recoveryCase.create({
+      data: {
+        type: RecoveryCaseType.FAILED_REFUND,
+        donationId,
+        failureReason,
+        ...(failureMetadata !== undefined ? { failureMetadata } : {}),
+        status: RecoveryStatus.PENDING,
+        maxRetries: MAX_RETRIES,
+        nextRetryAt: nextRetryAt(0),
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        userId: null,
+        action: AuditAction.RECOVERY_CASE_CREATED,
+        entityType: 'RecoveryCase',
+        entityId: created.id,
+        metadata: { type: created.type, donationId, failureReason },
+      },
+    });
+
+    if (donation?.userId) {
+      await tx.notification.create({
+        data: {
+          userId: donation.userId,
+          type: NotificationType.REFUND_FAILED,
+          title: 'Refund Transfer Failed',
+          message: `Your refund for donation ${donationId} could not be processed: ${failureReason}. We are retrying automatically.`,
+          metadata: { recoveryCaseId: created.id },
+          sentVia: [],
+        },
+      });
+    }
+
+    return created;
+  });
 
   logger.info(`Recovery case created [FAILED_REFUND]: ${rc.id}`);
   return rc;
@@ -109,22 +121,30 @@ export async function createFailedDistributionCase(
   });
   if (existing) return existing;
 
-  const rc = await prisma.recoveryCase.create({
-    data: {
-      type: RecoveryCaseType.FAILED_DISTRIBUTION,
-      distributionId,
-      failureReason,
-      ...(failureMetadata !== undefined ? { failureMetadata } : {}),
-      status: RecoveryStatus.PENDING,
-      maxRetries: MAX_RETRIES,
-      nextRetryAt: nextRetryAt(0),
-    },
-  });
+  const rc = await prisma.$transaction(async (tx) => {
+    const created = await tx.recoveryCase.create({
+      data: {
+        type: RecoveryCaseType.FAILED_DISTRIBUTION,
+        distributionId,
+        failureReason,
+        ...(failureMetadata !== undefined ? { failureMetadata } : {}),
+        status: RecoveryStatus.PENDING,
+        maxRetries: MAX_RETRIES,
+        nextRetryAt: nextRetryAt(0),
+      },
+    });
 
-  await writeAuditLog(null, AuditAction.RECOVERY_CASE_CREATED, 'RecoveryCase', rc.id, {
-    type: rc.type,
-    distributionId,
-    failureReason,
+    await tx.auditLog.create({
+      data: {
+        userId: null,
+        action: AuditAction.RECOVERY_CASE_CREATED,
+        entityType: 'RecoveryCase',
+        entityId: created.id,
+        metadata: { type: created.type, distributionId, failureReason },
+      },
+    });
+
+    return created;
   });
 
   logger.info(`Recovery case created [FAILED_DISTRIBUTION]: ${rc.id}`);
@@ -172,36 +192,52 @@ export async function retryRefund(recoveryCaseId: string, adminId: string) {
   const newCount = rc.retryCount + 1;
   const isPermanentFailure = newCount >= rc.maxRetries;
 
-  const updated = await prisma.recoveryCase.update({
-    where: { id: recoveryCaseId },
-    data: {
-      status: isPermanentFailure ? RecoveryStatus.FAILED_PERMANENTLY : RecoveryStatus.RETRYING,
-      retryCount: newCount,
-      lastRetriedAt: new Date(),
-      nextRetryAt: isPermanentFailure ? null : nextRetryAt(newCount),
-    },
-  });
-
-  await writeAuditLog(adminId, AuditAction.RECOVERY_RETRIED, 'RecoveryCase', rc.id, {
-    retryCount: newCount,
-    isPermanentFailure,
-  });
-
+  // Pre-fetch donor info if permanent failure (before transaction)
+  let donationUserId: string | undefined;
   if (isPermanentFailure && rc.donationId) {
     const donation = await prisma.donation.findUnique({
       where: { id: rc.donationId },
       include: { user: { select: { id: true } } },
     });
-    if (donation?.userId) {
-      await NotificationService.createNotification(
-        donation.userId,
-        NotificationType.REFUND_FAILED,
-        'Refund Could Not Be Completed',
-        'All retry attempts for your refund have been exhausted. Our team will contact you with alternate options.',
-        { recoveryCaseId: rc.id }
-      );
-    }
+    donationUserId = donation?.userId;
   }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.recoveryCase.update({
+      where: { id: recoveryCaseId },
+      data: {
+        status: isPermanentFailure ? RecoveryStatus.FAILED_PERMANENTLY : RecoveryStatus.RETRYING,
+        retryCount: newCount,
+        lastRetriedAt: new Date(),
+        nextRetryAt: isPermanentFailure ? null : nextRetryAt(newCount),
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        userId: adminId,
+        action: AuditAction.RECOVERY_RETRIED,
+        entityType: 'RecoveryCase',
+        entityId: rc.id,
+        metadata: { retryCount: newCount, isPermanentFailure },
+      },
+    });
+
+    if (isPermanentFailure && donationUserId) {
+      await tx.notification.create({
+        data: {
+          userId: donationUserId,
+          type: NotificationType.REFUND_FAILED,
+          title: 'Refund Could Not Be Completed',
+          message: 'All retry attempts for your refund have been exhausted. Our team will contact you with alternate options.',
+          metadata: { recoveryCaseId: rc.id },
+          sentVia: [],
+        },
+      });
+    }
+
+    return result;
+  });
 
   logger.info(`Refund retried: case ${rc.id}, attempt ${newCount}`);
   return updated;
@@ -218,26 +254,35 @@ export async function retryDistribution(recoveryCaseId: string, adminId: string)
   const newCount = rc.retryCount + 1;
   const isPermanentFailure = newCount >= rc.maxRetries;
 
-  const updated = await prisma.recoveryCase.update({
-    where: { id: recoveryCaseId },
-    data: {
-      status: isPermanentFailure ? RecoveryStatus.RECOVERY_REQUIRED : RecoveryStatus.RETRYING,
-      retryCount: newCount,
-      lastRetriedAt: new Date(),
-      nextRetryAt: isPermanentFailure ? null : nextRetryAt(newCount),
-    },
-  });
-
-  if (rc.distributionId) {
-    await prisma.distribution.update({
-      where: { id: rc.distributionId },
-      data: { status: DistributionStatus.IN_PROGRESS },
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.recoveryCase.update({
+      where: { id: recoveryCaseId },
+      data: {
+        status: isPermanentFailure ? RecoveryStatus.RECOVERY_REQUIRED : RecoveryStatus.RETRYING,
+        retryCount: newCount,
+        lastRetriedAt: new Date(),
+        nextRetryAt: isPermanentFailure ? null : nextRetryAt(newCount),
+      },
     });
-  }
 
-  await writeAuditLog(adminId, AuditAction.RECOVERY_RETRIED, 'RecoveryCase', rc.id, {
-    retryCount: newCount,
-    isPermanentFailure,
+    if (rc.distributionId) {
+      await tx.distribution.update({
+        where: { id: rc.distributionId },
+        data: { status: DistributionStatus.IN_PROGRESS },
+      });
+    }
+
+    await tx.auditLog.create({
+      data: {
+        userId: adminId,
+        action: AuditAction.RECOVERY_RETRIED,
+        entityType: 'RecoveryCase',
+        entityId: rc.id,
+        metadata: { retryCount: newCount, isPermanentFailure },
+      },
+    });
+
+    return result;
   });
 
   logger.info(`Distribution retried: case ${rc.id}, attempt ${newCount}`);
@@ -256,18 +301,27 @@ export async function updateRefundDestination(
   if (rc.type !== RecoveryCaseType.FAILED_REFUND)
     throw new AppError('Not a FAILED_REFUND case', 400);
 
-  const updated = await prisma.recoveryCase.update({
-    where: { id: recoveryCaseId },
-    data: {
-      failureMetadata: { ...((rc.failureMetadata ?? {}) as any), updatedBankAccount: newAccount },
-      status: RecoveryStatus.PENDING,
-      nextRetryAt: nextRetryAt(0),
-    },
-  });
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.recoveryCase.update({
+      where: { id: recoveryCaseId },
+      data: {
+        failureMetadata: { ...((rc.failureMetadata ?? {}) as any), updatedBankAccount: newAccount },
+        status: RecoveryStatus.PENDING,
+        nextRetryAt: nextRetryAt(0),
+      },
+    });
 
-  await writeAuditLog(adminId, AuditAction.RECOVERY_MANUAL_OVERRIDE, 'RecoveryCase', rc.id, {
-    action: 'updateRefundDestination',
-    newAccount,
+    await tx.auditLog.create({
+      data: {
+        userId: adminId,
+        action: AuditAction.RECOVERY_MANUAL_OVERRIDE,
+        entityType: 'RecoveryCase',
+        entityId: rc.id,
+        metadata: { action: 'updateRefundDestination', newAccount },
+      },
+    });
+
+    return result;
   });
 
   logger.info(`Refund destination updated: case ${rc.id} by admin ${adminId}`);
@@ -280,20 +334,30 @@ export async function markDistributionRecoveryRequired(recoveryCaseId: string, a
   if (rc.type !== RecoveryCaseType.FAILED_DISTRIBUTION)
     throw new AppError('Not a FAILED_DISTRIBUTION case', 400);
 
-  const updated = await prisma.recoveryCase.update({
-    where: { id: recoveryCaseId },
-    data: { status: RecoveryStatus.RECOVERY_REQUIRED },
-  });
-
-  if (rc.distributionId) {
-    await prisma.distribution.update({
-      where: { id: rc.distributionId },
-      data: { status: DistributionStatus.FAILED },
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.recoveryCase.update({
+      where: { id: recoveryCaseId },
+      data: { status: RecoveryStatus.RECOVERY_REQUIRED },
     });
-  }
 
-  await writeAuditLog(adminId, AuditAction.RECOVERY_MANUAL_OVERRIDE, 'RecoveryCase', rc.id, {
-    action: 'markRecoveryRequired',
+    if (rc.distributionId) {
+      await tx.distribution.update({
+        where: { id: rc.distributionId },
+        data: { status: DistributionStatus.FAILED },
+      });
+    }
+
+    await tx.auditLog.create({
+      data: {
+        userId: adminId,
+        action: AuditAction.RECOVERY_MANUAL_OVERRIDE,
+        entityType: 'RecoveryCase',
+        entityId: rc.id,
+        metadata: { action: 'markRecoveryRequired' },
+      },
+    });
+
+    return result;
   });
 
   logger.info(`Distribution flagged RECOVERY_REQUIRED: case ${rc.id}`);
@@ -405,30 +469,40 @@ export async function issueDonorCredit(
   const rc = await prisma.recoveryCase.findUnique({ where: { id: recoveryCaseId } });
   if (!rc) throw new AppError('Recovery case not found', 404);
 
-  const credit = await prisma.donorCredit.create({
-    data: {
-      userId,
-      recoveryCaseId,
-      amount,
-      currency,
-      reason,
-      expiresAt: expiresAt ?? null,
-    },
-  });
+  const credit = await prisma.$transaction(async (tx) => {
+    const created = await tx.donorCredit.create({
+      data: {
+        userId,
+        recoveryCaseId,
+        amount,
+        currency,
+        reason,
+        expiresAt: expiresAt ?? null,
+      },
+    });
 
-  await NotificationService.createNotification(
-    userId,
-    NotificationType.DONOR_CREDIT_ISSUED,
-    'Donor Credit Issued',
-    `You have been issued a credit of ${amount} ${currency} as compensation. ${reason}`,
-    { donorCreditId: credit.id, recoveryCaseId }
-  );
+    await tx.notification.create({
+      data: {
+        userId,
+        type: NotificationType.DONOR_CREDIT_ISSUED,
+        title: 'Donor Credit Issued',
+        message: `You have been issued a credit of ${amount} ${currency} as compensation. ${reason}`,
+        metadata: { donorCreditId: created.id, recoveryCaseId },
+        sentVia: [],
+      },
+    });
 
-  await writeAuditLog(adminId, AuditAction.DONOR_CREDIT_ISSUED, 'DonorCredit', credit.id, {
-    userId,
-    amount,
-    currency,
-    reason,
+    await tx.auditLog.create({
+      data: {
+        userId: adminId,
+        action: AuditAction.DONOR_CREDIT_ISSUED,
+        entityType: 'DonorCredit',
+        entityId: created.id,
+        metadata: { userId, amount, currency, reason },
+      },
+    });
+
+    return created;
   });
 
   logger.info(`Donor credit issued: ${credit.id} to user ${userId}`);

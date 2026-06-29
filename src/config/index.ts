@@ -99,6 +99,32 @@ export const config = {
     notifyDonorsOnFraudSuspension: process.env.MODERATION_NOTIFY_DONORS_ON_FRAUD !== 'false',
   },
 
+  kycFraud: {
+    // Velocity window in minutes
+    velocityWindowMinutes: parseInt(process.env.KYC_FRAUD_VELOCITY_WINDOW_MINUTES || '60', 10),
+    // Max submissions per IP within the velocity window before flagging
+    velocityMaxSubmissionsPerIp: parseInt(process.env.KYC_FRAUD_VELOCITY_MAX_PER_IP || '5', 10),
+    // Max submissions per user within the velocity window before flagging
+    velocityMaxSubmissionsPerUser: parseInt(process.env.KYC_FRAUD_VELOCITY_MAX_PER_USER || '3', 10),
+    // Geographic anomaly: max km/h travel speed considered plausible
+    geoMaxPlausibleSpeedKmh: parseInt(process.env.KYC_FRAUD_GEO_MAX_SPEED_KMH || '900', 10),
+    // Score at which a submission is considered high risk (triggers FRAUD_DETECTION job)
+    highRiskThreshold: parseInt(process.env.KYC_FRAUD_HIGH_RISK_THRESHOLD || '50', 10),
+    // Signal weights (must sum to 100)
+    weights: {
+      documentReuse: parseInt(process.env.KYC_FRAUD_WEIGHT_DOC_REUSE || '30', 10),
+      geoAnomaly: parseInt(process.env.KYC_FRAUD_WEIGHT_GEO || '20', 10),
+      velocity: parseInt(process.env.KYC_FRAUD_WEIGHT_VELOCITY || '25', 10),
+      deviceFingerprint: parseInt(process.env.KYC_FRAUD_WEIGHT_DEVICE || '15', 10),
+      thirdParty: parseInt(process.env.KYC_FRAUD_WEIGHT_THIRD_PARTY || '10', 10),
+    },
+    // Third-party fraud service (optional)
+    thirdPartyEnabled: process.env.KYC_FRAUD_THIRD_PARTY_ENABLED === 'true',
+    thirdPartyApiUrl: process.env.KYC_FRAUD_THIRD_PARTY_API_URL || '',
+    thirdPartyApiKey: process.env.KYC_FRAUD_THIRD_PARTY_API_KEY || '',
+    thirdPartyTimeoutMs: parseInt(process.env.KYC_FRAUD_THIRD_PARTY_TIMEOUT_MS || '5000', 10),
+  },
+
   analytics: {
     // Cron patterns for rollup jobs (configurable via env vars)
     hourlyRollupCron: process.env.ANALYTICS_HOURLY_CRON || '5 * * * *',

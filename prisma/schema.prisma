@@ -34,45 +34,56 @@ enum UserStatus {
 }
 
 model User {
-  id            String     @id @default(cuid())
-  email         String     @unique
-  username      String?    @unique
-  passwordHash  String?
-  walletAddress String?    @unique
-  role          Role       @default(DONOR)
-  status        UserStatus @default(PENDING_VERIFICATION)
-  emailVerified Boolean    @default(false)
-  lastLogin     DateTime?
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  id                  String     @id @default(cuid())
+  email               String     @unique
+  username            String?    @unique
+  passwordHash        String?
+  walletAddress       String?    @unique
+  role                Role       @default(DONOR)
+  status              UserStatus @default(PENDING_VERIFICATION)
+  emailVerified       Boolean    @default(false)
+  verificationToken   String?    @unique
+  verificationExpiry  DateTime?
+  failedVerifyAttempts Int       @default(0)
+  lastLogin           DateTime?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
 
   // Relations
-  sessions       Session[]
-  organizations  Organization?
-  beneficiary    Beneficiary?
-  donations      Donation[]
-  campaigns      Campaign[]
-  auditLogs      AuditLog[]
-  notifications  Notification[]
- kycSubmissions KYCSubmission[]
-  pledges        Pledge[]
-  sessions         Session[]
-  organizations    Organization?
-  beneficiary      Beneficiary?
-  donations        Donation[]
-  campaigns        Campaign[]
-  auditLogs        AuditLog[]
-  notifications    Notification[]
-  kycSubmissions   KYCSubmission[]
-  donorCredits   DonorCredit[]
-  taxReceipts      TaxReceipt[]
-  receiptBatchJobs ReceiptBatchJob[]
-  emailPreference  EmailPreference?
+  sessions                Session[]
+  organizations           Organization?
+  beneficiary             Beneficiary?
+  donations               Donation[]
+  campaigns               Campaign[]
+  auditLogs               AuditLog[]
+  notifications           Notification[]
+  kycSubmissions          KYCSubmission[]
+  pledges                 Pledge[]
+  donorCredits            DonorCredit[]
+  taxReceipts             TaxReceipt[]
+  receiptBatchJobs        ReceiptBatchJob[]
+  emailPreference         EmailPreference?
+  emailVerificationTokens EmailVerificationToken[]
 
   @@index([email])
   @@index([walletAddress])
   @@index([role])
   @@index([status])
+}
+
+model VerificationLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String   // 'SENT' | 'VERIFIED' | 'EXPIRED' | 'RESENT' | 'FAILED'
+  tokenHash  String?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
 }
 
 model Session {
@@ -239,10 +250,12 @@ model Campaign {
 
   organization  Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  donations     Donation[]
+donations     Donation[]
   beneficiaries BeneficiaryAssignment[]
   distributions Distribution[]
   milestones    Milestone[]
+  multipliers   Multiplier[]
+  matchedFunds  MatchedFund[]
   suspensions   Suspension[]
   appeals       Appeal[]
   fraudReports  FraudReport[]
@@ -550,22 +563,27 @@ enum KYCStatus {
 }
 
 model KYCSubmission {
-  id             String    @id @default(cuid())
-  userId         String
-  beneficiaryId  String?
-  submissionType String // INDIVIDUAL, ORGANIZATION
-  status         KYCStatus @default(PENDING)
-  documentType   String
-  documentUrl    String
-  selfieUrl      String?
-  additionalDocs Json?
-  reviewNotes    String?   @db.Text
-  reviewedBy     String?
-  reviewedAt     DateTime?
-  expiresAt      DateTime?
-  fraudScore     Int       @default(0)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  id                String    @id @default(cuid())
+  userId            String
+  beneficiaryId     String?
+  submissionType    String // INDIVIDUAL, ORGANIZATION
+  status            KYCStatus @default(PENDING)
+  documentType      String
+  documentUrl       String
+  selfieUrl         String?
+  additionalDocs    Json?
+  reviewNotes       String?   @db.Text
+  reviewedBy        String?
+  reviewedAt        DateTime?
+  expiresAt         DateTime?
+  fraudScore        Int       @default(0)
+  fraudSignals      Json?     // Array of { signal, severity, detail }
+  fraudReason       String?   @db.Text
+  ipAddress         String?
+  userAgent         String?
+  deviceFingerprint String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   beneficiary Beneficiary? @relation(fields: [beneficiaryId], references: [id], onDelete: Cascade)
@@ -574,6 +592,8 @@ model KYCSubmission {
   @@index([beneficiaryId])
   @@index([status])
   @@index([createdAt])
+  @@index([ipAddress])
+  @@index([deviceFingerprint])
 }
 
 // ============================================
@@ -964,6 +984,13 @@ enum JobType {
   ANALYTICS_TRENDING_REFRESH
 }
 
+enum WebhookDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  DISABLED
+}
+
 model QueueJob {
   id          String    @id @default(cuid())
   type        JobType
@@ -982,6 +1009,73 @@ model QueueJob {
   @@index([type])
   @@index([status])
   @@index([priority])
+  @@index([createdAt])
+}
+
+// ============================================
+// WEBHOOKS
+// ============================================
+
+model WebhookSubscription {
+  id          String   @id @default(cuid())
+  name        String
+  url         String
+  secret      String
+  events      String[]
+  active      Boolean  @default(true)
+  description String?  @db.Text
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  deliveries WebhookEvent[]
+
+  @@index([active])
+  @@index([createdBy])
+  @@index([createdAt])
+}
+
+model WebhookEvent {
+  id              String                @id @default(cuid())
+  webhookId       String
+  eventType       String
+  payload         Json
+  status          WebhookDeliveryStatus @default(PENDING)
+  attempts        Int                   @default(0)
+  maxAttempts     Int                   @default(3)
+  nextRetryAt     DateTime?
+  lastAttemptAt   DateTime?
+  sentAt          DateTime?
+  responseCode    Int?
+  responseBody    String?               @db.Text
+  responseHeaders Json?
+  errorMessage    String?               @db.Text
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  webhook WebhookSubscription @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  deliveryAttempts WebhookDeliveryAttempt[]
+
+  @@index([webhookId])
+  @@index([eventType])
+  @@index([status])
+  @@index([nextRetryAt])
+  @@index([createdAt])
+}
+
+model WebhookDeliveryAttempt {
+  id              String   @id @default(cuid())
+  webhookEventId  String
+  attemptNumber   Int
+  responseCode    Int?
+  responseBody    String?  @db.Text
+  responseHeaders Json?
+  errorMessage    String?  @db.Text
+  createdAt       DateTime @default(now())
+
+  webhookEvent WebhookEvent @relation(fields: [webhookEventId], references: [id], onDelete: Cascade)
+
+  @@index([webhookEventId])
   @@index([createdAt])
 }
 
@@ -1150,6 +1244,8 @@ model PledgeAttempt {
   @@index([pledgeId])
   @@index([status])
   @@map("pledge_attempts")
+}
+
 // ============================================
 // TAX RECEIPTS
 // ============================================
@@ -1225,4 +1321,18 @@ model ReceiptBatchJob {
   @@index([createdBy])
   @@index([status])
   @@index([createdAt])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
 }

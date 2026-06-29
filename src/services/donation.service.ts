@@ -1,11 +1,13 @@
 import prisma from '../config/database';
 import { DonationInput, DonationFilters, PaginatedResponse } from '../types';
 import { DonationStatus, Role } from '@prisma/client';
+import { MultiplierService } from './multiplier.service';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
 import { config } from '../config';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 import { AnalyticsService } from './analytics.service';
+import { sanitizeString } from '../utils/sanitization';
 
 export class DonationService {
   static async createDonation(data: DonationInput, userId?: string): Promise<any> {
@@ -24,6 +26,7 @@ export class DonationService {
     const donation = await prisma.donation.create({
       data: {
         ...data,
+        donorMessage: data.donorMessage ? sanitizeString(data.donorMessage) : undefined,
         userId,
         status: DonationStatus.PENDING,
       },
@@ -48,6 +51,8 @@ export class DonationService {
       throw new AppError('Donation already confirmed', 400);
     }
 
+    // IMPORTANT: multipliers must be applied at the time the payment is confirmed,
+    // so the matched-funds ledger is auditable.
     const updated = await prisma.$transaction(async (tx) => {
       // Update donation
       const updatedDonation = await tx.donation.update({
@@ -58,7 +63,68 @@ export class DonationService {
         },
       });
 
-      // Update campaign current amount
+      // Apply multiplier (highest precedence match wins)
+      // Note: multiplier evaluation lives in MultiplierService (application rules).
+      // We intentionally evaluate with the donation's confirmation timestamp.
+      const multiplier = await MultiplierService.evaluateMultiplierAtDonation({
+        campaignId: donation.campaignId,
+        donationTime: new Date(),
+        milestoneId: null,
+      });
+
+      let matchedFund: any = null;
+
+      if (multiplier && multiplier.multiplier && Number(multiplier.multiplier) > 1) {
+        const donorAmount = donation.amount;
+
+        // matched = donor * (multiplier - 1)
+        // Store as exact Decimal values; Present/return rounded later if needed.
+        const rawMatched: any = Number(donorAmount) * (Number(multiplier.multiplier) - 1);
+
+        // perDonationCap
+        const afterPerDonationCap = (() => {
+          const cap = multiplier.perDonationCap !== null ? Number(multiplier.perDonationCap) : null;
+          if (cap === null || cap === undefined) return rawMatched;
+          return Math.min(rawMatched, cap);
+        })();
+
+        // concurrency-safe matchCap consumption: consume remaining within this same transaction
+        const used = await tx.matchedFund.aggregate({
+          where: {
+            campaignId: donation.campaignId,
+            multiplierId: multiplier.id,
+          },
+          _sum: { matchedAmount: true },
+        });
+
+        const alreadyMatched = Number(used._sum.matchedAmount ?? 0);
+        const totalCap = multiplier.matchCap !== null ? Number(multiplier.matchCap) : null;
+
+        let matchedToApply = afterPerDonationCap;
+        let exhausted = false;
+
+        if (totalCap !== null && totalCap !== undefined) {
+          const remaining = totalCap - alreadyMatched;
+          matchedToApply = Math.max(0, Math.min(afterPerDonationCap, remaining));
+          exhausted = remaining <= 0;
+        }
+
+        if (matchedToApply > 0) {
+          matchedFund = await tx.matchedFund.create({
+            data: {
+              donationId: updatedDonation.id,
+              campaignId: donation.campaignId,
+              multiplierId: multiplier.id,
+              matcherId: null,
+              donorAmount: donorAmount,
+              matchedAmount: matchedToApply,
+              totalAmount: Number(donorAmount) + matchedToApply,
+            },
+          });
+        }
+      }
+
+      // Update campaign current amount (donor-sourced only)
       await tx.campaign.update({
         where: { id: donation.campaignId },
         data: {
@@ -68,7 +134,12 @@ export class DonationService {
         },
       });
 
-      return updatedDonation;
+      // Backwards-compatible response: top-level donation fields
+      return {
+        ...updatedDonation,
+        matchedFund,
+        multiplierApplied: matchedFund?.multiplierId ?? null,
+      };
     });
 
     logger.info(`Donation confirmed: ${id} with tx ${txHash}`);
@@ -219,12 +290,17 @@ export class DonationService {
       throw new AppError('You do not have permission to refund this donation', 403);
     }
 
-    // Prevent negative campaign balance
-    if (donation.campaign.currentAmount < donation.amount) {
-      throw new AppError('Refund amount exceeds campaign current balance', 400);
-    }
-
     const updated = await prisma.$transaction(async (tx) => {
+      // Re-read campaign balance inside transaction to prevent TOCTOU race condition
+      const campaign = await tx.campaign.findUnique({
+        where: { id: donation.campaignId },
+        select: { currentAmount: true },
+      });
+
+      if (!campaign || Number(campaign.currentAmount) < Number(donation.amount)) {
+        throw new AppError('Refund amount exceeds campaign current balance', 400);
+      }
+
       // Update donation status
       const updatedDonation = await tx.donation.update({
         where: { id },

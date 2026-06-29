@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { BeneficiaryController } from '../controllers/beneficiary.controller';
-import { authenticate, authorize } from '../middleware/auth';
+import { authenticate, requireVerified } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
 
@@ -148,11 +148,12 @@ router.post(
 /**
  * @route   POST /api/v1/beneficiaries/:id/kyc
  * @desc    Submit KYC documents for beneficiary
- * @access  Private (Beneficiary)
+ * @access  Private (Beneficiary — verified only)
  */
 router.post(
   '/:id/kyc',
   authenticate,
+  requireVerified,
   validate(kycSubmissionSchema),
   BeneficiaryController.submitKYC
 );

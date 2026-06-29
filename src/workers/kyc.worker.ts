@@ -1,7 +1,9 @@
 import { Worker, Job } from 'bullmq';
 import { config } from '../config';
 import { BeneficiaryService } from '../services/beneficiary.service';
+import { assessFraud, getThirdPartyFraudScore } from '../services/kycFraud.service';
 import { KYCStatus } from '@prisma/client';
+import prisma from '../config/database';
 import logger from '../config/logger';
 
 const kycWorker = new Worker(
@@ -51,11 +53,61 @@ const kycWorker = new Worker(
           return { status: 'manual_review_required', riskScore };
         }
 
-        case 'FRAUD_DETECTION':
-          // Run fraud detection algorithms
-          // This would integrate with external fraud detection services
-          logger.info(`Running fraud detection for beneficiary ${data.beneficiaryId}`);
-          return { status: 'fraud_detection_completed' };
+        case 'FRAUD_DETECTION': {
+          logger.info(`Running fraud detection for submission ${data.submissionId}`);
+
+          const submission = await prisma.kYCSubmission.findUnique({
+            where: { id: data.submissionId as string },
+            include: { beneficiary: { select: { country: true, city: true, idDocumentNumber: true } } },
+          });
+
+          if (!submission) {
+            logger.warn(`FRAUD_DETECTION: submission ${data.submissionId} not found`);
+            return { status: 'submission_not_found' };
+          }
+
+          const fraudInput = {
+            submissionId: submission.id,
+            beneficiaryId: submission.beneficiaryId,
+            userId: submission.userId,
+            documentUrl: submission.documentUrl,
+            documentType: submission.documentType,
+            selfieUrl: submission.selfieUrl,
+            additionalDocs: submission.additionalDocs,
+            ipAddress: (submission as any).ipAddress ?? null,
+            userAgent: (submission as any).userAgent ?? null,
+            deviceFingerprint: (submission as any).deviceFingerprint ?? null,
+            claimedCountry: submission.beneficiary?.country ?? null,
+            claimedCity: submission.beneficiary?.city ?? null,
+          };
+
+          const assessment = await assessFraud(fraudInput);
+
+          // Optional third-party enrichment
+          const thirdParty = await getThirdPartyFraudScore(fraudInput);
+          if (thirdParty && thirdParty.score > 0) {
+            assessment.fraudScore = Math.min(
+              Math.round(assessment.fraudScore * 0.7 + thirdParty.score * 0.3),
+              100,
+            );
+            assessment.fraudSignals.push(...thirdParty.signals);
+            assessment.fraudReason += ' (enriched with third-party data)';
+          }
+
+          await prisma.kYCSubmission.update({
+            where: { id: submission.id },
+            data: {
+              fraudScore: assessment.fraudScore,
+              fraudSignals: assessment.fraudSignals,
+              fraudReason: assessment.fraudReason,
+            } as any,
+          });
+
+          logger.info(
+            `Fraud detection complete for submission ${submission.id}: score=${assessment.fraudScore}, signals=${assessment.fraudSignals.length}`,
+          );
+          return { status: 'fraud_detection_completed', fraudScore: assessment.fraudScore, signalCount: assessment.fraudSignals.length };
+        }
 
         default:
           throw new Error(`Unknown KYC job type: ${type}`);

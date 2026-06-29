@@ -1,7 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import { JWTUtils } from '../utils/jwt';
 import { AuthRequest } from '../types';
+import prisma from '../config/database';
 import logger from '../config/logger';
+import prisma from '../config/database';
 
 export const authenticate = async (
   req: AuthRequest,
@@ -10,12 +12,9 @@ export const authenticate = async (
 ): Promise<void> => {
   try {
     const authHeader = req.headers.authorization;
-    
+
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      res.status(401).json({
-        success: false,
-        error: 'No token provided',
-      });
+      res.status(401).json({ success: false, error: 'No token provided' });
       return;
     }
 
@@ -31,11 +30,36 @@ export const authenticate = async (
     next();
   } catch (error) {
     logger.error('Authentication error:', error);
-    res.status(401).json({
-      success: false,
-      error: 'Invalid or expired token',
-    });
+    res.status(401).json({ success: false, error: 'Invalid or expired token' });
   }
+};
+
+export const requireVerified = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  if (!req.user) {
+    res.status(401).json({ success: false, error: 'Authentication required' });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { emailVerified: true },
+  });
+
+  if (!user?.emailVerified) {
+    res.status(403).json({
+      success: false,
+      code: 'EMAIL_NOT_VERIFIED',
+      message: 'Please verify your email before accessing this feature.',
+      resendUrl: '/api/v1/auth/resend-verification',
+    });
+    return;
+  }
+
+  next();
 };
 
 export const authorize = (...roles: string[]) => {
@@ -82,5 +106,46 @@ export const optionalAuth = async (
   } catch (error) {
     // Continue without authentication if token is invalid
     next();
+  }
+};
+
+/**
+ * Middleware that blocks access if the user's email is not verified.
+ * Use on sensitive routes after `authenticate`.
+ *
+ * Example:
+ *   router.post('/donate', authenticate, requireEmailVerified, DonationController.create);
+ */
+export const requireEmailVerified = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+      });
+      return;
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { emailVerified: true },
+    });
+
+    if (!user?.emailVerified) {
+      res.status(403).json({
+        success: false,
+        error: 'Email verification required',
+        code: 'EMAIL_NOT_VERIFIED',
+      });
+      return;
+    }
+
+    next();
+  } catch (error) {
+    next(error);
   }
 };

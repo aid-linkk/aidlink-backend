@@ -6,6 +6,7 @@ import logger from '../config/logger';
 import { ModerationService } from './moderation.service';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 import { getOrSet, invalidateCampaignCache, invalidateSearchCache } from '../utils/cache';
+import { sanitizeString } from '../utils/sanitization';
 
 export class CampaignService {
   static async createCampaign(data: CampaignInput, userId: string, organizationId: string): Promise<any> {
@@ -25,6 +26,8 @@ export class CampaignService {
     const campaign = await prisma.campaign.create({
       data: {
         ...data,
+        title: sanitizeString(data.title),
+        description: sanitizeString(data.description),
         userId,
         organizationId,
         status: CampaignStatus.DRAFT,
@@ -265,9 +268,15 @@ export class CampaignService {
       }
     }
 
+    const sanitizedData = {
+      ...data,
+      ...(data.title !== undefined ? { title: sanitizeString(data.title) } : {}),
+      ...(data.description !== undefined ? { description: sanitizeString(data.description) } : {}),
+    };
+
     const updated = await prisma.campaign.update({
       where: { id },
-      data,
+      data: sanitizedData,
     });
 
     logger.info(`Campaign updated: ${id} by user ${userId}`);
@@ -389,6 +398,7 @@ export class CampaignService {
     // Validate milestone input
     CampaignService.validateMilestoneInput(data);
 
+    const isAlreadyReached = Number(campaign.currentAmount) >= Number(data.targetAmount);
     const milestone = await prisma.milestone.create({
       data: {
         title: data.title,
@@ -396,6 +406,8 @@ export class CampaignService {
         targetAmount: data.targetAmount,
         order: data.order,
         campaignId,
+        achieved: isAlreadyReached,
+        achievedAt: isAlreadyReached ? new Date() : null,
       },
     });
 

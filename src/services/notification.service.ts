@@ -6,6 +6,7 @@ import { config } from '../config';
 import { sendNotificationWithCount, sendUnreadCount } from '../websocket/socket.server';
 import { EmailTemplateService } from './emailTemplate.service';
 import { EmailPreferenceService } from './email-preference.service';
+import { sanitizeObject, sanitizeString } from '../utils/sanitization';
 
 export class NotificationService {
   private static transporter = nodemailer.createTransport({
@@ -65,9 +66,9 @@ export class NotificationService {
       data: {
         userId,
         type,
-        title,
-        message,
-        metadata,
+        title: sanitizeString(title),
+        message: sanitizeString(message),
+        metadata: metadata ? sanitizeObject(metadata) : undefined,
         sentVia: [],
       },
     });
@@ -300,17 +301,18 @@ export class NotificationService {
   static async sendDonationReceivedNotification(
     userId: string,
     campaignTitle: string,
-    amount: number
+    amount: number,
+    currency = 'XLM'
   ): Promise<void> {
     const notification = await this.createNotification(
       userId,
       NotificationType.DONATION_RECEIVED,
       'Donation Received',
-      `Thank you for your donation of ${amount} XLM to "${campaignTitle}". Your contribution will help make a difference.`,
+      `Thank you for your donation of ${amount} ${currency} to "${campaignTitle}". Your contribution will help make a difference.`,
       {
         campaignName: campaignTitle,
         amount,
-        currency: 'XLM',
+        currency,
         date: new Date().toISOString(),
         impactSummary: `Your donation to "${campaignTitle}" will help provide critical aid to those who need it most.`,
         nextStepLink: `${config.email.appUrl}/campaigns`,
@@ -341,15 +343,15 @@ export class NotificationService {
     await this.sendNotificationEmail(userId, notification);
   }
 
-  static async sendDistributionSentNotification(userId: string, amount: number): Promise<void> {
+  static async sendDistributionSentNotification(userId: string, amount: number, currency = 'XLM'): Promise<void> {
     const notification = await this.createNotification(
       userId,
       NotificationType.DISTRIBUTION_SENT,
       'Distribution Received',
-      `You have received a distribution of ${amount} XLM.`,
+      `You have received a distribution of ${amount} ${currency}.`,
       {
         amount,
-        currency: 'XLM',
+        currency,
         deliveryDate: new Date().toISOString(),
       }
     );

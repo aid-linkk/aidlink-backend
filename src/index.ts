@@ -14,7 +14,7 @@ import { connectDatabase, disconnectDatabase } from './config/database';
 import { connectRedis, disconnectRedis } from './config/redis';
 import { apiLimiter } from './middleware/rateLimit';
 import { errorHandler, notFoundHandler } from './middleware/error';
-import { requestLogger, errorLogger } from './middleware/requestLogger';
+import { requestLogger } from './middleware/requestLogger';
 import authRoutes from './routes/auth.routes';
 import campaignRoutes from './routes/campaign.routes';
 import beneficiaryRoutes from './routes/beneficiary.routes';
@@ -195,6 +195,9 @@ const startServer = async (): Promise<void> => {
       .then(({ startRecoveryWorker }) => startRecoveryWorker())
       .catch((error) => logger.error('Failed to start recovery worker:', error));
 
+
+    startWebhookRetryProcessor();
+    logger.info('Webhook retry processor started');
 
     // Start HTTP server
     httpServer.listen(config.port, () => {

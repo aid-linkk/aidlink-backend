@@ -380,6 +380,21 @@ export class BeneficiaryService {
       fraudScore: fraudAssessment.fraudScore,
     }).catch((err) => logger.error('Webhook dispatch error (kyc.status_changed):', err));
 
+    WebhookService.dispatchEventSafely({
+      type: 'kyc.status_changed',
+      resource: { type: 'kyc_submission', id: updated.id },
+      data: {
+        submissionId: updated.id,
+        beneficiaryId: submission.beneficiaryId,
+        userId: submission.userId,
+        previousStatus: submission.status,
+        status: updated.status,
+        reviewedBy: userId,
+        reviewedAt: updated.reviewedAt,
+        fraudScore,
+      },
+    });
+
     return updated;
   }
 

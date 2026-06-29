@@ -7,6 +7,8 @@ jest.mock('../config/database', () => {
     default: {
       user: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
       session: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn(), delete: jest.fn() },
+      emailVerificationToken: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
+      notification: { create: jest.fn() },
     },
   };
   return mock;
@@ -30,6 +32,12 @@ jest.mock('../utils/jwt', () => ({
 jest.mock('../config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), error: jest.fn(), warn: jest.fn() },
+}));
+
+jest.mock('./email-preference.service', () => ({
+  EmailPreferenceService: {
+    createDefault: jest.fn().mockResolvedValue(undefined),
+  },
 }));
 
 const prismaMock = require('../config/database').default;
@@ -59,6 +67,16 @@ const mockSession = (overrides: any = {}) => ({
   ...overrides,
 });
 
+const mockVerificationToken = (overrides: any = {}) => ({
+  id: 'token-1',
+  userId: 'user-1',
+  token: 'valid-token',
+  expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  usedAt: null,
+  createdAt: new Date(),
+  ...overrides,
+});
+
 describe('AuthService', () => {
   beforeEach(() => jest.clearAllMocks());
 
@@ -68,6 +86,8 @@ describe('AuthService', () => {
     it('registers a new user successfully', async () => {
       prismaMock.user.findUnique.mockResolvedValue(null);
       prismaMock.user.create.mockResolvedValue(mockUser({ email: 'new@example.com', username: 'newuser' }));
+      prismaMock.emailVerificationToken.create.mockResolvedValue(mockVerificationToken());
+      prismaMock.notification.create.mockResolvedValue({});
 
       const result = await AuthService.register(registerData);
 
@@ -266,6 +286,94 @@ describe('AuthService', () => {
       prismaMock.user.findUnique.mockResolvedValue(null);
 
       await expect(AuthService.getUserById('nonexistent')).rejects.toThrow('User not found');
+    });
+  });
+
+  describe('sendVerificationEmail', () => {
+    it('creates a verification token and notification', async () => {
+      prismaMock.emailVerificationToken.create.mockResolvedValue(mockVerificationToken());
+      prismaMock.notification.create.mockResolvedValue({});
+
+      await AuthService.sendVerificationEmail('user-1', 'test@example.com');
+
+      expect(prismaMock.emailVerificationToken.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ userId: 'user-1', token: expect.any(String) }),
+        })
+      );
+      expect(prismaMock.notification.create).toHaveBeenCalled();
+    });
+  });
+
+  describe('verifyEmail', () => {
+    it('verifies email with valid token', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(mockVerificationToken());
+      prismaMock.user.update.mockResolvedValue(mockUser({ emailVerified: true }));
+      prismaMock.emailVerificationToken.update.mockResolvedValue({});
+
+      await AuthService.verifyEmail('valid-token');
+
+      expect(prismaMock.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ emailVerified: true, status: UserStatus.ACTIVE }),
+        })
+      );
+      expect(prismaMock.emailVerificationToken.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ usedAt: expect.any(Date) }),
+        })
+      );
+    });
+
+    it('rejects invalid token', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(null);
+
+      await expect(AuthService.verifyEmail('bad-token')).rejects.toThrow('Invalid verification token');
+    });
+
+    it('rejects expired token', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(
+        mockVerificationToken({ expiresAt: new Date(Date.now() - 3600000) })
+      );
+      prismaMock.emailVerificationToken.delete.mockResolvedValue({});
+
+      await expect(AuthService.verifyEmail('expired-token')).rejects.toThrow('Verification token has expired');
+    });
+
+    it('rejects already used token', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(
+        mockVerificationToken({ usedAt: new Date() })
+      );
+
+      await expect(AuthService.verifyEmail('used-token')).rejects.toThrow('Verification token already used');
+    });
+  });
+
+  describe('resendVerificationEmail', () => {
+    it('resends verification for unverified user', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser({ emailVerified: false }));
+      prismaMock.emailVerificationToken.deleteMany.mockResolvedValue({ count: 1 });
+      prismaMock.emailVerificationToken.create.mockResolvedValue(mockVerificationToken());
+      prismaMock.notification.create.mockResolvedValue({});
+
+      await AuthService.resendVerificationEmail('user-1');
+
+      expect(prismaMock.emailVerificationToken.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+      });
+      expect(prismaMock.emailVerificationToken.create).toHaveBeenCalled();
+    });
+
+    it('throws if email already verified', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser({ emailVerified: true }));
+
+      await expect(AuthService.resendVerificationEmail('user-1')).rejects.toThrow('Email already verified');
+    });
+
+    it('throws if user not found', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(null);
+
+      await expect(AuthService.resendVerificationEmail('nonexistent')).rejects.toThrow('User not found');
     });
   });
 });

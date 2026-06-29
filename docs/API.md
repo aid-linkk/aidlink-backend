@@ -1047,6 +1047,84 @@ socket.on('distribution_sent', (data) => {
 });
 ```
 
+## Webhooks
+
+Admin users can register HTTPS webhook endpoints for external integrations.
+
+### Supported Events
+
+- `donation.confirmed`
+- `distribution.completed`
+- `campaign.milestone_reached`
+- `kyc.status_changed`
+
+### Admin Endpoints
+
+All webhook management endpoints require an admin bearer token.
+
+```http
+GET    /api/v1/admin/webhooks
+POST   /api/v1/admin/webhooks
+GET    /api/v1/admin/webhooks/:id
+PUT    /api/v1/admin/webhooks/:id
+DELETE /api/v1/admin/webhooks/:id
+POST   /api/v1/admin/webhooks/:id/test
+GET    /api/v1/admin/webhooks/:id/events
+GET    /api/v1/admin/webhooks/events
+GET    /api/v1/admin/webhooks/events/:eventId
+```
+
+Create payload:
+
+```json
+{
+  "name": "Partner CRM",
+  "url": "https://partner.example.com/aidlink/webhooks",
+  "events": ["donation.confirmed", "distribution.completed"],
+  "secret": "minimum-16-character-secret",
+  "active": true,
+  "description": "CRM integration",
+  "deliverTestPayload": true
+}
+```
+
+`DELETE /admin/webhooks/:id` disables the webhook so it stops receiving future deliveries while preserving delivery history.
+
+### Payload Format
+
+Webhook deliveries send JSON with this shape:
+
+```json
+{
+  "id": "event-uuid",
+  "type": "donation.confirmed",
+  "timestamp": "2026-06-21T00:00:00.000Z",
+  "resource": {
+    "type": "donation",
+    "id": "donation-id"
+  },
+  "data": {
+    "donationId": "donation-id",
+    "campaignId": "campaign-id"
+  }
+}
+```
+
+### Signature Verification
+
+Each delivery includes:
+
+```http
+X-AidLink-Event: donation.confirmed
+X-Hub-Signature-256: sha256=<hex-hmac>
+```
+
+To verify a delivery, compute `HMAC-SHA256` over the exact raw JSON request body with the webhook secret, encode the digest as lowercase hex, prefix it with `sha256=`, and compare it to `X-Hub-Signature-256` using a constant-time comparison.
+
+### Delivery And Retries
+
+Successful 2xx responses mark an event as `SENT`. Network errors, timeouts, and transient HTTP responses such as 408, 429, and 5xx remain `PENDING` until the next exponential-backoff retry or until `WEBHOOK_MAX_ATTEMPTS` is reached. Permanent 4xx responses are marked `FAILED` by default. Delivery attempts, response codes, response bodies, headers, retry counts, and errors are stored for admin inspection.
+
 ## Interactive Documentation
 
 Interactive API documentation with Swagger UI is available at:

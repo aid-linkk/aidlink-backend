@@ -46,6 +46,30 @@ describe('DonationService', () => {
       expect(result.status).toBe('PENDING');
     });
 
+    it('sanitizes donorMessage when creating a donation', async () => {
+      const mockCampaign = { id: '1', status: 'ACTIVE' };
+      const unsanitizedMessage = '<script>alert("xss")</script>';
+      const sanitizedMessage = '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;';
+
+      (prisma.campaign.findUnique as jest.Mock).mockResolvedValue(mockCampaign);
+      (prisma.donation.create as jest.Mock).mockImplementation(async ({ data }) => ({
+        id: '1',
+        campaignId: '1',
+        amount: 100,
+        status: 'PENDING',
+        donorMessage: data.donorMessage,
+      }));
+
+      const result = await DonationService.createDonation({
+        campaignId: '1',
+        amount: 100,
+        currency: 'XLM',
+        donorMessage: unsanitizedMessage,
+      });
+
+      expect(result.donorMessage).toBe(sanitizedMessage);
+    });
+
     it('should throw error if campaign not found', async () => {
       (prisma.campaign.findUnique as jest.Mock).mockResolvedValue(null);
 
@@ -277,6 +301,7 @@ describe('DonationService', () => {
           }),
         },
         campaign: {
+          findUnique: jest.fn().mockResolvedValue({ currentAmount: 500 }),
           update: jest.fn().mockResolvedValue({
             id: 'campaign-1',
             currentAmount: 400,
@@ -290,10 +315,42 @@ describe('DonationService', () => {
       const result = await DonationService.refundDonation('donation-1', 'user-1', 'DONOR' as any);
 
       expect(result.status).toBe('REFUNDED');
+      expect(txMock.campaign.findUnique).toHaveBeenCalledWith({
+        where: { id: 'campaign-1' },
+        select: { currentAmount: true },
+      });
       expect(txMock.campaign.update).toHaveBeenCalledWith({
         where: { id: 'campaign-1' },
         data: { currentAmount: { decrement: 100 } },
       });
+    });
+
+    it('re-reads campaign balance inside transaction and rejects if insufficient', async () => {
+      // Outer snapshot shows sufficient balance, but inside tx the balance is insufficient
+      const txMock = {
+        donation: {
+          update: jest.fn(),
+        },
+        campaign: {
+          findUnique: jest.fn().mockResolvedValue({ currentAmount: 30 }), // INSIDE: 30 < 100 = REJECT
+          update: jest.fn(),
+        },
+      };
+
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(mockDonation);
+      (prisma.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(txMock));
+
+      await expect(
+        DonationService.refundDonation('donation-1', 'user-1', 'DONOR' as any)
+      ).rejects.toThrow('Refund amount exceeds campaign current balance');
+
+      // tx.campaign.findUnique was called for re-read
+      expect(txMock.campaign.findUnique).toHaveBeenCalledWith({
+        where: { id: 'campaign-1' },
+        select: { currentAmount: true },
+      });
+      // donation.update should NOT be called (guard threw)
+      expect(txMock.donation.update).not.toHaveBeenCalled();
     });
 
     it('should throw error if donation is not confirmed', async () => {
@@ -328,6 +385,7 @@ describe('DonationService', () => {
           }),
         },
         campaign: {
+          findUnique: jest.fn().mockResolvedValue({ currentAmount: 500 }),
           update: jest.fn().mockResolvedValue({
             id: 'campaign-1',
             currentAmount: 400,
@@ -355,6 +413,7 @@ describe('DonationService', () => {
           }),
         },
         campaign: {
+          findUnique: jest.fn().mockResolvedValue({ currentAmount: 500 }),
           update: jest.fn().mockResolvedValue({
             id: 'campaign-1',
             currentAmount: 400,

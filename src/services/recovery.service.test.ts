@@ -1,6 +1,6 @@
 import prisma from '../config/database';
 import * as RecoveryService from './recovery.service';
-import { RecoveryCaseType, RecoveryStatus, SettlementOption, DonationStatus, CampaignStatus } from '@prisma/client';
+import { RecoveryCaseType, RecoveryStatus, SettlementOption, DonationStatus, CampaignStatus, NotificationType } from '@prisma/client';
 
 jest.mock('../config/database');
 jest.mock('./notification.service', () => ({
@@ -11,6 +11,10 @@ jest.mock('./notification.service', () => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Re-establish $transaction default after clearAllMocks resets it
+  (prisma.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
+    typeof cb === 'function' ? cb(prisma) : Promise.all(cb)
+  );
 });
 
 // ─── createFailedRefundCase ───────────────────────────────────────
@@ -91,6 +95,8 @@ describe('retryRefund', () => {
     const result = await RecoveryService.retryRefund('rc1', 'admin1');
 
     expect(result.status).toBe(RecoveryStatus.FAILED_PERMANENTLY);
+    expect(prisma.auditLog.create).toHaveBeenCalled();
+    expect(prisma.notification.create).toHaveBeenCalled();
   });
 
   it('throws if case is already resolved', async () => {
@@ -222,7 +228,59 @@ describe('issueDonorCredit', () => {
 
     expect(prisma.donorCredit.create).toHaveBeenCalled();
     expect(result).toHaveProperty('id', 'credit1');
+    expect(prisma.notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          userId: 'u1',
+          type: NotificationType.DONOR_CREDIT_ISSUED,
+          metadata: expect.objectContaining({ donorCreditId: 'credit1' }),
+        }),
+      })
+    );
     expect(prisma.auditLog.create).toHaveBeenCalled();
+  });
+});
+
+// ─── Transaction rollback tests ──────────────────────────────────
+
+describe('recovery transaction rollbacks', () => {
+  describe('createFailedRefundCase', () => {
+    it('rolls back when auditLog.create fails inside transaction', async () => {
+      (prisma.recoveryCase.findFirst as jest.Mock).mockResolvedValue(null);
+      (prisma.recoveryCase.create as jest.Mock).mockResolvedValue({
+        id: 'rc1', type: RecoveryCaseType.FAILED_REFUND, donationId: 'd1',
+      });
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue({ userId: 'u1' });
+      (prisma.auditLog.create as jest.Mock).mockRejectedValue(new Error('DB constraint'));
+
+      await expect(
+        RecoveryService.createFailedRefundCase('d1', 'bad account')
+      ).rejects.toThrow('DB constraint');
+
+      // recoveryCase.create was called but logically rolled back
+      expect(prisma.recoveryCase.create).toHaveBeenCalled();
+      // notification should NOT be called (execution halted at auditLog)
+      expect(prisma.notification.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('issueDonorCredit', () => {
+    it('rolls back when notification.create fails inside transaction', async () => {
+      (prisma.recoveryCase.findUnique as jest.Mock).mockResolvedValue({ id: 'rc1' });
+      (prisma.donorCredit.create as jest.Mock).mockResolvedValue({
+        id: 'credit1', userId: 'u1', amount: 100,
+      });
+      (prisma.notification.create as jest.Mock).mockRejectedValue(new Error('DB error'));
+
+      await expect(
+        RecoveryService.issueDonorCredit('rc1', 'u1', 100, 'XLM', 'compensation', 'admin1')
+      ).rejects.toThrow('DB error');
+
+      expect(prisma.donorCredit.create).toHaveBeenCalled();
+      expect(prisma.notification.create).toHaveBeenCalled();
+      // auditLog should NOT be called (execution halted at notification)
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    });
   });
 });
 

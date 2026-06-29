@@ -130,9 +130,9 @@ export class NotificationController {
         throw new AppError('Authentication required', 401);
       }
 
-      const { campaignTitle, amount } = req.body;
+      const { campaignTitle, amount, currency } = req.body;
       
-      await NotificationService.sendDonationReceivedNotification(req.user.id, campaignTitle, amount);
+      await NotificationService.sendDonationReceivedNotification(req.user.id, campaignTitle, amount, currency);
       
       res.status(200).json({
         success: true,
@@ -168,9 +168,9 @@ export class NotificationController {
         throw new AppError('Authentication required', 401);
       }
 
-      const { amount } = req.body;
+      const { amount, currency } = req.body;
       
-      await NotificationService.sendDistributionSentNotification(req.user.id, amount);
+      await NotificationService.sendDistributionSentNotification(req.user.id, amount, currency);
       
       res.status(200).json({
         success: true,
