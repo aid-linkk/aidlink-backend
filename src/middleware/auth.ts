@@ -3,7 +3,7 @@ import { JWTUtils } from '../utils/jwt';
 import { AuthRequest } from '../types';
 import prisma from '../config/database';
 import logger from '../config/logger';
-import prisma from '../config/database';
+import { ApiErrorCode, createErrorResponse } from './error';
 
 export const authenticate = async (
   req: AuthRequest,
@@ -14,7 +14,7 @@ export const authenticate = async (
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      res.status(401).json({ success: false, error: 'No token provided' });
+      res.status(401).json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'No token provided'));
       return;
     }
 
@@ -30,7 +30,7 @@ export const authenticate = async (
     next();
   } catch (error) {
     logger.error('Authentication error:', error);
-    res.status(401).json({ success: false, error: 'Invalid or expired token' });
+    res.status(401).json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Invalid or expired token'));
   }
 };
 
@@ -40,7 +40,7 @@ export const requireVerified = async (
   next: NextFunction
 ): Promise<void> => {
   if (!req.user) {
-    res.status(401).json({ success: false, error: 'Authentication required' });
+    res.status(401).json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Authentication required'));
     return;
   }
 
@@ -51,9 +51,10 @@ export const requireVerified = async (
 
   if (!user?.emailVerified) {
     res.status(403).json({
-      success: false,
-      code: 'EMAIL_NOT_VERIFIED',
-      message: 'Please verify your email before accessing this feature.',
+      ...createErrorResponse(
+        ApiErrorCode.EMAIL_NOT_VERIFIED,
+        'Please verify your email before accessing this feature.',
+      ),
       resendUrl: '/api/v1/auth/resend-verification',
     });
     return;
@@ -65,18 +66,12 @@ export const requireVerified = async (
 export const authorize = (...roles: string[]) => {
   return (req: AuthRequest, res: Response, next: NextFunction): void => {
     if (!req.user) {
-      res.status(401).json({
-        success: false,
-        error: 'Authentication required',
-      });
+      res.status(401).json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Authentication required'));
       return;
     }
 
     if (!roles.includes(req.user.role)) {
-      res.status(403).json({
-        success: false,
-        error: 'Insufficient permissions',
-      });
+      res.status(403).json(createErrorResponse(ApiErrorCode.FORBIDDEN, 'Insufficient permissions'));
       return;
     }
 
@@ -123,10 +118,7 @@ export const requireEmailVerified = async (
 ): Promise<void> => {
   try {
     if (!req.user) {
-      res.status(401).json({
-        success: false,
-        error: 'Authentication required',
-      });
+      res.status(401).json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Authentication required'));
       return;
     }
 
@@ -137,9 +129,7 @@ export const requireEmailVerified = async (
 
     if (!user?.emailVerified) {
       res.status(403).json({
-        success: false,
-        error: 'Email verification required',
-        code: 'EMAIL_NOT_VERIFIED',
+        ...createErrorResponse(ApiErrorCode.EMAIL_NOT_VERIFIED, 'Email verification required'),
       });
       return;
     }
