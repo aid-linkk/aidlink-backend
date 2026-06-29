@@ -248,10 +248,12 @@ model Campaign {
 
   organization  Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  donations     Donation[]
+donations     Donation[]
   beneficiaries BeneficiaryAssignment[]
   distributions Distribution[]
   milestones    Milestone[]
+  multipliers   Multiplier[]
+  matchedFunds  MatchedFund[]
   suspensions   Suspension[]
   appeals       Appeal[]
   fraudReports  FraudReport[]

@@ -1,4 +1,17 @@
-const prismaMock = {
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+const prismaMock: any = {
+  multiplier: {
+    findMany: jest.fn(),
+    findUnique: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+  },
+  matchedFund: {
+    findMany: jest.fn(),
+    create: jest.fn(),
+    aggregate: jest.fn(),
+  },
   campaign: {
     findUnique: jest.fn(),
     findMany: jest.fn(),
