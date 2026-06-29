@@ -21,8 +21,15 @@ export const authenticate = async (
     const token = authHeader.substring(7);
     const payload = JWTUtils.verifyToken(token);
 
+    const userId = JWTUtils.getUserId(payload);
+
+    if (!userId) {
+      res.status(401).json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Invalid token payload'));
+      return;
+    }
+
     req.user = {
-      id: payload.id,
+      id: userId,
       email: payload.email,
       role: payload.role,
     };
@@ -30,7 +37,9 @@ export const authenticate = async (
     next();
   } catch (error) {
     logger.error('Authentication error:', error);
-    res.status(401).json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Invalid or expired token'));
+    res
+      .status(401)
+      .json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Invalid or expired token'));
   }
 };
 
@@ -53,7 +62,7 @@ export const requireVerified = async (
     res.status(403).json({
       ...createErrorResponse(
         ApiErrorCode.EMAIL_NOT_VERIFIED,
-        'Please verify your email before accessing this feature.',
+        'Please verify your email before accessing this feature.'
       ),
       resendUrl: '/api/v1/auth/resend-verification',
     });
@@ -66,7 +75,9 @@ export const requireVerified = async (
 export const authorize = (...roles: string[]) => {
   return (req: AuthRequest, res: Response, next: NextFunction): void => {
     if (!req.user) {
-      res.status(401).json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Authentication required'));
+      res
+        .status(401)
+        .json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Authentication required'));
       return;
     }
 
@@ -86,17 +97,21 @@ export const optionalAuth = async (
 ): Promise<void> => {
   try {
     const authHeader = req.headers.authorization;
-    
+
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
       const payload = JWTUtils.verifyToken(token);
-      req.user = {
-        id: payload.id,
-        email: payload.email,
-        role: payload.role,
-      };
+      const userId = JWTUtils.getUserId(payload);
+
+      if (userId) {
+        req.user = {
+          id: userId,
+          email: payload.email,
+          role: payload.role,
+        };
+      }
     }
-    
+
     next();
   } catch (error) {
     // Continue without authentication if token is invalid
@@ -118,7 +133,9 @@ export const requireEmailVerified = async (
 ): Promise<void> => {
   try {
     if (!req.user) {
-      res.status(401).json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Authentication required'));
+      res
+        .status(401)
+        .json(createErrorResponse(ApiErrorCode.UNAUTHORIZED, 'Authentication required'));
       return;
     }
 

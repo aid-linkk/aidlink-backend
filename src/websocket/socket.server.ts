@@ -1,11 +1,41 @@
 import { Server as SocketIOServer } from 'socket.io';
 import { Server as HTTPServer } from 'http';
+import { Role } from '@prisma/client';
 import { config } from '../config';
 import logger from '../config/logger';
-import jwt from 'jsonwebtoken';
 import prisma from '../config/database';
+import { JWTUtils } from '../utils/jwt';
 
 let io: SocketIOServer;
+
+export interface SocketAuthResult {
+  userId: string;
+  userRole: Role;
+}
+
+export const authenticateSocketToken = async (token: string): Promise<SocketAuthResult> => {
+  try {
+    const payload = JWTUtils.verifyToken(token);
+    const userId = JWTUtils.getUserId(payload);
+
+    if (!userId) {
+      throw new Error('Authentication failed');
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true },
+    });
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    return { userId: user.id, userRole: user.role };
+  } catch (error) {
+    throw new Error('Authentication failed');
+  }
+};
 
 export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
   io = new SocketIOServer(httpServer, {
@@ -20,25 +50,15 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token;
-      
+
       if (!token) {
         return next(new Error('Authentication token required'));
       }
 
-      // Verify JWT token
-      const decoded = jwt.verify(token, config.jwt.secret) as any;
-      
-      // Verify user exists
-      const user = await prisma.user.findUnique({
-        where: { id: decoded.userId },
-      });
+      const { userId, userRole } = await authenticateSocketToken(token);
 
-      if (!user) {
-        return next(new Error('User not found'));
-      }
-
-      socket.data.userId = user.id;
-      socket.data.userRole = user.role;
+      socket.data.userId = userId;
+      socket.data.userRole = userRole;
       next();
     } catch (error) {
       next(new Error('Authentication failed'));
@@ -56,7 +76,7 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
     socket.on('join_campaign', (campaignId: string) => {
       socket.join(`campaign:${campaignId}`);
       logger.info(`User ${userId} joined campaign ${campaignId}`);
-      
+
       // Send current campaign data to the newly joined client
       sendCampaignUpdate(campaignId);
     });
@@ -100,23 +120,29 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
     });
 
     // Send initial unread notification count on connect
-    prisma.notification.count({
-      where: { userId, status: 'UNREAD' },
-    }).then(function(count) {
-      socket.emit('notification:unread_count', { unreadCount: count });
-    }).catch(function(err) {
-      logger.error('Error fetching initial unread count:', err);
-    });
+    prisma.notification
+      .count({
+        where: { userId, status: 'UNREAD' },
+      })
+      .then(function (count) {
+        socket.emit('notification:unread_count', { unreadCount: count });
+      })
+      .catch(function (err) {
+        logger.error('Error fetching initial unread count:', err);
+      });
 
     // Handle unread count requests from clients
-    socket.on('notification:get_unread_count', function() {
-      prisma.notification.count({
-        where: { userId, status: 'UNREAD' },
-      }).then(function(count) {
-        socket.emit('notification:unread_count', { unreadCount: count });
-      }).catch(function(err) {
-        logger.error('Error fetching unread count:', err);
-      });
+    socket.on('notification:get_unread_count', function () {
+      prisma.notification
+        .count({
+          where: { userId, status: 'UNREAD' },
+        })
+        .then(function (count) {
+          socket.emit('notification:unread_count', { unreadCount: count });
+        })
+        .catch(function (err) {
+          logger.error('Error fetching unread count:', err);
+        });
     });
   });
 
@@ -200,12 +226,12 @@ export const sendDonationUpdate = async (donationId: string): Promise<void> => {
     if (donation) {
       // Notify campaign subscribers
       broadcastToCampaign(donation.campaignId, 'donation:created', donation);
-      
+
       // Notify the donor
       if (donation.userId) {
         broadcastToUser(donation.userId, 'donation:created', donation);
       }
-      
+
       // Send updated campaign data
       await sendCampaignUpdate(donation.campaignId);
     }
@@ -227,10 +253,10 @@ export const sendDistributionUpdate = async (distributionId: string): Promise<vo
     if (distribution) {
       // Notify campaign subscribers
       broadcastToCampaign(distribution.campaignId, 'distribution:updated', distribution);
-      
+
       // Notify the beneficiary
       broadcastToBeneficiary(distribution.beneficiaryId, 'distribution:updated', distribution);
-      
+
       // Send updated campaign data
       await sendCampaignUpdate(distribution.campaignId);
     }
@@ -243,7 +269,11 @@ export const sendNotification = (userId: string, notification: any): void => {
   broadcastToUser(userId, 'notification:new', notification);
 };
 
-export const sendNotificationWithCount = (userId: string, notification: any, unreadCount: number): void => {
+export const sendNotificationWithCount = (
+  userId: string,
+  notification: any,
+  unreadCount: number
+): void => {
   broadcastToUser(userId, 'notification:new', notification);
   broadcastToUser(userId, 'notification:unread_count', { unreadCount });
 };

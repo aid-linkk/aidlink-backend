@@ -4,6 +4,20 @@ import { config } from '../config';
 import { JWTPayload } from '../types';
 
 export class JWTUtils {
+  static getUserId(
+    payload: (Partial<JWTPayload> & { userId?: string }) | null | undefined
+  ): string | undefined {
+    if (typeof payload?.id === 'string' && payload.id.length > 0) {
+      return payload.id;
+    }
+
+    if (typeof payload?.userId === 'string' && payload.userId.length > 0) {
+      return payload.userId;
+    }
+
+    return undefined;
+  }
+
   static generateAccessToken(payload: JWTPayload): string {
     return jwt.sign(payload, config.jwt.secret, {
       // config values ("15m", "7d") are valid ms strings; cast required because
