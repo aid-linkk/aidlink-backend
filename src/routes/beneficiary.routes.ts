@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { BeneficiaryController } from '../controllers/beneficiary.controller';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerified } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
 
@@ -22,6 +22,7 @@ const createBeneficiarySchema = z.object({
   coordinates: z.string().optional(),
   familySize: z.number().int().min(1, 'Family size must be at least 1'),
   needsAssessment: z.string().optional(),
+  needsCategory: z.string().optional(),
 });
 
 const updateBeneficiarySchema = z.object({
@@ -32,6 +33,7 @@ const updateBeneficiarySchema = z.object({
   city: z.string().min(1).optional(),
   country: z.string().min(1).optional(),
   needsAssessment: z.string().optional(),
+  needsCategory: z.string().optional(),
 }).partial();
 
 const updateStatusSchema = z.object({
@@ -71,6 +73,7 @@ router.post(
 router.get(
   '/',
   authenticate,
+  authorize('ADMIN', 'VERIFIER'),
   BeneficiaryController.getBeneficiaries
 );
 
@@ -145,11 +148,12 @@ router.post(
 /**
  * @route   POST /api/v1/beneficiaries/:id/kyc
  * @desc    Submit KYC documents for beneficiary
- * @access  Private (Beneficiary)
+ * @access  Private (Beneficiary — verified only)
  */
 router.post(
   '/:id/kyc',
   authenticate,
+  requireVerified,
   validate(kycSubmissionSchema),
   BeneficiaryController.submitKYC
 );

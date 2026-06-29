@@ -1,4 +1,17 @@
-const prismaMock = {
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+const prismaMock: any = {
+  multiplier: {
+    findMany: jest.fn(),
+    findUnique: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+  },
+  matchedFund: {
+    findMany: jest.fn(),
+    create: jest.fn(),
+    aggregate: jest.fn(),
+  },
   campaign: {
     findUnique: jest.fn(),
     findMany: jest.fn(),
@@ -31,6 +44,7 @@ const prismaMock = {
     create: jest.fn(),
     update: jest.fn(),
     count: jest.fn(),
+    groupBy: jest.fn().mockResolvedValue([]),
   },
   taxReceipt: {
     findUnique: jest.fn(),
@@ -52,7 +66,26 @@ const prismaMock = {
   },
   milestone: {
     create: jest.fn(),
+    update: jest.fn(),
     deleteMany: jest.fn(),
+  },
+  webhookSubscription: {
+    findUnique: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn(),
+  },
+  webhookEvent: {
+    findUnique: jest.fn(),
+    findMany: jest.fn(),
+    findFirst: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn(),
+  },
+  webhookDeliveryAttempt: {
+    create: jest.fn(),
   },
   organization: {
     findUnique: jest.fn(),
@@ -63,6 +96,19 @@ const prismaMock = {
     findUnique: jest.fn(),
     findMany: jest.fn(),
     count: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+  },
+  verificationLog: {
+    create: jest.fn(),
+    findMany: jest.fn(),
+  },
+  session: {
+    create: jest.fn(),
+    findUnique: jest.fn(),
+    update: jest.fn(),
+    delete: jest.fn(),
+    deleteMany: jest.fn(),
   },
   auditLog: {
     create: jest.fn().mockResolvedValue({}),

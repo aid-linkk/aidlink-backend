@@ -152,7 +152,43 @@ export const resolveAppealSchema = z.object({
   adminNotes: z.string().max(2000).optional(),
 });
 
-export const milestoneSubmissionSchema = z.object({
+export const beneficiarySearchSchema = z
+  .object({
+    q: z.string().trim().min(1).optional(),
+    country: z.string().trim().min(1).optional(),
+    city: z.string().trim().min(1).optional(),
+    needsCategory: z.string().trim().min(1).optional(),
+    verificationStatus: z
+      .enum(['PENDING', 'VERIFIED', 'REJECTED', 'SUSPENDED', 'ACTIVE'])
+      .optional(),
+    riskScoreMin: z.coerce.number().int().min(0).optional(),
+    riskScoreMax: z.coerce.number().int().min(0).optional(),
+    ageMin: z.coerce.number().int().min(0).max(150).optional(),
+    ageMax: z.coerce.number().int().min(0).max(150).optional(),
+    familySizeMin: z.coerce.number().int().min(0).optional(),
+    familySizeMax: z.coerce.number().int().min(0).optional(),
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+    sortBy: z
+      .enum(['relevance', 'createdAt', 'updatedAt', 'riskScore', 'age', 'familySize'])
+      .default('createdAt'),
+    sortOrder: z.enum(['asc', 'desc']).default('desc'),
+  })
+  .refine(
+    (d) => d.riskScoreMin === undefined || d.riskScoreMax === undefined || d.riskScoreMin <= d.riskScoreMax,
+    { message: 'riskScoreMin must be less than or equal to riskScoreMax', path: ['riskScoreMin'] }
+  )
+  .refine((d) => d.ageMin === undefined || d.ageMax === undefined || d.ageMin <= d.ageMax, {
+    message: 'ageMin must be less than or equal to ageMax',
+    path: ['ageMin'],
+  })
+  .refine(
+    (d) =>
+      d.familySizeMin === undefined || d.familySizeMax === undefined || d.familySizeMin <= d.familySizeMax,
+    { message: 'familySizeMin must be less than or equal to familySizeMax', path: ['familySizeMin'] }
+  );
+
+  export const milestoneSubmissionSchema = z.object({
   description: z.string().min(10, 'Description must be at least 10 characters').max(5000),
   evidenceUrls: z
     .array(z.string().url('Each evidence URL must be a valid URL'))
@@ -211,4 +247,5 @@ export type BeneficiaryInput = z.infer<typeof beneficiarySchema>;
 export type OrganizationInput = z.infer<typeof organizationSchema>;
 export type DistributionInput = z.infer<typeof distributionSchema>;
 export type KYCSubmissionInput = z.infer<typeof kycSubmissionSchema>;
+export type BeneficiarySearchInput = z.infer<typeof beneficiarySearchSchema>;
 export type GenerateBatchReceiptsInput = z.infer<typeof generateBatchReceiptsSchema>;

@@ -1,0 +1,16 @@
+Verify your AidLink account
+===========================
+
+Hi {{firstName}},
+
+Welcome to AidLink! To get started, please verify your email address by visiting the link below:
+
+{{verificationLink}}
+
+This link will expire in 24 hours.
+
+If you didn't create this account, you can safely ignore this email.
+
+Questions? Contact us at support@aidlink.org
+
+© {{year}} AidLink. All rights reserved.

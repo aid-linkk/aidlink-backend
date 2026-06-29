@@ -3,7 +3,7 @@ import { AuthController } from '../controllers/auth.controller';
 import { authenticate } from '../middleware/auth';
 import { validate } from '../middleware/validation';
 import { registerSchema, loginSchema, walletAuthSchema } from '../utils/validation';
-import { authLimiter } from '../middleware/rateLimit';
+import { authLimiter, resendVerificationLimiter } from '../middleware/rateLimit';
 
 const router = Router();
 
@@ -19,23 +19,59 @@ const router = Router();
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - email
- *               - password
+ *             required: [email, password]
  *             properties:
- *               email:
- *                 type: string
- *               password:
- *                 type: string
- *               username:
- *                 type: string
- *               role:
- *                 type: string
+ *               email: { type: string }
+ *               password: { type: string }
+ *               username: { type: string }
+ *               role: { type: string }
  *     responses:
  *       201:
- *         description: User registered successfully
+ *         description: User created. Check your email to verify.
  */
 router.post('/register', authLimiter, validate(registerSchema), AuthController.register);
+
+/**
+ * @swagger
+ * /api/v1/auth/verify-email:
+ *   get:
+ *     summary: Verify email address
+ *     tags: [Authentication]
+ *     parameters:
+ *       - in: query
+ *         name: token
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Email verified successfully
+ *       400:
+ *         description: Token invalid or expired
+ */
+router.get('/verify-email', AuthController.verifyEmail);
+
+/**
+ * @swagger
+ * /api/v1/auth/resend-verification:
+ *   post:
+ *     summary: Resend email verification link
+ *     tags: [Authentication]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string }
+ *     responses:
+ *       200:
+ *         description: Verification email sent
+ *       429:
+ *         description: Rate limit exceeded
+ */
+router.post('/resend-verification', resendVerificationLimiter, AuthController.resendVerification);
 
 /**
  * @swagger
@@ -49,17 +85,15 @@ router.post('/register', authLimiter, validate(registerSchema), AuthController.r
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - email
- *               - password
+ *             required: [email, password]
  *             properties:
- *               email:
- *                 type: string
- *               password:
- *                 type: string
+ *               email: { type: string }
+ *               password: { type: string }
  *     responses:
  *       200:
  *         description: Login successful
+ *       403:
+ *         description: Email not verified
  */
 router.post('/login', authLimiter, validate(loginSchema), AuthController.login);
 
@@ -67,28 +101,8 @@ router.post('/login', authLimiter, validate(loginSchema), AuthController.login);
  * @swagger
  * /api/v1/auth/wallet:
  *   post:
- *     summary: Authenticate with wallet
+ *     summary: Authenticate with Stellar wallet
  *     tags: [Authentication]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - walletAddress
- *               - signature
- *               - message
- *             properties:
- *               walletAddress:
- *                 type: string
- *               signature:
- *                 type: string
- *               message:
- *                 type: string
- *     responses:
- *       200:
- *         description: Wallet authentication successful
  */
 router.post('/wallet', authLimiter, validate(walletAuthSchema), AuthController.walletAuth);
 
@@ -98,20 +112,6 @@ router.post('/wallet', authLimiter, validate(walletAuthSchema), AuthController.w
  *   post:
  *     summary: Refresh access token
  *     tags: [Authentication]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - refreshToken
- *             properties:
- *               refreshToken:
- *                 type: string
- *     responses:
- *       200:
- *         description: Token refreshed successfully
  */
 router.post('/refresh', AuthController.refreshToken);
 
@@ -123,9 +123,6 @@ router.post('/refresh', AuthController.refreshToken);
  *     tags: [Authentication]
  *     security:
  *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Logout successful
  */
 router.post('/logout', authenticate, AuthController.logout);
 
@@ -137,9 +134,6 @@ router.post('/logout', authenticate, AuthController.logout);
  *     tags: [Authentication]
  *     security:
  *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Logged out from all devices
  */
 router.post('/logout-all', authenticate, AuthController.logoutAll);
 
@@ -147,14 +141,48 @@ router.post('/logout-all', authenticate, AuthController.logoutAll);
  * @swagger
  * /api/v1/auth/me:
  *   get:
- *     summary: Get current user
+ *     summary: Get current user profile (includes emailVerified)
+ *     tags: [Authentication]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get('/me', authenticate, AuthController.getMe);
+
+/**
+ * @swagger
+ * /api/v1/auth/verify-email:
+ *   get:
+ *     summary: Verify email address using token
+ *     tags: [Authentication]
+ *     parameters:
+ *       - in: query
+ *         name: token
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Email verification token sent to the user's email
+ *     responses:
+ *       200:
+ *         description: Email verified successfully
+ *       400:
+ *         description: Invalid or expired token
+ */
+router.get('/verify-email', AuthController.verifyEmail);
+
+/**
+ * @swagger
+ * /api/v1/auth/resend-verification:
+ *   post:
+ *     summary: Resend email verification
  *     tags: [Authentication]
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       200:
- *         description: User data retrieved successfully
+ *         description: Verification email sent
+ *       400:
+ *         description: Email already verified
  */
-router.get('/me', authenticate, AuthController.getMe);
+router.post('/resend-verification', authenticate, AuthController.resendVerification);
 
 export default router;

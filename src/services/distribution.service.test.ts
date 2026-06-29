@@ -5,7 +5,10 @@ jest.mock('../config/database', () => {
   const mock = {
     __esModule: true,
     default: {
-      campaign: { findUnique: jest.fn() },
+      campaign: {
+        findUnique: jest.fn(),
+        update: jest.fn(),
+      },
       beneficiary: { findUnique: jest.fn() },
       beneficiaryAssignment: { findUnique: jest.fn() },
       distribution: {
@@ -15,6 +18,7 @@ jest.mock('../config/database', () => {
         update: jest.fn(),
         count: jest.fn(),
       },
+      $transaction: jest.fn(),
     },
   };
   return mock;
@@ -46,7 +50,10 @@ const mockDistribution = (overrides: any = {}) => ({
 });
 
 describe('DistributionService', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock));
+  });
 
   describe('createDistribution', () => {
     const input = {
@@ -122,10 +129,22 @@ describe('DistributionService', () => {
 
       expect(result.status).toBe(DistributionStatus.PENDING);
     });
+
+    it('wraps creation in a transaction', async () => {
+      const campaign = { id: 'campaign-1', userId: 'user-1', status: 'ACTIVE' };
+      prismaMock.campaign.findUnique.mockResolvedValue(campaign);
+      prismaMock.beneficiary.findUnique.mockResolvedValue({ id: 'ben-1' });
+      prismaMock.beneficiaryAssignment.findUnique.mockResolvedValue({ id: 'assign-1' });
+      prismaMock.distribution.create.mockResolvedValue(mockDistribution());
+
+      await DistributionService.createDistribution(input, 'user-1', Role.DONOR);
+
+      expect(prismaMock.$transaction).toHaveBeenCalled();
+    });
   });
 
   describe('confirmDistribution', () => {
-    it('confirms distribution successfully', async () => {
+    it('confirms distribution successfully and decrements campaign balance', async () => {
       const distribution = mockDistribution({ campaign: { id: 'campaign-1' } });
       const updated = mockDistribution({
         status: DistributionStatus.COMPLETED,
@@ -136,11 +155,28 @@ describe('DistributionService', () => {
 
       prismaMock.distribution.findUnique.mockResolvedValue(distribution);
       prismaMock.distribution.update.mockResolvedValue(updated);
+      prismaMock.campaign.update.mockResolvedValue({});
 
       const result = await DistributionService.confirmDistribution('dist-1', '0xabc', 'user-1');
 
       expect(result.status).toBe(DistributionStatus.COMPLETED);
       expect(result.blockchainTxHash).toBe('0xabc');
+      expect(prismaMock.$transaction).toHaveBeenCalled();
+      expect(prismaMock.campaign.update).toHaveBeenCalledWith({
+        where: { id: 'campaign-1' },
+        data: { currentAmount: { decrement: 100 } },
+      });
+    });
+
+    it('rolls back when campaign update fails inside transaction', async () => {
+      const distribution = mockDistribution({ campaign: { id: 'campaign-1' } });
+      prismaMock.distribution.findUnique.mockResolvedValue(distribution);
+      prismaMock.distribution.update.mockResolvedValue(mockDistribution({ status: DistributionStatus.COMPLETED }));
+      prismaMock.campaign.update.mockRejectedValue(new Error('DB error'));
+
+      await expect(
+        DistributionService.confirmDistribution('dist-1', '0xabc', 'user-1')
+      ).rejects.toThrow('DB error');
     });
 
     it('rejects already completed distribution', async () => {
@@ -265,6 +301,16 @@ describe('DistributionService', () => {
           }),
         })
       );
+    });
+
+    it('wraps status update in a transaction', async () => {
+      const distribution = mockDistribution({ campaign: { id: 'campaign-1', userId: 'user-1' } });
+      prismaMock.distribution.findUnique.mockResolvedValue(distribution);
+      prismaMock.distribution.update.mockResolvedValue(mockDistribution({ status: DistributionStatus.COMPLETED }));
+
+      await DistributionService.updateDistributionStatus('dist-1', DistributionStatus.COMPLETED, 'user-1', Role.DONOR);
+
+      expect(prismaMock.$transaction).toHaveBeenCalled();
     });
   });
 

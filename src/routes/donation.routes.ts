@@ -29,11 +29,12 @@ const confirmDonationSchema = z.object({
 /**
  * @route   POST /api/v1/donations
  * @desc    Create a new donation
- * @access  Private
+ * @access  Private (verified users only)
  */
 router.post(
   '/',
   authenticate,
+  requireVerified,
   donationLimiter,
   validate(createDonationSchema),
   DonationController.createDonation

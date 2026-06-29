@@ -15,6 +15,11 @@ export class CryptoUtils {
     return crypto.randomBytes(length).toString('hex');
   }
 
+  /** Generate a URL-safe verification token (32 bytes = 43 base64url chars) */
+  static generateVerificationToken(): string {
+    return crypto.randomBytes(32).toString('base64url');
+  }
+
   static generateUUID(): string {
     return crypto.randomUUID();
   }

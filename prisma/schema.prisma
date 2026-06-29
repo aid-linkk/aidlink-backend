@@ -2,12 +2,14 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pg_trgm]
 }
 
 // ============================================
@@ -32,37 +34,56 @@ enum UserStatus {
 }
 
 model User {
-  id            String     @id @default(cuid())
-  email         String     @unique
-  username      String?    @unique
-  passwordHash  String?
-  walletAddress String?    @unique
-  role          Role       @default(DONOR)
-  status        UserStatus @default(PENDING_VERIFICATION)
-  emailVerified Boolean    @default(false)
-  lastLogin     DateTime?
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  id                  String     @id @default(cuid())
+  email               String     @unique
+  username            String?    @unique
+  passwordHash        String?
+  walletAddress       String?    @unique
+  role                Role       @default(DONOR)
+  status              UserStatus @default(PENDING_VERIFICATION)
+  emailVerified       Boolean    @default(false)
+  verificationToken   String?    @unique
+  verificationExpiry  DateTime?
+  failedVerifyAttempts Int       @default(0)
+  lastLogin           DateTime?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
 
   // Relations
-  sessions         Session[]
-  organizations    Organization?
-  beneficiary      Beneficiary?
-  donations        Donation[]
-  campaigns        Campaign[]
-  auditLogs        AuditLog[]
-  notifications    Notification[]
-  kycSubmissions   KYCSubmission[]
-  pledges          Pledge[]
-  donorCredits     DonorCredit[]
-  taxReceipts      TaxReceipt[]
-  receiptBatchJobs ReceiptBatchJob[]
-  emailPreference  EmailPreference?
+  sessions                Session[]
+  organizations           Organization?
+  beneficiary             Beneficiary?
+  donations               Donation[]
+  campaigns               Campaign[]
+  auditLogs               AuditLog[]
+  notifications           Notification[]
+  kycSubmissions          KYCSubmission[]
+  pledges                 Pledge[]
+  donorCredits            DonorCredit[]
+  taxReceipts             TaxReceipt[]
+  receiptBatchJobs        ReceiptBatchJob[]
+  emailPreference         EmailPreference?
+  emailVerificationTokens EmailVerificationToken[]
 
   @@index([email])
   @@index([walletAddress])
   @@index([role])
   @@index([status])
+}
+
+model VerificationLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String   // 'SENT' | 'VERIFIED' | 'EXPIRED' | 'RESENT' | 'FAILED'
+  tokenHash  String?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
 }
 
 model Session {
@@ -229,10 +250,12 @@ model Campaign {
 
   organization  Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  donations     Donation[]
+donations     Donation[]
   beneficiaries BeneficiaryAssignment[]
   distributions Distribution[]
   milestones    Milestone[]
+  multipliers   Multiplier[]
+  matchedFunds  MatchedFund[]
   suspensions   Suspension[]
   appeals       Appeal[]
   fraudReports  FraudReport[]
@@ -435,6 +458,7 @@ model Beneficiary {
   coordinates      String? // JSON: {lat, lng}
   familySize       Int               @default(1)
   needsAssessment  String?           @db.Text
+  needsCategory    String?
   status           BeneficiaryStatus @default(PENDING)
   verifiedAt       DateTime?
   verifiedBy       String?
@@ -452,6 +476,15 @@ model Beneficiary {
   @@index([country])
   @@index([city])
   @@index([riskScore])
+  @@index([needsCategory])
+  @@index([familySize])
+  @@index([dateOfBirth])
+  @@index([country, city])
+  @@index([status, country])
+  @@index([firstName(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([lastName(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([idDocumentNumber(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([phoneNumber(ops: raw("gin_trgm_ops"))], type: Gin)
 }
 
 model BeneficiaryAssignment {
@@ -955,6 +988,13 @@ enum JobType {
   ANALYTICS_TRENDING_REFRESH
 }
 
+enum WebhookDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  DISABLED
+}
+
 model QueueJob {
   id          String    @id @default(cuid())
   type        JobType
@@ -973,6 +1013,73 @@ model QueueJob {
   @@index([type])
   @@index([status])
   @@index([priority])
+  @@index([createdAt])
+}
+
+// ============================================
+// WEBHOOKS
+// ============================================
+
+model WebhookSubscription {
+  id          String   @id @default(cuid())
+  name        String
+  url         String
+  secret      String
+  events      String[]
+  active      Boolean  @default(true)
+  description String?  @db.Text
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  deliveries WebhookEvent[]
+
+  @@index([active])
+  @@index([createdBy])
+  @@index([createdAt])
+}
+
+model WebhookEvent {
+  id              String                @id @default(cuid())
+  webhookId       String
+  eventType       String
+  payload         Json
+  status          WebhookDeliveryStatus @default(PENDING)
+  attempts        Int                   @default(0)
+  maxAttempts     Int                   @default(3)
+  nextRetryAt     DateTime?
+  lastAttemptAt   DateTime?
+  sentAt          DateTime?
+  responseCode    Int?
+  responseBody    String?               @db.Text
+  responseHeaders Json?
+  errorMessage    String?               @db.Text
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  webhook WebhookSubscription @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  deliveryAttempts WebhookDeliveryAttempt[]
+
+  @@index([webhookId])
+  @@index([eventType])
+  @@index([status])
+  @@index([nextRetryAt])
+  @@index([createdAt])
+}
+
+model WebhookDeliveryAttempt {
+  id              String   @id @default(cuid())
+  webhookEventId  String
+  attemptNumber   Int
+  responseCode    Int?
+  responseBody    String?  @db.Text
+  responseHeaders Json?
+  errorMessage    String?  @db.Text
+  createdAt       DateTime @default(now())
+
+  webhookEvent WebhookEvent @relation(fields: [webhookEventId], references: [id], onDelete: Cascade)
+
+  @@index([webhookEventId])
   @@index([createdAt])
 }
 
@@ -1218,4 +1325,18 @@ model ReceiptBatchJob {
   @@index([createdBy])
   @@index([status])
   @@index([createdAt])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
 }

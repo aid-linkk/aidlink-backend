@@ -12,6 +12,7 @@ const DonationReceivedSchema = z.object({
     userId: z.string(),
     campaignTitle: z.string().min(1),
     amount: z.number().positive(),
+    currency: z.string().min(1).optional(),
   }),
 });
 
@@ -29,6 +30,7 @@ const DistributionSentSchema = z.object({
   data: z.object({
     userId: z.string(),
     amount: z.number().positive(),
+    currency: z.string().min(1).optional(),
   }),
 });
 
@@ -80,7 +82,8 @@ function createWorker(): Worker {
           await NotificationService.sendDonationReceivedNotification(
             data.userId,
             data.campaignTitle,
-            data.amount
+            data.amount,
+            data.currency
           );
           break;
 
@@ -95,7 +98,8 @@ function createWorker(): Worker {
         case 'DISTRIBUTION_SENT':
           await NotificationService.sendDistributionSentNotification(
             data.userId,
-            data.amount
+            data.amount,
+            data.currency
           );
           break;
 

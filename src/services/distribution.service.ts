@@ -50,11 +50,13 @@ export class DistributionService {
       );
     }
 
-    const distribution = await prisma.distribution.create({
-      data: {
-        ...data,
-        status: DistributionStatus.PENDING,
-      },
+    const distribution = await prisma.$transaction(async (tx) => {
+      return tx.distribution.create({
+        data: {
+          ...data,
+          status: DistributionStatus.PENDING,
+        },
+      });
     });
 
     logger.info(`Distribution created: ${distribution.id} for campaign ${data.campaignId}`);
@@ -76,14 +78,28 @@ export class DistributionService {
       throw new AppError('Distribution already completed', 400);
     }
 
-    const updated = await prisma.distribution.update({
-      where: { id },
-      data: {
-        status: DistributionStatus.COMPLETED,
-        blockchainTxHash: txHash,
-        distributedAt: new Date(),
-        distributedBy: userId,
-      },
+    const updated = await prisma.$transaction(async (tx) => {
+      const dist = await tx.distribution.update({
+        where: { id },
+        data: {
+          status: DistributionStatus.COMPLETED,
+          blockchainTxHash: txHash,
+          distributedAt: new Date(),
+          distributedBy: userId,
+        },
+      });
+
+      // Decrement campaign currentAmount to reflect distributed funds
+      await tx.campaign.update({
+        where: { id: distribution.campaignId },
+        data: {
+          currentAmount: {
+            decrement: distribution.amount,
+          },
+        },
+      });
+
+      return dist;
     });
 
     logger.info(`Distribution confirmed: ${id} with tx ${txHash}`);
@@ -175,13 +191,15 @@ export class DistributionService {
       throw new AppError('You do not have permission to update this distribution', 403);
     }
 
-    const updated = await prisma.distribution.update({
-      where: { id },
-      data: {
-        status,
-        ...(status === DistributionStatus.IN_PROGRESS && { distributedBy: userId }),
-        ...(status === DistributionStatus.COMPLETED && { distributedAt: new Date() }),
-      },
+    const updated = await prisma.$transaction(async (tx) => {
+      return tx.distribution.update({
+        where: { id },
+        data: {
+          status,
+          ...(status === DistributionStatus.IN_PROGRESS && { distributedBy: userId }),
+          ...(status === DistributionStatus.COMPLETED && { distributedAt: new Date() }),
+        },
+      });
     });
 
     logger.info(`Distribution status updated: ${id} to ${status} by user ${userId}`);

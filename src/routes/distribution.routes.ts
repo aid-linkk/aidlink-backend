@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { DistributionController } from '../controllers/distribution.controller';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireVerified } from '../middleware/auth';
 import { distributionLimiter } from '../middleware/rateLimit';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
@@ -32,11 +32,12 @@ const addProofSchema = z.object({
 /**
  * @route   POST /api/v1/distributions
  * @desc    Create a new distribution
- * @access  Private (Organization, Admin)
+ * @access  Private (Organization, Admin — verified only)
  */
 router.post(
   '/',
   authenticate,
+  requireVerified,
   distributionLimiter,
   validate(createDistributionSchema),
   DistributionController.createDistribution
