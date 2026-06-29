@@ -1,8 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { AuthService } from '../services/auth.service';
 import { AuthRequest } from '../types';
-import { AppError } from '../middleware/error';
-import logger from '../config/logger';
+import { ApiErrorCode, AppError, createErrorResponse } from '../middleware/error';
 
 export class AuthController {
   static async register(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -42,9 +41,7 @@ export class AuthController {
     } catch (error) {
       if (error instanceof AppError && error.statusCode === 400) {
         res.status(400).json({
-          success: false,
-          code: 'VERIFICATION_FAILED',
-          message: error.message,
+          ...createErrorResponse(ApiErrorCode.VERIFICATION_FAILED, error.message),
           resendUrl: '/api/v1/auth/resend-verification',
         });
         return;
@@ -89,9 +86,7 @@ export class AuthController {
         const message = error.message;
         if (message.includes('verify your email')) {
           res.status(403).json({
-            success: false,
-            code: 'EMAIL_NOT_VERIFIED',
-            message,
+            ...createErrorResponse(ApiErrorCode.EMAIL_NOT_VERIFIED, message),
             resendUrl: '/api/v1/auth/resend-verification',
           });
           return;
@@ -175,42 +170,6 @@ export class AuthController {
       const user = await AuthService.getUserById(req.user.id);
 
       res.status(200).json({ success: true, data: user });
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  static async verifyEmail(req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      const { token } = req.query;
-
-      if (!token || typeof token !== 'string') {
-        throw new AppError('Verification token is required', 400);
-      }
-
-      await AuthService.verifyEmail(token);
-
-      res.status(200).json({
-        success: true,
-        message: 'Email verified successfully',
-      });
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  static async resendVerification(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-    try {
-      if (!req.user) {
-        throw new AppError('Authentication required', 401);
-      }
-
-      await AuthService.resendVerificationEmail(req.user.id);
-
-      res.status(200).json({
-        success: true,
-        message: 'Verification email sent',
-      });
     } catch (error) {
       next(error);
     }

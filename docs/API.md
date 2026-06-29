@@ -40,9 +40,12 @@ Content-Type: application/json
 ```json
 {
   "success": false,
-  "error": "Error message",
-  "errors": {
-    "field": "Validation error"
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed",
+    "details": {
+      "field": "Validation error"
+    }
   }
 }
 ```
@@ -978,18 +981,23 @@ Authorization: Bearer <access_token>
 
 ## Error Codes
 
-| Code | Description |
-|------|-------------|
-| 200 | Success |
-| 201 | Created |
-| 400 | Bad Request |
-| 401 | Unauthorized |
-| 403 | Forbidden |
-| 404 | Not Found |
-| 409 | Conflict |
-| 422 | Validation Error |
-| 429 | Too Many Requests |
-| 500 | Internal Server Error |
+Error responses use `success: false` and an `error` object with a machine-readable `code` and human-readable `message`.
+
+| Error code | HTTP status | Returned when |
+|------------|-------------|---------------|
+| `VALIDATION_ERROR` | 400, 422 | Request body, query params, or uploaded content fails validation. |
+| `UNAUTHORIZED` | 401 | Authentication is missing, invalid, or expired. |
+| `FORBIDDEN` | 403 | The authenticated user lacks the required role or permission. |
+| `EMAIL_NOT_VERIFIED` | 403 | The user must verify their email before using the endpoint. |
+| `VERIFICATION_FAILED` | 400 | An email verification token is missing, invalid, or expired. |
+| `NOT_FOUND` | 404 | The route or requested resource does not exist. |
+| `GONE` | 410 | A previously available resource is no longer available. |
+| `CONFLICT` | 409 | The request conflicts with the current resource state. |
+| `BAD_REQUEST` | 400 | The request is malformed or missing required input. |
+| `PAYLOAD_TOO_LARGE` | 413 | An uploaded file or request payload exceeds the allowed size. |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | An uploaded file type is not supported. |
+| `RATE_LIMITED` | 429 | The client exceeded a rate limit. |
+| `INTERNAL_SERVER_ERROR` | 500 | An unexpected server error occurred. |
 
 ## Rate Limiting
 

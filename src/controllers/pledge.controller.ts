@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { PledgeService } from '../services/pledge.service';
-import { PledgeType, PledgeCadence, PledgeStatus } from '@prisma/client';
-import logger from '../utils/logger';
+import { PledgeType, PledgeStatus } from '@prisma/client';
+import { AuthRequest } from '../types';
+import { ApiErrorCode, createErrorResponse } from '../middleware/error';
 
 export function createPledgeController(pledgeService: PledgeService) {
   /**
@@ -24,19 +25,19 @@ export function createPledgeController(pledgeService: PledgeService) {
       } = req.body;
 
       if (!amount || !type || !startDate) {
-        return res.status(400).json({
-          error: { code: 'bad_request', message: 'amount, type, and startDate are required' },
-        });
+        return res
+          .status(400)
+          .json(createErrorResponse(ApiErrorCode.BAD_REQUEST, 'amount, type, and startDate are required'));
       }
 
       if (!Object.values(PledgeType).includes(type)) {
-        return res.status(400).json({
-          error: { code: 'bad_request', message: `type must be ONE_OFF or RECURRING` },
-        });
+        return res
+          .status(400)
+          .json(createErrorResponse(ApiErrorCode.BAD_REQUEST, 'type must be ONE_OFF or RECURRING'));
       }
 
       const pledge = await pledgeService.createPledge({
-        donorId: donorId ?? (req as any).user?.id,
+        donorId: donorId ?? (req as AuthRequest).user?.id,
         campaignId,
         amount: Number(amount),
         currency,
@@ -49,9 +50,9 @@ export function createPledgeController(pledgeService: PledgeService) {
       });
 
       return res.status(201).json({ status: 'success', data: pledge });
-    } catch (error: any) {
-      if (error.message?.includes('required')) {
-        return res.status(400).json({ error: { code: 'bad_request', message: error.message } });
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes('required')) {
+        return res.status(400).json(createErrorResponse(ApiErrorCode.BAD_REQUEST, error.message));
       }
       next(error);
     }
@@ -65,7 +66,7 @@ export function createPledgeController(pledgeService: PledgeService) {
     try {
       const pledge = await pledgeService.getPledgeById(req.params.id);
       if (!pledge) {
-        return res.status(404).json({ error: { code: 'not_found', message: 'Pledge not found' } });
+        return res.status(404).json(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Pledge not found'));
       }
       return res.json({ status: 'success', data: pledge });
     } catch (error) {
@@ -80,7 +81,7 @@ export function createPledgeController(pledgeService: PledgeService) {
   async function listPledges(req: Request, res: Response, next: NextFunction) {
     try {
       const { status, page, limit } = req.query;
-      const donorId = (req as any).user?.id;
+      const donorId = (req as AuthRequest).user?.id;
 
       const result = await pledgeService.listPledges({
         donorId,
@@ -104,12 +105,12 @@ export function createPledgeController(pledgeService: PledgeService) {
       const { reason } = req.body;
       const pledge = await pledgeService.cancelPledge(req.params.id, reason);
       return res.json({ status: 'success', data: pledge });
-    } catch (error: any) {
-      if (error.message === 'Pledge not found') {
-        return res.status(404).json({ error: { code: 'not_found', message: error.message } });
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === 'Pledge not found') {
+        return res.status(404).json(createErrorResponse(ApiErrorCode.NOT_FOUND, error.message));
       }
-      if (error.message?.includes('already cancelled')) {
-        return res.status(409).json({ error: { code: 'conflict', message: error.message } });
+      if (error instanceof Error && error.message.includes('already cancelled')) {
+        return res.status(409).json(createErrorResponse(ApiErrorCode.CONFLICT, error.message));
       }
       next(error);
     }

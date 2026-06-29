@@ -132,17 +132,35 @@ components:
           type: boolean
           example: false
         error:
-          type: string
-          example: Validation failed
-        details:
-          type: array
-          items:
-            type: object
-            properties:
-              field:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_ERROR
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - EMAIL_NOT_VERIFIED
+                - VERIFICATION_FAILED
+                - NOT_FOUND
+                - GONE
+                - CONFLICT
+                - BAD_REQUEST
+                - PAYLOAD_TOO_LARGE
+                - UNSUPPORTED_MEDIA_TYPE
+                - RATE_LIMITED
+                - INTERNAL_SERVER_ERROR
+              example: VALIDATION_ERROR
+            message:
+              type: string
+              example: Validation failed
+            details:
+              type: object
+              additionalProperties:
                 type: string
-              message:
-                type: string
+              example:
+                amount: Amount must be positive
 
     # ── Enums ──────────────────────────────────────────────────────────────
     Role:
@@ -782,7 +800,9 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             success: false
-            error: Authentication token required
+            error:
+              code: UNAUTHORIZED
+              message: Authentication token required
 
     Forbidden:
       description: Authenticated but insufficient role
@@ -792,7 +812,9 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             success: false
-            error: Insufficient permissions
+            error:
+              code: FORBIDDEN
+              message: Insufficient permissions
 
     NotFound:
       description: Resource not found
@@ -802,7 +824,9 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             success: false
-            error: Resource not found
+            error:
+              code: NOT_FOUND
+              message: Resource not found
 
     ValidationError:
       description: Request body failed schema validation
@@ -812,10 +836,11 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             success: false
-            error: Validation failed
-            details:
-              - field: amount
-                message: Amount must be positive
+            error:
+              code: VALIDATION_ERROR
+              message: Validation failed
+              details:
+                amount: Amount must be positive
 
     RateLimited:
       description: Rate limit exceeded
@@ -825,7 +850,9 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             success: false
-            error: Too many requests, please try again later
+            error:
+              code: RATE_LIMITED
+              message: Too many requests, please try again later
 
     InternalError:
       description: Unexpected server error
@@ -835,7 +862,9 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             success: false
-            error: Internal server error
+            error:
+              code: INTERNAL_SERVER_ERROR
+              message: Internal server error
 
 # ---------------------------------------------------------------------------
 # PATHS
@@ -908,7 +937,9 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 success: false
-                error: Email already in use
+                error:
+                  code: CONFLICT
+                  message: Email already in use
         "429":
           $ref: '#/components/responses/RateLimited'
 
@@ -966,7 +997,9 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 success: false
-                error: Invalid email or password
+                error:
+                  code: UNAUTHORIZED
+                  message: Invalid email or password
         "429":
           $ref: '#/components/responses/RateLimited'
 
@@ -1024,7 +1057,9 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 success: false
-                error: Invalid wallet signature
+                error:
+                  code: UNAUTHORIZED
+                  message: Invalid wallet signature
         "429":
           $ref: '#/components/responses/RateLimited'
 
@@ -1066,7 +1101,9 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 success: false
-                error: Refresh token expired
+                error:
+                  code: UNAUTHORIZED
+                  message: Refresh token expired
 
   /api/v1/auth/logout:
     post:
@@ -1601,7 +1638,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: Beneficiary already assigned to this campaign
+                error:
+                  code: CONFLICT
+                  message: Beneficiary already assigned to this campaign
 
   /api/v1/campaigns/{campaignId}/multipliers:
     post:
@@ -1921,7 +1960,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: Campaign not found or not accepting donations
+                error:
+                  code: NOT_FOUND
+                  message: Campaign not found or not accepting donations
         "429":
           $ref: '#/components/responses/RateLimited'
 
@@ -2132,7 +2173,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: Transaction hash already associated with another donation
+                error:
+                  code: BAD_REQUEST
+                  message: Transaction hash already associated with another donation
         "401":
           $ref: '#/components/responses/Unauthorized'
         "404":
@@ -2178,7 +2221,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: Only CONFIRMED donations can be refunded
+                error:
+                  code: CONFLICT
+                  message: Only CONFIRMED donations can be refunded
 
   # ==========================================================================
   # BENEFICIARIES
@@ -2294,7 +2339,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: Beneficiary profile already exists
+                error:
+                  code: CONFLICT
+                  message: Beneficiary profile already exists
 
     get:
       tags: [Beneficiaries]
@@ -2373,7 +2420,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: Beneficiary profile not found
+                error:
+                  code: NOT_FOUND
+                  message: Beneficiary profile not found
 
   /api/v1/beneficiaries/{id}:
     get:
@@ -3630,7 +3679,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: Campaign is already suspended
+                error:
+                  code: CONFLICT
+                  message: Campaign is already suspended
 
   /api/v1/admin/campaigns/{id}/reinstate:
     post:
@@ -3680,7 +3731,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: No active suspension found
+                error:
+                  code: CONFLICT
+                  message: No active suspension found
 
   /api/v1/admin/campaigns/{id}/suspensions:
     get:
@@ -4006,7 +4059,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: Organization already registered for this account
+                error:
+                  code: CONFLICT
+                  message: Organization already registered for this account
 
     get:
       tags: [Organizations]
@@ -5056,7 +5111,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: No file provided
+                error:
+                  code: BAD_REQUEST
+                  message: No file provided
         "401":
           $ref: '#/components/responses/Unauthorized'
         "404":
@@ -5067,21 +5124,27 @@ paths:
             application/json:
               example:
                 success: false
-                error: File too large — maximum is 5 MB
+                error:
+                  code: PAYLOAD_TOO_LARGE
+                  message: File too large — maximum is 5 MB
         "415":
           description: Unsupported file type
           content:
             application/json:
               example:
                 success: false
-                error: Unsupported file type — use JPEG, PNG or WEBP
+                error:
+                  code: UNSUPPORTED_MEDIA_TYPE
+                  message: Unsupported file type — use JPEG, PNG or WEBP
         "422":
           description: Image dimensions too small or corrupt
           content:
             application/json:
               example:
                 success: false
-                error: Image must be at least 200x200 pixels
+                error:
+                  code: VALIDATION_ERROR
+                  message: Image must be at least 200x200 pixels
 
   /api/v1/upload/kyc/{submissionId}/document:
     post:
@@ -5137,7 +5200,9 @@ paths:
             application/json:
               example:
                 success: false
-                error: Access denied
+                error:
+                  code: FORBIDDEN
+                  message: Access denied
         "404":
           $ref: '#/components/responses/NotFound'
 
@@ -5186,14 +5251,18 @@ paths:
             application/json:
               example:
                 success: false
-                error: Access denied
+                error:
+                  code: FORBIDDEN
+                  message: Access denied
         "422":
           description: Image too small or corrupt
           content:
             application/json:
               example:
                 success: false
-                error: Image must be at least 400x300 pixels
+                error:
+                  code: VALIDATION_ERROR
+                  message: Image must be at least 400x300 pixels
 
   /api/v1/upload/distribution/{distributionId}/proof:
     post:
