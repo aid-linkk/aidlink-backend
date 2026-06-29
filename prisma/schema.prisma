@@ -45,15 +45,6 @@ model User {
   updatedAt     DateTime   @updatedAt
 
   // Relations
-  sessions       Session[]
-  organizations  Organization?
-  beneficiary    Beneficiary?
-  donations      Donation[]
-  campaigns      Campaign[]
-  auditLogs      AuditLog[]
-  notifications  Notification[]
- kycSubmissions KYCSubmission[]
-  pledges        Pledge[]
   sessions         Session[]
   organizations    Organization?
   beneficiary      Beneficiary?
@@ -62,7 +53,8 @@ model User {
   auditLogs        AuditLog[]
   notifications    Notification[]
   kycSubmissions   KYCSubmission[]
-  donorCredits   DonorCredit[]
+  pledges          Pledge[]
+  donorCredits     DonorCredit[]
   taxReceipts      TaxReceipt[]
   receiptBatchJobs ReceiptBatchJob[]
   emailPreference  EmailPreference?
@@ -397,6 +389,9 @@ model Donation {
   isAnonymous        Boolean        @default(false)
   donorMessage       String?        @db.Text
   receiptGeneratedAt DateTime?
+  revealedAt         DateTime?
+  groupId            String?
+  retentionPolicy    String?
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 
@@ -760,6 +755,7 @@ enum AuditAction {
   RECOVERY_SETTLED
   RECOVERY_MANUAL_OVERRIDE
   DONOR_CREDIT_ISSUED
+  DONATION_IDENTITY_REVEALED
 }
 
 model AuditLog {
@@ -1145,6 +1141,8 @@ model PledgeAttempt {
   @@index([pledgeId])
   @@index([status])
   @@map("pledge_attempts")
+}
+
 // ============================================
 // TAX RECEIPTS
 // ============================================

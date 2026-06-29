@@ -16,8 +16,10 @@ const createDonationSchema = z.object({
   fromWallet: z.string().optional(),
   toWallet: z.string().optional(),
   memo: z.string().optional(),
-  isAnonymous: z.boolean().default(false),
   donorMessage: z.string().optional(),
+  isAnonymous: z.boolean().default(false),
+  groupId: z.string().optional(),
+  retentionPolicy: z.string().optional(),
 });
 
 const confirmDonationSchema = z.object({
@@ -114,6 +116,17 @@ router.post(
   authenticate,
   validate(confirmDonationSchema),
   DonationController.confirmDonation
+);
+
+/**
+ * @route   POST /api/v1/donations/:id/reveal-identity
+ * @desc    Donor opts in to reveal their identity for an anonymous donation
+ * @access  Private (Donor who owns the donation)
+ */
+router.post(
+  '/:id/reveal-identity',
+  authenticate,
+  DonationController.revealIdentity
 );
 
 /**
