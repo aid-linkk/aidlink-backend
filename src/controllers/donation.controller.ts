@@ -9,7 +9,7 @@ export class DonationController {
     try {
       const userId = req.user?.id;
       const result = await DonationService.createDonation(req.body, userId);
-      
+
       res.status(201).json({
         success: true,
         data: result,
@@ -24,13 +24,13 @@ export class DonationController {
     try {
       const { id } = req.params;
       const { txHash } = req.body;
-      
+
       if (!txHash) {
         throw new AppError('Transaction hash is required', 400);
       }
 
       const result = await DonationService.confirmDonation(id, txHash);
-      
+
       res.status(200).json({
         success: true,
         data: result,
@@ -41,7 +41,7 @@ export class DonationController {
     }
   }
 
-  static async getDonations(req: Request, res: Response, next: NextFunction): Promise<void> {
+  static async getDonations(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const filters = {
         campaignId: req.query.campaignId as string,
@@ -54,16 +54,18 @@ export class DonationController {
       const pagination = {
         page: req.query.page ? parseInt(req.query.page as string) : 1,
         limit: req.query.limit ? parseInt(req.query.limit as string) : 10,
-        sortBy: req.query.sortBy as string || 'createdAt',
-        sortOrder: req.query.sortOrder as string || 'desc',
+        sortBy: (req.query.sortBy as string) || 'createdAt',
+        sortOrder: (req.query.sortOrder as string) || 'desc',
       };
 
-      const result = await DonationService.getDonations(filters, pagination);
-      
-      res.status(200).json({
-        success: true,
-        ...result,
-      });
+      const result = await DonationService.getDonations(
+        filters,
+        pagination,
+        req.user?.id,
+        req.user?.role,
+      );
+
+      res.status(200).json({ success: true, ...result });
     } catch (error) {
       next(error);
     }
@@ -72,11 +74,27 @@ export class DonationController {
   static async getDonationById(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
-      const result = await DonationService.getDonationById(id, req.user?.id);
+      const result = await DonationService.getDonationById(id, req.user?.id, req.user?.role);
+
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async revealIdentity(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      if (!req.user) {
+        throw new AppError('Authentication required', 401);
+      }
+
+      const { id } = req.params;
+      const result = await DonationService.revealIdentity(id, req.user.id);
 
       res.status(200).json({
         success: true,
         data: result,
+        message: 'Identity revealed successfully',
       });
     } catch (error) {
       next(error);
@@ -91,7 +109,7 @@ export class DonationController {
 
       const { id } = req.params;
       const result = await DonationService.refundDonation(id, req.user.id, req.user.role);
-      
+
       res.status(200).json({
         success: true,
         data: result,
@@ -119,22 +137,20 @@ export class DonationController {
       const pagination = {
         page: req.query.page ? parseInt(req.query.page as string) : 1,
         limit: req.query.limit ? parseInt(req.query.limit as string) : 10,
-        sortBy: req.query.sortBy as string || 'createdAt',
-        sortOrder: req.query.sortOrder as string || 'desc',
+        sortBy: (req.query.sortBy as string) || 'createdAt',
+        sortOrder: (req.query.sortOrder as string) || 'desc',
       };
 
-      const result = await DonationService.getDonations(filters, pagination, req.user.id);
+      // Pass the requesting user's id so their own anonymous donations are visible to them
+      const result = await DonationService.getDonations(filters, pagination, req.user.id, req.user.role);
 
-      res.status(200).json({
-        success: true,
-        ...result,
-      });
+      res.status(200).json({ success: true, ...result });
     } catch (error) {
       next(error);
     }
   }
 
-  static async getCampaignDonations(req: Request, res: Response, next: NextFunction): Promise<void> {
+  static async getCampaignDonations(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { campaignId } = req.params;
 
@@ -148,16 +164,19 @@ export class DonationController {
       const pagination = {
         page: req.query.page ? parseInt(req.query.page as string) : 1,
         limit: req.query.limit ? parseInt(req.query.limit as string) : 10,
-        sortBy: req.query.sortBy as string || 'createdAt',
-        sortOrder: req.query.sortOrder as string || 'desc',
+        sortBy: (req.query.sortBy as string) || 'createdAt',
+        sortOrder: (req.query.sortOrder as string) || 'desc',
       };
 
-      const result = await DonationService.getDonations(filters, pagination);
-      
-      res.status(200).json({
-        success: true,
-        ...result,
-      });
+      // Public campaign donation feeds: pass requester context for identity gating
+      const result = await DonationService.getDonations(
+        filters,
+        pagination,
+        req.user?.id,
+        req.user?.role,
+      );
+
+      res.status(200).json({ success: true, ...result });
     } catch (error) {
       next(error);
     }

@@ -4,6 +4,7 @@ import prisma from '../config/database';
 import { WebhookEventType, WebhookDeliveryStatus } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
+import { stripDonorPII } from '../utils/anonymity';
 
 const MAX_ATTEMPTS = 5;
 
@@ -78,7 +79,9 @@ export class WebhookService {
 
     if (webhooks.length === 0) return;
 
-    const enriched = { event: eventType, timestamp: new Date().toISOString(), ...payload };
+    // Strip donor PII from outbound webhook payloads for anonymous donations
+    const safePayload = payload.isAnonymous ? stripDonorPII(payload) : payload;
+    const enriched = { event: eventType, timestamp: new Date().toISOString(), ...safePayload };
 
     await Promise.all(
       webhooks.map((wh: any) =>

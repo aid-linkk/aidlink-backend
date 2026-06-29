@@ -122,10 +122,17 @@ export interface DonationInput {
   campaignId: string;
   amount: number;
   currency?: string;
+  fromWallet?: string;
+  toWallet?: string;
+  memo?: string;
+  donorMessage?: string;
+  isAnonymous?: boolean;
+  groupId?: string;
+  retentionPolicy?: string;
+  // Identified-only fields — stripped at service layer when isAnonymous is true
   donorName?: string;
   donorEmail?: string;
   message?: string;
-  isAnonymous?: boolean;
 }
 
 export interface DistributionInput {

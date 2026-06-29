@@ -2,6 +2,7 @@ import prisma from '../config/database';
 import redis from '../config/redis';
 import logger from '../config/logger';
 import { config } from '../config';
+import { stripDonorPII } from '../utils/anonymity';
 import {
   TrendingCampaignFilters,
   TrendingCampaign,
@@ -143,7 +144,9 @@ export class AnalyticsService {
       totalDonations: donations.length,
       campaignsSupported,
       avgDonation: donations.length > 0 ? totalDonated / donations.length : 0,
-      recentDonations: donations.slice(0, 10),
+      recentDonations: donations.slice(0, 10).map((d) =>
+        d.isAnonymous ? stripDonorPII(d) : d
+      ),
       monthlyTrend: monthlyDonations,
     };
   }

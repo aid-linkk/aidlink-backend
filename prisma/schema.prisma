@@ -412,6 +412,9 @@ model Donation {
   isAnonymous        Boolean        @default(false)
   donorMessage       String?        @db.Text
   receiptGeneratedAt DateTime?
+  revealedAt         DateTime?
+  groupId            String?
+  retentionPolicy    String?
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 
@@ -785,6 +788,7 @@ enum AuditAction {
   RECOVERY_SETTLED
   RECOVERY_MANUAL_OVERRIDE
   DONOR_CREDIT_ISSUED
+  DONATION_IDENTITY_REVEALED
 }
 
 model AuditLog {

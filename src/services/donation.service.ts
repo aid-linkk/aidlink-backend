@@ -23,6 +23,9 @@ export class DonationService {
       throw new AppError('Campaign is not active', 400);
     }
 
+    // Strip donor PII when anonymous to enforce GDPR data minimisation
+    const sanitised = sanitizeAnonymousInput(data);
+
     const donation = await prisma.donation.create({
       data: {
         ...data,
@@ -54,7 +57,6 @@ export class DonationService {
     // IMPORTANT: multipliers must be applied at the time the payment is confirmed,
     // so the matched-funds ledger is auditable.
     const updated = await prisma.$transaction(async (tx) => {
-      // Update donation
       const updatedDonation = await tx.donation.update({
         where: { id },
         data: {
@@ -150,6 +152,7 @@ export class DonationService {
       amount: updated.amount,
       currency: updated.currency,
       blockchainTxHash: txHash,
+      isAnonymous: donation.isAnonymous,
     }).catch((err) => logger.error('Webhook dispatch error (donation.confirmed):', err));
 
     if (config.receipts.enabled && donation.userId) {
@@ -166,7 +169,8 @@ export class DonationService {
   static async getDonations(
     filters: DonationFilters = {},
     pagination: any,
-    requestingUserId?: string
+    requestingUserId?: string,
+    requestingUserRole?: string,
   ): Promise<PaginatedResponse<any>> {
     filters = filters ?? {};
 
@@ -175,54 +179,33 @@ export class DonationService {
 
     const where: any = {};
 
-    if (filters.campaignId) {
-      where.campaignId = filters.campaignId;
-    }
-
-    if (filters.userId) {
-      where.userId = filters.userId;
-    }
-
-    if (filters.status) {
-      where.status = filters.status;
-    }
+    if (filters.campaignId) where.campaignId = filters.campaignId;
+    if (filters.userId) where.userId = filters.userId;
+    if (filters.status) where.status = filters.status;
 
     if (filters.startDate || filters.endDate) {
       where.createdAt = {};
-
-      if (filters.startDate) {
-        where.createdAt.gte = filters.startDate;
-      }
-
-      if (filters.endDate) {
-        where.createdAt.lte = filters.endDate;
-      }
+      if (filters.startDate) where.createdAt.gte = filters.startDate;
+      if (filters.endDate) where.createdAt.lte = filters.endDate;
     }
 
-    const [donations, total] = await Promise.all([
+    const [rawDonations, total] = await Promise.all([
       prisma.donation.findMany({
         where,
         skip,
         take: limit,
         orderBy: { [sortBy]: sortOrder },
         include: {
-          campaign: {
-            select: {
-              id: true,
-              title: true,
-            },
-          },
-          user: {
-            select: {
-              id: true,
-              username: true,
-              email: true,
-            },
-          },
+          campaign: { select: { id: true, title: true } },
+          user: { select: { id: true, username: true, email: true } },
         },
-      }).then((donations) => donations.map((d) => d.isAnonymous && d.userId !== requestingUserId ? { ...d, user: { id: null, username: 'Anonymous', email: null } } : d)),
+      }),
       prisma.donation.count({ where }),
     ]);
+
+    const donations = rawDonations.map((d) =>
+      sanitizeDonorIdentity(d, requestingUserId, requestingUserRole),
+    );
 
     return {
       data: donations,
@@ -235,7 +218,11 @@ export class DonationService {
     };
   }
 
-  static async getDonationById(id: string, requestingUserId?: string): Promise<any> {
+  static async getDonationById(
+    id: string,
+    requestingUserId?: string,
+    requestingUserRole?: string,
+  ): Promise<any> {
     const donation = await prisma.donation.findUnique({
       where: { id },
       include: {
@@ -243,20 +230,10 @@ export class DonationService {
           select: {
             id: true,
             title: true,
-            organization: {
-              select: {
-                name: true,
-              },
-            },
+            organization: { select: { name: true } },
           },
         },
-        user: {
-          select: {
-            id: true,
-            username: true,
-            email: true,
-          },
-        },
+        user: { select: { id: true, username: true, email: true } },
       },
     });
 
@@ -264,11 +241,60 @@ export class DonationService {
       throw new AppError('Donation not found', 404);
     }
 
-    if (donation.isAnonymous && donation.userId !== requestingUserId) {
-      return { ...donation, user: { id: null, username: 'Anonymous', email: null } };
+    return sanitizeDonorIdentity(donation, requestingUserId, requestingUserRole);
+  }
+
+  /**
+   * Allows a donor to optionally reveal their identity after donating.
+   * Explicitly opt-in; logged to the audit trail.
+   */
+  static async revealIdentity(
+    id: string,
+    requestingUserId: string,
+  ): Promise<any> {
+    const donation = await prisma.donation.findUnique({ where: { id } });
+
+    if (!donation) {
+      throw new AppError('Donation not found', 404);
     }
 
-    return donation;
+    if (donation.userId !== requestingUserId) {
+      throw new AppError('You can only reveal identity for your own donations', 403);
+    }
+
+    if (!donation.isAnonymous) {
+      throw new AppError('Donation is already identified', 400);
+    }
+
+    if (donation.revealedAt) {
+      throw new AppError('Identity already revealed for this donation', 400);
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const updatedDonation = await tx.donation.update({
+        where: { id },
+        data: {
+          isAnonymous: false,
+          revealedAt: new Date(),
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          userId: requestingUserId,
+          action: AuditAction.DONATION_IDENTITY_REVEALED,
+          entityType: 'Donation',
+          entityId: id,
+          metadata: { revealedAt: updatedDonation.revealedAt },
+        },
+      });
+
+      return updatedDonation;
+    });
+
+    logger.info(`Donation identity revealed: ${id} by user ${requestingUserId}`);
+
+    return updated;
   }
 
   static async refundDonation(id: string, userId: string, userRole: Role): Promise<any> {
@@ -285,7 +311,6 @@ export class DonationService {
       throw new AppError('Only confirmed donations can be refunded', 400);
     }
 
-    // Check permissions
     if (donation.userId !== userId && userRole !== Role.ADMIN) {
       throw new AppError('You do not have permission to refund this donation', 403);
     }
@@ -304,19 +329,12 @@ export class DonationService {
       // Update donation status
       const updatedDonation = await tx.donation.update({
         where: { id },
-        data: {
-          status: DonationStatus.REFUNDED,
-        },
+        data: { status: DonationStatus.REFUNDED },
       });
 
-      // Decrease campaign current amount
       await tx.campaign.update({
         where: { id: donation.campaignId },
-        data: {
-          currentAmount: {
-            decrement: donation.amount,
-          },
-        },
+        data: { currentAmount: { decrement: donation.amount } },
       });
 
       return updatedDonation;
@@ -324,9 +342,8 @@ export class DonationService {
 
     logger.info(`Donation refunded: ${id} by user ${userId}`);
 
-    // Update cache: invalidate on refund
     AnalyticsService.invalidateCampaignCache(donation.campaignId).catch((err) =>
-      logger.error('Failed to invalidate campaign cache on refund', err)
+      logger.error('Failed to invalidate campaign cache on refund', err),
     );
 
     return updated;

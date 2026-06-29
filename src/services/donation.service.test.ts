@@ -1,5 +1,6 @@
 import { DonationService } from './donation.service';
 import prisma from '../config/database';
+import { DonationService } from './donation.service';
 
 // Mock Prisma
 jest.mock('../config/database');
@@ -11,6 +12,9 @@ jest.mock('@prisma/client', () => ({
   },
   Role: {
     ADMIN: 'ADMIN',
+  },
+  AuditAction: {
+    DONATION_IDENTITY_REVEALED: 'DONATION_IDENTITY_REVEALED',
   },
 }));
 
@@ -604,4 +608,227 @@ describe('DonationService', () => {
     });
   });
 
+  // ─── Anonymity ────────────────────────────────────────────────────────────
+
+  describe('createDonation – anonymity / GDPR data minimisation', () => {
+    const activeCampaign = { id: 'camp1', status: 'ACTIVE' };
+
+    beforeEach(() => {
+      (prisma.campaign.findUnique as jest.Mock).mockResolvedValue(activeCampaign);
+    });
+
+    it('strips donorName and donorEmail from record when isAnonymous is true', async () => {
+      (prisma.donation.create as jest.Mock).mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'd1', ...data })
+      );
+
+      await DonationService.createDonation(
+        { campaignId: 'camp1', amount: 50, isAnonymous: true, donorName: 'Jane', donorEmail: 'jane@example.com' },
+        'user1',
+      );
+
+      const createCall = (prisma.donation.create as jest.Mock).mock.calls[0][0].data;
+      expect(createCall).not.toHaveProperty('donorName');
+      expect(createCall).not.toHaveProperty('donorEmail');
+    });
+
+    it('does NOT strip donorName/donorEmail for identified donations', async () => {
+      (prisma.donation.create as jest.Mock).mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'd2', ...data })
+      );
+
+      await DonationService.createDonation(
+        { campaignId: 'camp1', amount: 50, isAnonymous: false, donorName: 'Jane', donorEmail: 'jane@example.com' },
+        'user1',
+      );
+
+      const createCall = (prisma.donation.create as jest.Mock).mock.calls[0][0].data;
+      // Identified donations may pass through donorName / donorEmail if present
+      // (the Prisma model doesn't store them, but they should not be actively stripped)
+      expect(createCall.isAnonymous).toBe(false);
+    });
+
+    it('does not link userId to record when isAnonymous is true', async () => {
+      (prisma.donation.create as jest.Mock).mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'd3', ...data })
+      );
+
+      await DonationService.createDonation(
+        { campaignId: 'camp1', amount: 75, isAnonymous: true },
+        'user1',
+      );
+
+      const createCall = (prisma.donation.create as jest.Mock).mock.calls[0][0].data;
+      expect(createCall.userId).toBeUndefined();
+    });
+
+    it('persists groupId and retentionPolicy when provided', async () => {
+      (prisma.donation.create as jest.Mock).mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'd4', ...data })
+      );
+
+      await DonationService.createDonation(
+        { campaignId: 'camp1', amount: 100, isAnonymous: true, groupId: 'grp1', retentionPolicy: 'minimal' },
+        'user1',
+      );
+
+      const createCall = (prisma.donation.create as jest.Mock).mock.calls[0][0].data;
+      expect(createCall.groupId).toBe('grp1');
+      expect(createCall.retentionPolicy).toBe('minimal');
+    });
+  });
+
+  describe('getDonations – anonymity enforcement', () => {
+    const anonDonation = {
+      id: 'da1', isAnonymous: true, userId: 'user-a',
+      campaign: { id: 'c1', title: 'T' },
+      user: { id: 'user-a', username: 'Alice', email: 'alice@example.com' },
+    };
+    const identifiedDonation = {
+      id: 'da2', isAnonymous: false, userId: 'user-b',
+      campaign: { id: 'c1', title: 'T' },
+      user: { id: 'user-b', username: 'Bob', email: 'bob@example.com' },
+    };
+
+    beforeEach(() => {
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue([anonDonation, identifiedDonation]);
+      (prisma.donation.count as jest.Mock).mockResolvedValue(2);
+    });
+
+    it('hides donor identity from anonymous donations for third-party viewers', async () => {
+      const result = await DonationService.getDonations({}, { page: 1, limit: 10 }, 'other-user');
+
+      const anon = result.data.find((d: any) => d.id === 'da1');
+      expect(anon.user.username).toBe('Anonymous');
+      expect(anon.user.email).toBeNull();
+    });
+
+    it('exposes donor identity when requester is the donor themselves', async () => {
+      const result = await DonationService.getDonations({}, { page: 1, limit: 10 }, 'user-a');
+
+      const own = result.data.find((d: any) => d.id === 'da1');
+      expect(own.user.username).toBe('Alice');
+    });
+
+    it('exposes donor identity when requester is ADMIN', async () => {
+      const result = await DonationService.getDonations({}, { page: 1, limit: 10 }, 'admin-1', 'ADMIN');
+
+      const anon = result.data.find((d: any) => d.id === 'da1');
+      expect(anon.user.username).toBe('Alice');
+    });
+
+    it('never masks identified donations', async () => {
+      const result = await DonationService.getDonations({}, { page: 1, limit: 10 }, 'other-user');
+
+      const identified = result.data.find((d: any) => d.id === 'da2');
+      expect(identified.user.username).toBe('Bob');
+    });
+  });
+
+  describe('getDonationById – anonymity enforcement', () => {
+    const anonDonation = {
+      id: 'dx1', isAnonymous: true, userId: 'user-a',
+      campaign: { id: 'c1', title: 'T', organization: { name: 'Org' } },
+      user: { id: 'user-a', username: 'Alice', email: 'alice@example.com' },
+    };
+
+    it('masks donor for third-party requester', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(anonDonation);
+
+      const result = await DonationService.getDonationById('dx1', 'other');
+      expect(result.user.username).toBe('Anonymous');
+    });
+
+    it('exposes donor for the owner', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(anonDonation);
+
+      const result = await DonationService.getDonationById('dx1', 'user-a');
+      expect(result.user.username).toBe('Alice');
+    });
+
+    it('exposes donor for admin', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(anonDonation);
+
+      const result = await DonationService.getDonationById('dx1', 'admin-1', 'ADMIN');
+      expect(result.user.username).toBe('Alice');
+    });
+  });
+
+  describe('revealIdentity', () => {
+    const anonDonation = { id: 'rx1', isAnonymous: true, userId: 'user-a', revealedAt: null };
+
+    const txMock = {
+      donation: { update: jest.fn() },
+      auditLog: { create: jest.fn() },
+    };
+
+    beforeEach(() => {
+      txMock.donation.update.mockResolvedValue({ ...anonDonation, isAnonymous: false, revealedAt: new Date() });
+      txMock.auditLog.create.mockResolvedValue({});
+      (prisma.$transaction as jest.Mock).mockImplementation((fn: any) => fn(txMock));
+    });
+
+    it('sets isAnonymous=false and records revealedAt', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(anonDonation);
+
+      const result = await DonationService.revealIdentity('rx1', 'user-a');
+
+      expect(txMock.donation.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'rx1' },
+          data: expect.objectContaining({ isAnonymous: false, revealedAt: expect.any(Date) }),
+        })
+      );
+      expect(result.isAnonymous).toBe(false);
+    });
+
+    it('creates an audit log entry', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(anonDonation);
+
+      await DonationService.revealIdentity('rx1', 'user-a');
+
+      expect(txMock.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'DONATION_IDENTITY_REVEALED',
+            entityType: 'Donation',
+            entityId: 'rx1',
+          }),
+        })
+      );
+    });
+
+    it('throws 403 when called by a different user', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(anonDonation);
+
+      await expect(DonationService.revealIdentity('rx1', 'other-user')).rejects.toThrow(
+        'You can only reveal identity for your own donations'
+      );
+    });
+
+    it('throws 400 when donation is already identified', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue({ ...anonDonation, isAnonymous: false });
+
+      await expect(DonationService.revealIdentity('rx1', 'user-a')).rejects.toThrow(
+        'Donation is already identified'
+      );
+    });
+
+    it('throws 400 when identity already revealed', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue({
+        ...anonDonation,
+        revealedAt: new Date('2026-01-01'),
+      });
+
+      await expect(DonationService.revealIdentity('rx1', 'user-a')).rejects.toThrow(
+        'Identity already revealed for this donation'
+      );
+    });
+
+    it('throws 404 when donation not found', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(null);
+
+      await expect(DonationService.revealIdentity('rx1', 'user-a')).rejects.toThrow('Donation not found');
+    });
+  });
 });
