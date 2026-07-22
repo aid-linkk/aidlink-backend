@@ -104,6 +104,11 @@ export interface UploadOutput {
   thumbnailKey?: string;
 }
 
+export interface ThumbnailResult {
+  thumbnailUrl: string;
+  thumbnailKey: string;
+}
+
 export class StorageService {
   private static adapter: IStorageAdapter = createStorageAdapter();
 
@@ -249,26 +254,15 @@ export class StorageService {
         throw new AppError('File appears to be corrupt or in an unsupported format', 422);
       }
 
-      // Generate thumbnail if configured
-      if (opt.generateThumbnail && opt.thumbnailWidth && opt.thumbnailHeight) {
-        try {
-          const thumbBuffer = await sharp(buffer)
-            .resize(opt.thumbnailWidth, opt.thumbnailHeight, { fit: 'cover' })
-            .webp({ quality: 70 })
-            .toBuffer();
-          thumbnailKey = StorageService.generateKey(
-            `${config.prefix}/${entityId}/thumbnails`,
-            'image/webp',
-          );
-          const thumbResult = await StorageService.adapter.upload(thumbnailKey, thumbBuffer, {
-            contentType: 'image/webp',
-            metadata: { entityId, uploadType },
-          });
-          thumbnailUrl = thumbResult.url;
-          thumbnailKey = thumbResult.key;
-        } catch {
-          // Thumbnail failure is non-fatal — log in production, continue with main upload
-        }
+      // Generate thumbnail if configured. Failure here is non-fatal — the
+      // main image already uploaded successfully, so we log and move on
+      // rather than fail the whole request over a missing preview.
+      try {
+        const thumb = await StorageService.createThumbnail(uploadType, entityId, buffer);
+        thumbnailUrl = thumb?.thumbnailUrl;
+        thumbnailKey = thumb?.thumbnailKey;
+      } catch {
+        // Non-fatal — see comment above.
       }
     }
 
@@ -279,6 +273,87 @@ export class StorageService {
     });
 
     return { url: result.url, key: result.key, thumbnailUrl, thumbnailKey };
+  }
+
+  /**
+   * Derives and stores a thumbnail from an already-decoded image buffer,
+   * per the calling upload type's configured thumbnail size. Shared by the
+   * upload flow and by `regenerateThumbnail` so there is exactly one place
+   * that knows how a thumbnail is produced.
+   *
+   * Returns null if the upload type has no thumbnail configuration.
+   */
+  private static async createThumbnail(
+    uploadType: UploadType,
+    entityId: string,
+    sourceBuffer: Buffer,
+  ): Promise<ThumbnailResult | null> {
+    const config = UPLOAD_CONFIGS[uploadType];
+    const opt = config.imageOptimization;
+    if (!opt?.generateThumbnail || !opt.thumbnailWidth || !opt.thumbnailHeight) {
+      return null;
+    }
+
+    const thumbBuffer = await sharp(sourceBuffer)
+      .resize(opt.thumbnailWidth, opt.thumbnailHeight, { fit: 'cover' })
+      .webp({ quality: 70 })
+      .toBuffer();
+
+    const draftKey = StorageService.generateKey(
+      `${config.prefix}/${entityId}/thumbnails`,
+      'image/webp',
+    );
+    const result = await StorageService.adapter.upload(draftKey, thumbBuffer, {
+      contentType: 'image/webp',
+      metadata: { entityId, uploadType },
+    });
+
+    return { thumbnailUrl: result.url, thumbnailKey: result.key };
+  }
+
+  /**
+   * Regenerates the thumbnail for an already-uploaded image without touching
+   * the original file. Downloads the original object by its storage URL,
+   * re-derives the thumbnail from it via the same path `upload` uses, and
+   * stores it as a fresh object.
+   *
+   * Unlike the best-effort thumbnail step inside `upload` (where the main
+   * image has already succeeded and a preview is a nice-to-have), a failure
+   * here is the whole point of the call, so it's surfaced as an `AppError`
+   * rather than swallowed.
+   *
+   * Returns null if the upload type has no thumbnail configuration —
+   * there is nothing to regenerate.
+   */
+  static async regenerateThumbnail(
+    uploadType: UploadType,
+    entityId: string,
+    sourceUrl: string,
+  ): Promise<ThumbnailResult | null> {
+    const config = UPLOAD_CONFIGS[uploadType];
+    if (!config.imageOptimization?.generateThumbnail) {
+      return null;
+    }
+
+    const sourceKey = StorageService.parseStorageKey(sourceUrl);
+    if (!sourceKey) {
+      throw new AppError('Could not resolve a storage key from the given URL', 400);
+    }
+
+    const sourceBuffer = await StorageService.adapter.download(sourceKey);
+    const detectedMime = StorageService.detectMimeType(sourceBuffer);
+    if (!detectedMime || !detectedMime.startsWith('image/')) {
+      throw new AppError(
+        'Stored object is not a supported image — cannot regenerate thumbnail',
+        415,
+      );
+    }
+
+    try {
+      return await StorageService.createThumbnail(uploadType, entityId, sourceBuffer);
+    } catch {
+      throw new AppError('Failed to regenerate thumbnail — source image may be corrupt', 422);
+    }
   }
 
   /**
