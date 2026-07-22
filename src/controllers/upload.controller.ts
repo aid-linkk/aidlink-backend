@@ -92,6 +92,22 @@ export class UploadController {
       const previousUrl = field === 'selfie' ? submission.selfieUrl : submission.documentUrl;
       const updateData = field === 'selfie' ? { selfieUrl: url } : { documentUrl: url };
       await prisma.kYCSubmission.update({ where: { id: submissionId }, data: updateData });
+
+      // Record an audit history entry whenever a pre-existing URL is replaced.
+      // We only write the record when previousUrl is set so that the very first
+      // upload (no prior URL) does not produce a misleading history row.
+      if (previousUrl) {
+        await prisma.kYCDocumentHistory.create({
+          data: {
+            submissionId,
+            field,
+            replacedUrl: previousUrl,
+            newUrl: url,
+            uploadedBy: req.user.id,
+          },
+        });
+      }
+
       cleanupOldFile(previousUrl, key);
 
       res.status(200).json({
