@@ -655,6 +655,7 @@ model KYCSubmission {
 
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   beneficiary Beneficiary? @relation(fields: [beneficiaryId], references: [id], onDelete: Cascade)
+  documentHistory KYCDocumentHistory[]
 
   @@index([userId])
   @@index([beneficiaryId])
@@ -662,6 +663,29 @@ model KYCSubmission {
   @@index([createdAt])
   @@index([ipAddress])
   @@index([deviceFingerprint])
+}
+
+// Immutable audit trail of every KYC document replacement.
+// One row is written each time uploadKycDocument overwrites an existing URL.
+// Rows are append-only and never updated or deleted.
+model KYCDocumentHistory {
+  id            String   @id @default(cuid())
+  submissionId  String
+  // Which field was replaced: "document" | "selfie"
+  field         String
+  // The URL that was in place before this upload
+  replacedUrl   String
+  // The URL that replaced it
+  newUrl        String
+  // User who performed the upload
+  uploadedBy    String
+  replacedAt    DateTime @default(now())
+
+  submission KYCSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@index([field])
+  @@index([replacedAt])
 }
 
 // ============================================

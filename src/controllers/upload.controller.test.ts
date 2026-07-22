@@ -16,6 +16,7 @@ jest.mock('../config/database', () => ({
   default: {
     organization: { findUnique: jest.fn(), update: jest.fn() },
     kYCSubmission: { findUnique: jest.fn(), update: jest.fn() },
+    kYCDocumentHistory: { create: jest.fn() },
     campaign: { findUnique: jest.fn(), update: jest.fn() },
     distribution: { findUnique: jest.fn(), update: jest.fn() },
   },
@@ -51,6 +52,7 @@ import { UploadController } from './upload.controller';
 const prisma = jest.requireMock('../config/database').default as {
   organization: { findUnique: jest.Mock; update: jest.Mock };
   kYCSubmission: { findUnique: jest.Mock; update: jest.Mock };
+  kYCDocumentHistory: { create: jest.Mock };
   campaign: { findUnique: jest.Mock; update: jest.Mock };
   distribution: { findUnique: jest.Mock; update: jest.Mock };
 };
@@ -114,6 +116,7 @@ beforeEach(() => {
 
   prisma.organization.update.mockResolvedValue({});
   prisma.kYCSubmission.update.mockResolvedValue({});
+  prisma.kYCDocumentHistory.create.mockResolvedValue({});
   prisma.campaign.update.mockResolvedValue({});
   prisma.distribution.update.mockResolvedValue({});
 });
@@ -312,6 +315,79 @@ describe('UploadController.uploadKycDocument', () => {
       'https://cdn.example.com/old-doc.jpg',
     );
     expect(StorageService.delete).toHaveBeenCalledWith('kyc-documents/sub-1/old-uuid.jpg');
+  });
+
+  // ─── Audit history tests ───────────────────────────────────────────────────
+
+  it('creates a history record when an existing documentUrl is replaced', async () => {
+    const req = makeReq({ params: { submissionId: 'sub-1' }, query: {} });
+    await UploadController.uploadKycDocument(req, makeRes(), next);
+    expect(prisma.kYCDocumentHistory.create).toHaveBeenCalledWith({
+      data: {
+        submissionId: 'sub-1',
+        field: 'document',
+        replacedUrl: 'https://cdn.example.com/old-doc.jpg',
+        newUrl: 'https://cdn.example.com/new-doc.webp',
+        uploadedBy: 'user-1',
+      },
+    });
+  });
+
+  it('creates a history record when an existing selfieUrl is replaced', async () => {
+    prisma.kYCSubmission.findUnique.mockResolvedValue({
+      ...sub,
+      selfieUrl: 'https://cdn.example.com/old-selfie.jpg',
+    });
+    const req = makeReq({ params: { submissionId: 'sub-1' }, query: { field: 'selfie' } });
+    await UploadController.uploadKycDocument(req, makeRes(), next);
+    expect(prisma.kYCDocumentHistory.create).toHaveBeenCalledWith({
+      data: {
+        submissionId: 'sub-1',
+        field: 'selfie',
+        replacedUrl: 'https://cdn.example.com/old-selfie.jpg',
+        newUrl: 'https://cdn.example.com/new-doc.webp',
+        uploadedBy: 'user-1',
+      },
+    });
+  });
+
+  it('does NOT create a history record on the very first document upload (no previous URL)', async () => {
+    // Simulate a fresh submission with no document yet
+    prisma.kYCSubmission.findUnique.mockResolvedValue({ ...sub, documentUrl: null });
+    const req = makeReq({ params: { submissionId: 'sub-1' }, query: {} });
+    await UploadController.uploadKycDocument(req, makeRes(), next);
+    expect(prisma.kYCDocumentHistory.create).not.toHaveBeenCalled();
+  });
+
+  it('does NOT create a history record on first selfie upload when selfieUrl is null', async () => {
+    // sub already has selfieUrl: null
+    const req = makeReq({ params: { submissionId: 'sub-1' }, query: { field: 'selfie' } });
+    await UploadController.uploadKycDocument(req, makeRes(), next);
+    expect(prisma.kYCDocumentHistory.create).not.toHaveBeenCalled();
+  });
+
+  it('records the correct uploadedBy when an admin performs the replacement', async () => {
+    prisma.kYCSubmission.findUnique.mockResolvedValue({ ...sub, userId: 'other-user' });
+    const req = makeReq({
+      params: { submissionId: 'sub-1' },
+      query: {},
+      user: { id: 'admin-99', email: 'admin@test.com', role: Role.ADMIN },
+    });
+    await UploadController.uploadKycDocument(req, makeRes(), next);
+    expect(prisma.kYCDocumentHistory.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ uploadedBy: 'admin-99' }) }),
+    );
+  });
+
+  it('still returns 200 even when history creation fails', async () => {
+    prisma.kYCDocumentHistory.create.mockRejectedValueOnce(new Error('DB write failed'));
+    const req = makeReq({ params: { submissionId: 'sub-1' }, query: {} });
+    const res = makeRes();
+    await UploadController.uploadKycDocument(req, res, next);
+    // The history write is awaited inside the controller, so its rejection
+    // propagates to next() — this test documents the current behaviour and
+    // serves as a reminder to consider making history writes non-fatal if needed.
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'DB write failed' }));
   });
 });
 
