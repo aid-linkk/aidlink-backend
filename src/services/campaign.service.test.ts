@@ -426,14 +426,51 @@ describe('CampaignService', () => {
     };
 
     it('creates campaign successfully', async () => {
-      const organization = { id: 'org-1', userId: 'user-1', name: 'Test Org' };
+      const organization = { id: 'org-1', userId: 'user-1', name: 'Test Org', country: 'KE' };
       prismaMock.organization.findUnique.mockResolvedValue(organization);
+      prismaMock.campaign.findMany.mockResolvedValue([]);
       prismaMock.campaign.create.mockResolvedValue(baseCampaign({ title: 'New Campaign', status: CampaignStatus.DRAFT }));
 
       const result = await CampaignService.createCampaign(campaignInput, 'user-1', 'org-1');
 
       expect(result.title).toBe('New Campaign');
       expect(result.status).toBe(CampaignStatus.DRAFT);
+      expect(result.duplicateWarning).toBeUndefined();
+    });
+
+    it('flags a likely duplicate without blocking creation', async () => {
+      const organization = { id: 'org-1', userId: 'user-1', name: 'Test Org', country: 'KE' };
+      prismaMock.organization.findUnique.mockResolvedValue(organization);
+      prismaMock.campaign.findMany.mockResolvedValue([
+        {
+          id: 'campaign-existing',
+          title: 'New Campaign!',
+          targetAmount: 5200,
+          organizationId: 'org-1',
+          organization: { country: 'KE' },
+        },
+      ]);
+      prismaMock.campaign.create.mockResolvedValue(baseCampaign({ title: 'New Campaign', status: CampaignStatus.DRAFT }));
+
+      const result = await CampaignService.createCampaign(campaignInput, 'user-1', 'org-1');
+
+      expect(result.duplicateWarning.hasPotentialDuplicates).toBe(true);
+      expect(result.duplicateWarning.matches[0].campaignId).toBe('campaign-existing');
+      expect(result.duplicateWarning.matches[0].reasons).toEqual(
+        expect.arrayContaining(['similar_title', 'same_organization', 'geographic_overlap', 'similar_target_amount'])
+      );
+    });
+
+    it('does not block creation when duplicate detection fails', async () => {
+      const organization = { id: 'org-1', userId: 'user-1', name: 'Test Org', country: 'KE' };
+      prismaMock.organization.findUnique.mockResolvedValue(organization);
+      prismaMock.campaign.findMany.mockRejectedValue(new Error('db unavailable'));
+      prismaMock.campaign.create.mockResolvedValue(baseCampaign({ title: 'New Campaign', status: CampaignStatus.DRAFT }));
+
+      const result = await CampaignService.createCampaign(campaignInput, 'user-1', 'org-1');
+
+      expect(result.title).toBe('New Campaign');
+      expect(result.duplicateWarning).toBeUndefined();
     });
 
     it('rejects non-existent organization', async () => {

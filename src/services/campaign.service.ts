@@ -4,6 +4,7 @@ import { CampaignStatus, Role } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
 import { ModerationService } from './moderation.service';
+import { CampaignDuplicateService, DuplicateMatch as CampaignDuplicateMatch } from './campaignDuplicate.service';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 import { getOrSet, invalidateCampaignCache, invalidateSearchCache } from '../utils/cache';
 import { sanitizeString } from '../utils/sanitization';
@@ -23,6 +24,19 @@ export class CampaignService {
       throw new AppError('You do not have permission to create campaigns for this organization', 403);
     }
 
+    // Check for likely duplicates before creating. Non-blocking: a failure
+    // here should never prevent campaign creation.
+    let duplicates = { hasPotentialDuplicates: false, matches: [] as CampaignDuplicateMatch[] };
+    try {
+      duplicates = await CampaignDuplicateService.detectDuplicates(
+        { title: data.title, targetAmount: data.targetAmount },
+        organizationId,
+        organization.country
+      );
+    } catch (err) {
+      logger.error('Duplicate detection failed during campaign creation:', err);
+    }
+
     const campaign = await prisma.campaign.create({
       data: {
         ...data,
@@ -36,7 +50,16 @@ export class CampaignService {
 
     logger.info(`Campaign created: ${campaign.id} by user ${userId}`);
 
-    return campaign;
+    if (duplicates.hasPotentialDuplicates) {
+      logger.info(
+        `Potential duplicate campaigns detected for ${campaign.id}: ${duplicates.matches.map((m) => m.campaignId).join(', ')}`
+      );
+    }
+
+    return {
+      ...campaign,
+      ...(duplicates.hasPotentialDuplicates ? { duplicateWarning: duplicates } : {}),
+    };
   }
 
   static async getCampaigns(filters: CampaignFilters, pagination: any): Promise<PaginatedResponse<any>> {
