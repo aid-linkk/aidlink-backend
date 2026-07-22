@@ -37,6 +37,7 @@ beforeEach(() => {
       url: 'https://cdn.example.com/storage/uuid.webp',
     }),
     delete: jest.fn().mockResolvedValue(undefined),
+    download: jest.fn().mockResolvedValue(Buffer.from('original-image')),
     getSignedUrl: jest.fn().mockResolvedValue('https://signed.cdn.example.com/key?t=abc'),
     getPresignedUploadUrl: jest
       .fn()
@@ -518,6 +519,83 @@ describe('StorageService.getConfig', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Adapter isolation
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// regenerateThumbnail
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('StorageService.regenerateThumbnail', () => {
+  const profileUrl = 'https://cdn.example.com/profile-pictures/org-1/original.webp';
+
+  it('downloads the original, derives a fresh thumbnail, and stores it', async () => {
+    mockAdapter.download.mockResolvedValue(jpeg());
+    sharpInst.toBuffer.mockReset().mockResolvedValue(THUMB_BUF);
+    mockAdapter.upload.mockResolvedValue({
+      key: 'profile-pictures/org-1/thumbnails/new-uuid.webp',
+      url: 'https://cdn.example.com/thumb-regenerated',
+    });
+
+    const result = await StorageService.regenerateThumbnail('profile-picture', 'org-1', profileUrl);
+
+    expect(mockAdapter.download).toHaveBeenCalledWith('profile-pictures/org-1/original.webp');
+    expect(sharpInst.resize).toHaveBeenCalledWith(150, 150, { fit: 'cover' });
+    expect(result).toEqual({
+      thumbnailUrl: 'https://cdn.example.com/thumb-regenerated',
+      thumbnailKey: 'profile-pictures/org-1/thumbnails/new-uuid.webp',
+    });
+  });
+
+  it('regenerates a campaign image thumbnail at its configured size', async () => {
+    mockAdapter.download.mockResolvedValue(png());
+    sharpInst.toBuffer.mockReset().mockResolvedValue(THUMB_BUF);
+
+    await StorageService.regenerateThumbnail(
+      'campaign-image',
+      'c-1',
+      'https://cdn.example.com/campaign-images/c-1/original.webp',
+    );
+
+    expect(sharpInst.resize).toHaveBeenCalledWith(300, 200, { fit: 'cover' });
+  });
+
+  it('returns null for upload types with no thumbnail configuration, without touching storage', async () => {
+    const result = await StorageService.regenerateThumbnail(
+      'kyc-document',
+      'sub-1',
+      'https://cdn.example.com/kyc-documents/sub-1/original.jpg',
+    );
+
+    expect(result).toBeNull();
+    expect(mockAdapter.download).not.toHaveBeenCalled();
+  });
+
+  it('rejects a source URL with no resolvable storage key', async () => {
+    await expect(
+      StorageService.regenerateThumbnail('profile-picture', 'org-1', 'https://example.com/not-a-storage-url'),
+    ).rejects.toThrow('Could not resolve a storage key from the given URL');
+
+    expect(mockAdapter.download).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the stored object is not an image (e.g. a PDF)', async () => {
+    mockAdapter.download.mockResolvedValue(pdf());
+
+    await expect(
+      StorageService.regenerateThumbnail('profile-picture', 'org-1', profileUrl),
+    ).rejects.toThrow('Stored object is not a supported image');
+
+    expect(mockAdapter.upload).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the downloaded image is corrupt and sharp cannot process it', async () => {
+    mockAdapter.download.mockResolvedValue(jpeg());
+    sharpInst.toBuffer.mockReset().mockRejectedValue(new Error('unsupported image format'));
+
+    await expect(
+      StorageService.regenerateThumbnail('profile-picture', 'org-1', profileUrl),
+    ).rejects.toThrow('Failed to regenerate thumbnail');
+  });
+});
 
 describe('StorageService adapter isolation', () => {
   it('routes calls through the injected adapter, not the factory default', async () => {
