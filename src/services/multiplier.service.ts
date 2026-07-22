@@ -1,10 +1,15 @@
 import prisma from '../config/database';
 import { AppError } from '../middleware/error';
-import { Role } from '@prisma/client';
-import { MultiplierType } from '@prisma/client';
+import { Role, MultiplierType, Prisma } from '@prisma/client';
 import type { Multiplier } from '@prisma/client';
 
+type ReadClient = Prisma.TransactionClient | typeof prisma;
 
+const MULTIPLIER_PRECEDENCE: Record<MultiplierType, number> = {
+  [MultiplierType.MILESTONE]: 3,
+  [MultiplierType.CORPORATE]: 2,
+  [MultiplierType.CAMPAIGN_WIDE]: 1,
+};
 
 export type MultiplierCreateInput = {
   campaignId: string;
@@ -192,14 +197,11 @@ export class MultiplierService {
       }
     }
 
-    // Prevent reducing matchCap below already-matched amount
+    // Prevent reducing matchCap below the amount already consumed. matchedTotal is
+    // the authoritative running total (see MatchedFundAllocationService), so this
+    // reads it directly instead of re-aggregating MatchedFund rows.
     if (patch.matchCap !== undefined && patch.matchCap !== null) {
-      const used = await prisma.matchedFund.aggregate({
-        where: { campaignId, multiplierId },
-        _sum: { matchedAmount: true },
-      });
-      const usedMatched = Number(used._sum.matchedAmount ?? 0);
-      if (Number(patch.matchCap) < usedMatched) {
+      if (Number(patch.matchCap) < Number(existing.matchedTotal)) {
         throw new AppError('matchCap cannot be reduced below already-matched amount', 400);
       }
     }
@@ -235,75 +237,63 @@ export class MultiplierService {
     return updated;
   }
 
-  static async getApplicableMultipliersAtTime(params: {
-    campaignId: string;
-    donationTime: Date;
-    milestoneId?: string | null;
-  }): Promise<Multiplier[]> {
-    const { campaignId, donationTime, milestoneId = null } = params;
-
-    // Note: we fetch active multipliers in window. For MILESTONE, we match milestoneId.
-    return prisma.multiplier.findMany({
-      where: {
-        campaignId,
-        active: true,
-        startAt: { lte: donationTime },
-        endAt: { gte: donationTime },
-      },
-    }).catch(() => [] as Multiplier[]);
-  }
-
-  static async evaluateMultiplierAtDonation(params: {
-    campaignId: string;
-    donationTime: Date;
-    // milestone scoping is optional until milestone logic exists in this app.
-    milestoneId?: string | null;
-  }): Promise<Multiplier | null> {
-
-    const { campaignId, donationTime, milestoneId = null } = params;
-
-    // The window logic is currently complicated by null start/end.
-    // We do explicit filtering in JS for correctness.
-    const candidates = (await prisma.multiplier.findMany({
-      where: { campaignId, active: true },
-      orderBy: { createdAt: 'asc' },
-    })) ?? [];
+  /**
+   * Picks the single winning multiplier from a candidate set for a given
+   * donation time. Precedence order is MILESTONE > CORPORATE > CAMPAIGN_WIDE;
+   * within the same precedence tier the highest multiplier value wins, ties
+   * broken by earliest createdAt, then by id for full determinism when
+   * createdAt collides. Pure function so precedence/tie-break rules can be
+   * unit tested without a database.
+   */
+  static selectWinningMultiplier(
+    candidates: Multiplier[],
+    params: { donationTime: Date; milestoneId?: string | null },
+  ): Multiplier | null {
+    const { donationTime, milestoneId = null } = params;
 
     const applicable = candidates.filter((m) => {
+      if (!m.active) return false;
       if (m.startAt && donationTime < m.startAt) return false;
       if (m.endAt && donationTime > m.endAt) return false;
       if (m.type === MultiplierType.MILESTONE) {
-        if (!milestoneId) return false;
-        if (!m.milestoneId || m.milestoneId !== milestoneId) return false;
+        if (!milestoneId || m.milestoneId !== milestoneId) return false;
       }
       return true;
     });
 
     if (applicable.length === 0) return null;
 
-    const precedence = (t: MultiplierType) => {
-      switch (t) {
-        case MultiplierType.MILESTONE:
-          return 3;
-        case MultiplierType.CORPORATE:
-          return 2;
-        case MultiplierType.CAMPAIGN_WIDE:
-          return 1;
-      }
-    };
+    const maxPrecedence = Math.max(...applicable.map((m) => MULTIPLIER_PRECEDENCE[m.type]));
+    const topTier = applicable.filter((m) => MULTIPLIER_PRECEDENCE[m.type] === maxPrecedence);
 
-    const maxPrec = Math.max(...applicable.map((m: Multiplier) => precedence(m.type)));
-    const samePrec = applicable.filter((m: Multiplier) => precedence(m.type) === maxPrec);
+    topTier.sort((a, b) => {
+      const byMultiplier = new Prisma.Decimal(b.multiplier).comparedTo(new Prisma.Decimal(a.multiplier));
+      if (byMultiplier !== 0) return byMultiplier;
 
-    samePrec.sort((a: Multiplier, b: Multiplier) => {
-      const am = Number(a.multiplier);
-      const bm = Number(b.multiplier);
-      if (bm !== am) return bm - am; // highest multiplier wins
-      return a.createdAt.getTime() - b.createdAt.getTime();
+      const byCreatedAt = a.createdAt.getTime() - b.createdAt.getTime();
+      if (byCreatedAt !== 0) return byCreatedAt;
+
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
 
+    return topTier[0];
+  }
 
-    return samePrec[0] ?? null;
+  static async evaluateMultiplierAtDonation(
+    params: {
+      campaignId: string;
+      donationTime: Date;
+      milestoneId?: string | null;
+    },
+    client: ReadClient = prisma,
+  ): Promise<Multiplier | null> {
+    const { campaignId, donationTime, milestoneId = null } = params;
+
+    const candidates = (await client.multiplier.findMany({
+      where: { campaignId, active: true },
+    })) ?? [];
+
+    return MultiplierService.selectWinningMultiplier(candidates, { donationTime, milestoneId });
   }
 }
 

@@ -1,9 +1,14 @@
 import { DonationService } from './donation.service';
 import prisma from '../config/database';
-import { DonationService } from './donation.service';
 
 // Mock Prisma
 jest.mock('../config/database');
+// webhook.controller pulls in webhook.worker, which eagerly opens a BullMQ
+// queue and a 60s retry setInterval at import time — mock it so unit tests
+// stay hermetic and Jest can exit without a live Redis.
+jest.mock('../controllers/webhook.controller', () => ({
+  dispatchWebhookEvent: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('@prisma/client', () => ({
   DonationStatus: {
     PENDING: 'PENDING',
@@ -15,6 +20,15 @@ jest.mock('@prisma/client', () => ({
   },
   AuditAction: {
     DONATION_IDENTITY_REVEALED: 'DONATION_IDENTITY_REVEALED',
+  },
+  MultiplierType: {
+    MILESTONE: 'MILESTONE',
+    CORPORATE: 'CORPORATE',
+    CAMPAIGN_WIDE: 'CAMPAIGN_WIDE',
+  },
+  Prisma: {
+    Decimal: jest.requireActual('@prisma/client').Prisma.Decimal,
+    sql: jest.requireActual('@prisma/client').Prisma.sql,
   },
 }));
 
@@ -109,34 +123,111 @@ describe('DonationService', () => {
       const mockDonation = {
         id: '1',
         status: 'PENDING',
-        campaign: { id: '1' },
+        campaignId: 'camp1',
+        amount: 100,
+        campaign: { id: 'camp1' },
       };
 
       const mockUpdated = {
         id: '1',
         status: 'CONFIRMED',
+        campaignId: 'camp1',
+        amount: 100,
         blockchainTxHash: 'tx123',
       };
 
       (prisma.donation.findUnique as jest.Mock).mockResolvedValue(mockDonation);
-      (prisma.donation.update as jest.Mock).mockResolvedValue(mockUpdated);
+      (prisma.donation.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      (prisma.donation.findUniqueOrThrow as jest.Mock).mockResolvedValue(mockUpdated);
 
       const result = await DonationService.confirmDonation('1', 'tx123');
 
       expect(result.status).toBe('CONFIRMED');
       expect(result.blockchainTxHash).toBe('tx123');
+      expect(prisma.donation.updateMany).toHaveBeenCalledWith({
+        where: { id: '1', status: { not: 'CONFIRMED' } },
+        data: { status: 'CONFIRMED', blockchainTxHash: 'tx123' },
+      });
     });
 
     it('should throw error if donation already confirmed', async () => {
       const mockDonation = {
         id: '1',
         status: 'CONFIRMED',
-        campaign: { id: '1' },
+        campaignId: 'camp1',
+        campaign: { id: 'camp1' },
       };
 
       (prisma.donation.findUnique as jest.Mock).mockResolvedValue(mockDonation);
 
       await expect(DonationService.confirmDonation('1', 'tx123')).rejects.toThrow('Donation already confirmed');
+      expect(prisma.donation.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects a competing confirmation for the same donation inside the transaction', async () => {
+      const mockDonation = {
+        id: '1',
+        status: 'PENDING',
+        campaignId: 'camp1',
+        amount: 100,
+        campaign: { id: 'camp1' },
+      };
+
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(mockDonation);
+      // Simulates losing the atomic guard to a concurrent confirmation that
+      // committed first: the conditional updateMany matches zero rows.
+      (prisma.donation.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+
+      await expect(DonationService.confirmDonation('1', 'tx123')).rejects.toThrow('Donation already confirmed');
+      expect(prisma.matchedFund.create).not.toHaveBeenCalled();
+      expect(prisma.campaign.update).not.toHaveBeenCalled();
+    });
+
+    it('allocates a matched fund when an applicable multiplier exists', async () => {
+      const mockDonation = {
+        id: '1',
+        status: 'PENDING',
+        campaignId: 'camp1',
+        amount: 100,
+        campaign: { id: 'camp1' },
+      };
+      const mockUpdated = { ...mockDonation, status: 'CONFIRMED', blockchainTxHash: 'tx123' };
+      const multiplier = {
+        id: 'mult-1',
+        campaignId: 'camp1',
+        type: 'CAMPAIGN_WIDE',
+        multiplier: 2,
+        matchCap: 1000,
+        perDonationCap: null,
+        matchedTotal: 0,
+        startAt: null,
+        endAt: null,
+        milestoneId: null,
+        active: true,
+        createdAt: new Date('2026-01-01'),
+      };
+
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(mockDonation);
+      (prisma.donation.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      (prisma.donation.findUniqueOrThrow as jest.Mock).mockResolvedValue(mockUpdated);
+      (prisma.multiplier.findMany as jest.Mock).mockResolvedValue([multiplier]);
+      (prisma.$queryRaw as jest.Mock).mockResolvedValue([{ applied: '100' }]);
+      (prisma.matchedFund.create as jest.Mock).mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'mf-1', ...data }),
+      );
+
+      const result = await DonationService.confirmDonation('1', 'tx123');
+
+      const createCall = (prisma.matchedFund.create as jest.Mock).mock.calls[0][0];
+      expect(createCall.data.donationId).toBe('1');
+      expect(createCall.data.campaignId).toBe('camp1');
+      expect(createCall.data.multiplierId).toBe('mult-1');
+      expect(createCall.data.matcherId).toBeNull();
+      expect(createCall.data.donorAmount.toString()).toBe('100');
+      expect(createCall.data.matchedAmount.toString()).toBe('100');
+      expect(createCall.data.totalAmount.toString()).toBe('200');
+      expect(result.matchedFund.matchedAmount.toString()).toBe('100');
+      expect(result.multiplierApplied).toBe('mult-1');
     });
   });
 

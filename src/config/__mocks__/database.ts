@@ -22,9 +22,11 @@ const prismaMock: any = {
   },
   donation: {
     findUnique: jest.fn(),
+    findUniqueOrThrow: jest.fn(),
     findMany: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     delete: jest.fn(),
     aggregate: jest.fn().mockResolvedValue({ _sum: { amount: 0 } }),
     count: jest.fn(),
