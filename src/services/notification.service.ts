@@ -1,5 +1,5 @@
 import prisma from '../config/database';
-import { NotificationType, NotificationStatus } from '@prisma/client';
+import { NotificationType, NotificationStatus, NotificationDeliveryStatus } from '@prisma/client';
 import logger from '../config/logger';
 import nodemailer from 'nodemailer';
 import { config } from '../config';
@@ -7,6 +7,10 @@ import { sendNotificationWithCount, sendUnreadCount } from '../websocket/socket.
 import { EmailTemplateService } from './emailTemplate.service';
 import { EmailPreferenceService } from './email-preference.service';
 import { sanitizeObject, sanitizeString } from '../utils/sanitization';
+import { classifyDeliveryError } from '../utils/deliveryErrors';
+
+const EMAIL_DELIVERY_MAX_ATTEMPTS = 3;
+const EMAIL_DELIVERY_BASE_DELAY_MS = 200;
 
 export class NotificationService {
   private static transporter = nodemailer.createTransport({
@@ -18,6 +22,10 @@ export class NotificationService {
       pass: config.email.password,
     },
   });
+
+  private static sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
 
   // ── Template Name Mapping ──────────────────────────────────────────
 
@@ -132,8 +140,11 @@ export class NotificationService {
    *  2. Map notification type → template name
    *  3. Build context from notification metadata
    *  4. Render HTML + plain text via EmailTemplateService
-   *  5. Deliver via SMTP
-   *  6. Record template version in notification metadata
+   *  5. Deliver via SMTP, retrying transient failures up to
+   *     EMAIL_DELIVERY_MAX_ATTEMPTS with exponential backoff; permanent
+   *     failures stop immediately.
+   *  6. Persist deliveryStatus/attemptCount/lastAttemptAt/lastError,
+   *     plus template version in metadata on success.
    *  7. Log template render to audit table
    */
   static async sendNotificationEmail(userId: string, notification: any): Promise<void> {
@@ -170,31 +181,86 @@ export class NotificationService {
     const { html, text } = EmailTemplateService.render(templateName, context);
     const version = EmailTemplateService.getVersion(templateName);
 
-    // 5. Send
-    try {
-      await this.sendEmail(user.email, notification.title, html, { text });
-    } catch (err) {
-      logger.error(`Failed to send email for notification ${notification.id}:`, err);
-      throw err;
+    // 5. Send, retrying transient failures with bounded exponential backoff
+    let attemptCount = 0;
+    let lastError: unknown;
+    let lastErrorClass: 'transient' | 'permanent' = 'transient';
+
+    for (let attempt = 1; attempt <= EMAIL_DELIVERY_MAX_ATTEMPTS; attempt++) {
+      attemptCount = attempt;
+      try {
+        await this.sendEmail(user.email, notification.title, html, { text });
+        lastError = undefined;
+        break;
+      } catch (err) {
+        lastError = err;
+        lastErrorClass = classifyDeliveryError(err);
+
+        if (lastErrorClass === 'permanent') {
+          logger.error(
+            `Permanent failure sending email for notification ${notification.id} (attempt ${attempt}):`,
+            err
+          );
+          break;
+        }
+
+        logger.error(
+          `Transient failure sending email for notification ${notification.id} (attempt ${attempt}/${EMAIL_DELIVERY_MAX_ATTEMPTS}):`,
+          err
+        );
+
+        if (attempt < EMAIL_DELIVERY_MAX_ATTEMPTS) {
+          await this.sleep(EMAIL_DELIVERY_BASE_DELAY_MS * 2 ** (attempt - 1));
+        }
+      }
     }
 
-    // 6. Update notification with sentVia + template version in metadata
-    await prisma.notification.update({
-      where: { id: notification.id },
-      data: {
-        sentVia: ['EMAIL'],
-        metadata: {
-          ...(notification.metadata || {}),
-          templateVersion: version,
-          templateName,
-        },
-      },
-    });
+    const now = new Date();
 
-    // 7. Audit log
-    EmailTemplateService.logRender(templateName, notification.id, context).catch((err) =>
-      logger.error('Template render audit log failed:', err)
-    );
+    if (!lastError) {
+      // 6. Success — persist delivery tracking + sentVia + template version
+      await prisma.notification.update({
+        where: { id: notification.id },
+        data: {
+          sentVia: ['EMAIL'],
+          deliveryStatus: NotificationDeliveryStatus.SENT,
+          attemptCount,
+          lastAttemptAt: now,
+          lastError: null,
+          metadata: {
+            ...(notification.metadata || {}),
+            templateVersion: version,
+            templateName,
+          },
+        },
+      });
+
+      // 7. Audit log
+      EmailTemplateService.logRender(templateName, notification.id, context).catch((err) =>
+        logger.error('Template render audit log failed:', err)
+      );
+      return;
+    }
+
+    // All attempts exhausted (or immediate permanent failure) — persist final state
+    await prisma.notification
+      .update({
+        where: { id: notification.id },
+        data: {
+          deliveryStatus:
+            lastErrorClass === 'permanent'
+              ? NotificationDeliveryStatus.FAILED_PERMANENT
+              : NotificationDeliveryStatus.FAILED_TRANSIENT,
+          attemptCount,
+          lastAttemptAt: now,
+          lastError: lastError instanceof Error ? lastError.message : String(lastError),
+        },
+      })
+      .catch((updateErr) =>
+        logger.error(`Failed to persist delivery failure for notification ${notification.id}:`, updateErr)
+      );
+
+    throw lastError;
   }
 
   // ── User Notification Management ──────────────────────────────────
