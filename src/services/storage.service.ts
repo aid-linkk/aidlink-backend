@@ -193,23 +193,20 @@ export class StorageService {
     const config = UPLOAD_CONFIGS[uploadType];
 
     if (buffer.length === 0) {
-      throw new AppError('Uploaded file is empty', 400);
+      throw AppError.from('STORAGE_001', 'Uploaded file is empty');
     }
 
     if (buffer.length > config.maxSizeBytes) {
       const mb = Math.round(config.maxSizeBytes / 1024 / 1024);
-      throw new AppError(`File size exceeds the ${mb}MB limit`, 413);
+      throw AppError.from('STORAGE_002', `File size exceeds the ${mb}MB limit`);
     }
 
     const detectedMime = StorageService.detectMimeType(buffer);
     if (!detectedMime) {
-      throw new AppError('Unsupported or malformed file — cannot determine type', 415);
+      throw AppError.from('STORAGE_003', 'Unsupported or malformed file — cannot determine type');
     }
     if (!config.allowedMimes.has(detectedMime)) {
-      throw new AppError(
-        `File type ${detectedMime} is not allowed for ${uploadType}`,
-        415,
-      );
+      throw AppError.from('STORAGE_003', `File type ${detectedMime} is not allowed for ${uploadType}`);
     }
 
     let uploadBuffer = buffer;
@@ -226,14 +223,14 @@ export class StorageService {
         try {
           meta = await sharp(buffer).metadata();
         } catch {
-          throw new AppError('File appears to be corrupt or in an unsupported format', 422);
+          throw AppError.from('STORAGE_004');
         }
         const { width = 0, height = 0 } = meta;
         const { width: minW, height: minH } = config.minDimensions;
         if (width < minW || height < minH) {
-          throw new AppError(
-            `Image is too small. Minimum required dimensions are ${minW}×${minH}px (uploaded: ${width}×${height}px)`,
-            422,
+          throw AppError.from(
+            'STORAGE_005',
+            `Image is too small. Minimum required dimensions are ${minW}×${minH}px (uploaded: ${width}×${height}px)`
           );
         }
       }
@@ -246,7 +243,7 @@ export class StorageService {
           .toBuffer();
         outputMime = 'image/webp';
       } catch {
-        throw new AppError('File appears to be corrupt or in an unsupported format', 422);
+        throw AppError.from('STORAGE_004');
       }
 
       // Generate thumbnail if configured
@@ -293,7 +290,7 @@ export class StorageService {
     metadata?: Record<string, string>,
   ): Promise<UploadOutput> {
     if (buffer.length === 0) {
-      throw new AppError('Cannot store an empty document', 400);
+      throw AppError.from('STORAGE_001', 'Cannot store an empty document');
     }
 
     const result = await StorageService.adapter.upload(key, buffer, {
@@ -339,7 +336,7 @@ export class StorageService {
     const config = UPLOAD_CONFIGS[uploadType];
 
     if (!config.allowedMimes.has(mimeType)) {
-      throw new AppError(`File type ${mimeType} is not allowed for ${uploadType}`, 415);
+      throw AppError.from('STORAGE_003', `File type ${mimeType} is not allowed for ${uploadType}`);
     }
 
     const key = StorageService.generateKey(`${config.prefix}/${entityId}`, mimeType);

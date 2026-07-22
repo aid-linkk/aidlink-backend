@@ -76,16 +76,16 @@ export class MilestoneService {
       include: { organization: true },
     });
 
-    if (!campaign) throw new AppError('Campaign not found', 404);
+    if (!campaign) throw AppError.from('CAMPAIGN_002');
     if (campaign.userId !== userId) {
-      throw new AppError('You do not own this campaign', 403);
+      throw AppError.from('COMMON_001', 'You do not own this campaign');
     }
 
     const milestone = await prisma.milestone.findFirst({
       where: { id: milestoneId, campaignId },
     });
 
-    if (!milestone) throw new AppError('Milestone not found in this campaign', 404);
+    if (!milestone) throw AppError.from('MILESTONE_001', 'Milestone not found in this campaign');
 
     const active = await prisma.milestoneSubmission.findFirst({
       where: {
@@ -95,10 +95,7 @@ export class MilestoneService {
     });
 
     if (active) {
-      throw new AppError(
-        'An active submission already exists for this milestone',
-        409
-      );
+      throw AppError.from('MILESTONE_003');
     }
 
     const submission = await prisma.milestoneSubmission.create({
@@ -133,9 +130,9 @@ export class MilestoneService {
       include: { milestone: { include: { campaign: true } } },
     });
 
-    if (!submission) throw new AppError('Submission not found', 404);
+    if (!submission) throw AppError.from('MILESTONE_002');
     if (submission.milestone.campaign.userId !== userId) {
-      throw new AppError('You do not own this submission', 403);
+      throw AppError.from('COMMON_001', 'You do not own this submission');
     }
 
     const editableStatuses: MilestoneSubmissionStatus[] = [
@@ -144,10 +141,7 @@ export class MilestoneService {
     ];
 
     if (!editableStatuses.includes(submission.status)) {
-      throw new AppError(
-        `Cannot edit a submission with status ${submission.status}`,
-        400
-      );
+      throw AppError.from('MILESTONE_004', `Cannot edit a submission with status ${submission.status}`);
     }
 
     return prisma.milestoneSubmission.update({
@@ -167,9 +161,9 @@ export class MilestoneService {
       include: { milestone: { include: { campaign: { include: { organization: true } } } } },
     });
 
-    if (!submission) throw new AppError('Submission not found', 404);
+    if (!submission) throw AppError.from('MILESTONE_002');
     if (submission.milestone.campaign.userId !== userId) {
-      throw new AppError('You do not own this submission', 403);
+      throw AppError.from('COMMON_001', 'You do not own this submission');
     }
 
     const submitableStatuses: MilestoneSubmissionStatus[] = [
@@ -178,10 +172,7 @@ export class MilestoneService {
     ];
 
     if (!submitableStatuses.includes(submission.status)) {
-      throw new AppError(
-        `Cannot submit a submission with status ${submission.status}`,
-        400
-      );
+      throw AppError.from('MILESTONE_004', `Cannot submit a submission with status ${submission.status}`);
     }
 
     const isResubmission = submission.status === MilestoneSubmissionStatus.REVISION_REQUESTED;
@@ -250,12 +241,12 @@ export class MilestoneService {
       },
     });
 
-    if (!submission) throw new AppError('Submission not found', 404);
+    if (!submission) throw AppError.from('MILESTONE_002');
 
     if (requesterId && requesterRole) {
       const isAdminOrVerifier = ([Role.ADMIN, Role.VERIFIER, Role.AUDITOR] as Role[]).includes(requesterRole as Role);
       if (!isAdminOrVerifier && submission.milestone.campaign.userId !== requesterId) {
-        throw new AppError('Forbidden', 403);
+        throw AppError.from('COMMON_001', 'Forbidden');
       }
     }
 
@@ -268,12 +259,12 @@ export class MilestoneService {
       include: { campaign: true },
     });
 
-    if (!milestone) throw new AppError('Milestone not found in this campaign', 404);
+    if (!milestone) throw AppError.from('MILESTONE_001', 'Milestone not found in this campaign');
 
     if (requesterId && requesterRole) {
       const isAdminOrVerifier = ([Role.ADMIN, Role.VERIFIER, Role.AUDITOR] as Role[]).includes(requesterRole as Role);
       if (!isAdminOrVerifier && milestone.campaign.userId !== requesterId) {
-        throw new AppError('Forbidden', 403);
+        throw AppError.from('COMMON_001', 'Forbidden');
       }
     }
 
@@ -297,7 +288,7 @@ export class MilestoneService {
       include: { milestone: { include: { campaign: { include: { organization: true, user: true } } } } },
     });
 
-    if (!submission) throw new AppError('Submission not found', 404);
+    if (!submission) throw AppError.from('MILESTONE_002');
 
     const reviewableStatuses: MilestoneSubmissionStatus[] = [
       MilestoneSubmissionStatus.SUBMITTED,
@@ -305,10 +296,7 @@ export class MilestoneService {
     ];
 
     if (!reviewableStatuses.includes(submission.status)) {
-      throw new AppError(
-        `Cannot review a submission with status ${submission.status}`,
-        400
-      );
+      throw AppError.from('MILESTONE_004', `Cannot review a submission with status ${submission.status}`);
     }
 
     const nextSubmissionStatus: Record<ReviewDecision, MilestoneSubmissionStatus> = {
@@ -485,7 +473,7 @@ export class MilestoneService {
       where: { id: submissionId },
     });
 
-    if (!submission) throw new AppError('Submission not found', 404);
+    if (!submission) throw AppError.from('MILESTONE_002');
 
     return prisma.milestoneReview.findMany({
       where: { submissionId },
@@ -508,7 +496,7 @@ export class MilestoneService {
       },
     });
 
-    if (!milestone) throw new AppError('Milestone not found', 404);
+    if (!milestone) throw AppError.from('MILESTONE_001');
     return milestone;
   }
 
@@ -533,7 +521,7 @@ export class MilestoneService {
       },
     });
 
-    if (!milestone) throw new AppError('Milestone not found in this campaign', 404);
+    if (!milestone) throw AppError.from('MILESTONE_001', 'Milestone not found in this campaign');
 
     const latestSubmission = milestone.submissions[0] ?? null;
     const approvedReview = latestSubmission?.reviews[0] ?? null;

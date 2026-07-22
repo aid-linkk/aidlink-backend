@@ -17,7 +17,7 @@ export class DistributionService {
     });
 
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     const beneficiary = await prisma.beneficiary.findUnique({
@@ -25,7 +25,7 @@ export class DistributionService {
     });
 
     if (!beneficiary) {
-      throw new AppError('Beneficiary not found', 404);
+      throw AppError.from('BENEFICIARY_001');
     }
 
     // Check if beneficiary is assigned to campaign
@@ -39,15 +39,12 @@ export class DistributionService {
     });
 
     if (!assignment) {
-      throw new AppError('Beneficiary is not assigned to this campaign', 400);
+      throw AppError.from('DISTRIBUTION_002', 'Beneficiary is not assigned to this campaign');
     }
 
     // Check permissions
     if (campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError(
-        'You do not have permission to create distributions for this campaign',
-        403
-      );
+      throw AppError.from('COMMON_001', 'You do not have permission to create distributions for this campaign');
     }
 
     const distribution = await prisma.$transaction(async (tx) => {
@@ -71,11 +68,11 @@ export class DistributionService {
     });
 
     if (!distribution) {
-      throw new AppError('Distribution not found', 404);
+      throw AppError.from('DISTRIBUTION_001');
     }
 
     if (distribution.status === DistributionStatus.COMPLETED) {
-      throw new AppError('Distribution already completed', 400);
+      throw AppError.from('DISTRIBUTION_002', 'Distribution already completed');
     }
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -183,12 +180,12 @@ export class DistributionService {
     });
 
     if (!distribution) {
-      throw new AppError('Distribution not found', 404);
+      throw AppError.from('DISTRIBUTION_001');
     }
 
     // Check permissions
     if (distribution.campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to update this distribution', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to update this distribution');
     }
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -224,12 +221,12 @@ export class DistributionService {
     });
 
     if (!distribution) {
-      throw new AppError('Distribution not found', 404);
+      throw AppError.from('DISTRIBUTION_001');
     }
 
     // Check permissions
     if (distribution.campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to update this distribution', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to update this distribution');
     }
 
     const updated = await prisma.distribution.update({

@@ -102,7 +102,7 @@ export class ReceiptService {
     });
 
     if (!donation) {
-      throw new AppError('Donation not found', 404);
+      throw AppError.from('DONATION_001');
     }
 
     if (donation.taxReceipt) {
@@ -110,14 +110,11 @@ export class ReceiptService {
     }
 
     if (donation.status !== DonationStatus.CONFIRMED) {
-      throw new AppError('Receipts can only be generated for confirmed donations', 400);
+      throw AppError.from('RECEIPT_001');
     }
 
     if (!donation.user || !donation.user.email) {
-      throw new AppError(
-        'Cannot generate a receipt: donation has no associated donor account',
-        422,
-      );
+      throw AppError.from('RECEIPT_002');
     }
 
     const region = resolveRegion(options.region ?? config.receipts.defaultRegion);
@@ -201,7 +198,7 @@ export class ReceiptService {
     });
 
     if (!receipt) {
-      throw new AppError('Receipt not found', 404);
+      throw AppError.from('RECEIPT_003');
     }
 
     return receipt;
@@ -229,7 +226,7 @@ export class ReceiptService {
     });
 
     if (!receipt) {
-      throw new AppError('Receipt not found', 404);
+      throw AppError.from('RECEIPT_003');
     }
 
     try {
@@ -373,7 +370,7 @@ export class ReceiptService {
   static async processBatchJob(jobId: string): Promise<any> {
     const job = await prisma.receiptBatchJob.findUnique({ where: { id: jobId } });
     if (!job) {
-      throw new AppError('Batch job not found', 404);
+      throw AppError.from('RECEIPT_004');
     }
 
     await prisma.receiptBatchJob.update({
@@ -448,7 +445,7 @@ export class ReceiptService {
   static async getBatchJob(jobId: string): Promise<any> {
     const job = await prisma.receiptBatchJob.findUnique({ where: { id: jobId } });
     if (!job) {
-      throw new AppError('Batch job not found', 404);
+      throw AppError.from('RECEIPT_004');
     }
 
     const total = job.totalCount || 0;

@@ -59,11 +59,11 @@ export class OrganizationService {
     });
 
     if (!organization) {
-      throw new AppError('Organization not found', 404);
+      throw AppError.from('ORG_001');
     }
 
     if (!this.isAdmin(actor) && organization.userId !== actor.id) {
-      throw new AppError('You do not have permission to manage this organization', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to manage this organization');
     }
 
     return organization;
@@ -103,7 +103,7 @@ export class OrganizationService {
       where: { userId: ownerId, deletedAt: null },
     });
     if (existing) {
-      throw new AppError('User already has an organization profile', 409);
+      throw AppError.from('ORG_002');
     }
 
     const organization = await prisma.organization.create({
@@ -293,7 +293,7 @@ export class OrganizationService {
       where: { id: accountId, organizationId, archivedAt: null },
     });
     if (!bankAccount) {
-      throw new AppError('Bank account not found', 404);
+      throw AppError.from('ORG_003');
     }
     return bankAccount;
   }
@@ -499,7 +499,7 @@ export class OrganizationService {
 
   private static requireAdmin(actor: Actor): void {
     if (!this.isAdmin(actor)) {
-      throw new AppError('Admin access required', 403);
+      throw AppError.from('COMMON_001', 'Admin access required');
     }
   }
 
@@ -517,7 +517,7 @@ export class OrganizationService {
       where: { id: organizationId, deletedAt: null },
     });
     if (!organization) {
-      throw new AppError('Organization not found', 404);
+      throw AppError.from('ORG_001');
     }
 
     const updated = await prisma.$transaction(async (tx) => {
