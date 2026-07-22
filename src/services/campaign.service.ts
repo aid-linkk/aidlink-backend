@@ -17,11 +17,11 @@ export class CampaignService {
     });
 
     if (!organization) {
-      throw new AppError('Organization not found', 404);
+      throw AppError.from('ORG_001');
     }
 
     if (organization.userId !== userId) {
-      throw new AppError('You do not have permission to create campaigns for this organization', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to create campaigns for this organization');
     }
 
     // Check for likely duplicates before creating. Non-blocking: a failure
@@ -187,7 +187,7 @@ export class CampaignService {
     });
 
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     // Anonymize anonymous donations in the campaign feed
@@ -209,45 +209,45 @@ export class CampaignService {
   private static validateCampaignUpdateInput(data: Partial<CampaignInput>): void {
     if (data.title !== undefined) {
       if (typeof data.title !== 'string' || data.title.trim().length < 3) {
-        throw new AppError('Title must be at least 3 characters long', 400);
+        throw AppError.from('CAMPAIGN_001', 'Title must be at least 3 characters long');
       }
       if (data.title.trim().length > 200) {
-        throw new AppError('Title must not exceed 200 characters', 400);
+        throw AppError.from('CAMPAIGN_001', 'Title must not exceed 200 characters');
       }
     }
 
     if (data.description !== undefined) {
       if (typeof data.description !== 'string' || data.description.trim().length < 10) {
-        throw new AppError('Description must be at least 10 characters long', 400);
+        throw AppError.from('CAMPAIGN_001', 'Description must be at least 10 characters long');
       }
       if (data.description.trim().length > 5000) {
-        throw new AppError('Description must not exceed 5000 characters', 400);
+        throw AppError.from('CAMPAIGN_001', 'Description must not exceed 5000 characters');
       }
     }
 
     if (data.targetAmount !== undefined) {
       if (typeof data.targetAmount !== 'number' || data.targetAmount <= 0) {
-        throw new AppError('Target amount must be a positive number', 400);
+        throw AppError.from('CAMPAIGN_001', 'Target amount must be a positive number');
       }
     }
 
     if (data.startDate !== undefined) {
       const startDate = new Date(data.startDate);
       if (isNaN(startDate.getTime())) {
-        throw new AppError('Start date must be a valid date', 400);
+        throw AppError.from('CAMPAIGN_001', 'Start date must be a valid date');
       }
     }
 
     if (data.endDate !== undefined && data.endDate !== null) {
       const endDate = new Date(data.endDate);
       if (isNaN(endDate.getTime())) {
-        throw new AppError('End date must be a valid date', 400);
+        throw AppError.from('CAMPAIGN_001', 'End date must be a valid date');
       }
       // Validate endDate is after startDate if both are provided
       if (data.startDate !== undefined) {
         const startDate = new Date(data.startDate);
         if (endDate <= startDate) {
-          throw new AppError('End date must be after start date', 400);
+          throw AppError.from('CAMPAIGN_001', 'End date must be after start date');
         }
       }
     }
@@ -256,7 +256,7 @@ export class CampaignService {
       try {
         new URL(data.imageUrl);
       } catch {
-        throw new AppError('Image URL must be a valid URL', 400);
+        throw AppError.from('CAMPAIGN_001', 'Image URL must be a valid URL');
       }
     }
   }
@@ -267,17 +267,17 @@ export class CampaignService {
     });
 
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     // Check permissions
     if (campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to update this campaign', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to update this campaign');
     }
 
     // Prevent updating if campaign is completed or cancelled
     if (campaign.status === CampaignStatus.COMPLETED || campaign.status === CampaignStatus.CANCELLED) {
-      throw new AppError('Cannot update a completed or cancelled campaign', 400);
+      throw AppError.from('CAMPAIGN_003', 'Cannot update a completed or cancelled campaign');
     }
 
     // Validate input fields
@@ -287,7 +287,7 @@ export class CampaignService {
     if (data.endDate !== undefined && data.endDate !== null && data.startDate === undefined) {
       const endDate = new Date(data.endDate);
       if (endDate <= campaign.startDate) {
-        throw new AppError('End date must be after start date', 400);
+        throw AppError.from('CAMPAIGN_001', 'End date must be after start date');
       }
     }
 
@@ -316,17 +316,17 @@ export class CampaignService {
     });
 
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     // Check permissions
     if (campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to delete this campaign', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to delete this campaign');
     }
 
     // Only allow deletion of draft campaigns
     if (campaign.status !== CampaignStatus.DRAFT) {
-      throw new AppError('Can only delete draft campaigns', 400);
+      throw AppError.from('CAMPAIGN_003', 'Can only delete draft campaigns');
     }
 
     // Delete campaign and dependent records transactionally
@@ -351,22 +351,22 @@ export class CampaignService {
     });
 
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     // Check permissions
     if (campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to update this campaign status', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to update this campaign status');
     }
 
     // Suspension/reinstatement must go through the moderation workflow so that
     // a suspension record and audit trail are always created. This prevents an
     // owner from self-reinstating a suspended campaign via this endpoint.
     if (status === CampaignStatus.SUSPENDED) {
-      throw new AppError('Use the moderation endpoint to suspend a campaign', 400);
+      throw AppError.from('CAMPAIGN_003', 'Use the moderation endpoint to suspend a campaign');
     }
     if (campaign.status === CampaignStatus.SUSPENDED) {
-      throw new AppError('Suspended campaigns can only be reinstated by an admin or via an approved appeal', 400);
+      throw AppError.from('CAMPAIGN_003', 'Suspended campaigns can only be reinstated by an admin or via an approved appeal');
     }
 
     const updated = await prisma.campaign.update({
@@ -388,19 +388,19 @@ export class CampaignService {
    */
   private static validateMilestoneInput(data: any): void {
     if (!data.title || typeof data.title !== 'string' || data.title.trim().length === 0) {
-      throw new AppError('Milestone title is required', 400);
+      throw AppError.from('CAMPAIGN_001', 'Milestone title is required');
     }
 
     if (!data.description || typeof data.description !== 'string' || data.description.trim().length === 0) {
-      throw new AppError('Milestone description is required', 400);
+      throw AppError.from('CAMPAIGN_001', 'Milestone description is required');
     }
 
     if (data.targetAmount === undefined || data.targetAmount === null || typeof data.targetAmount !== 'number' || data.targetAmount <= 0) {
-      throw new AppError('Milestone target amount must be a positive number', 400);
+      throw AppError.from('CAMPAIGN_001', 'Milestone target amount must be a positive number');
     }
 
     if (data.order === undefined || data.order === null || typeof data.order !== 'number' || data.order < 0 || !Number.isInteger(data.order)) {
-      throw new AppError('Milestone order must be a non-negative integer', 400);
+      throw AppError.from('CAMPAIGN_001', 'Milestone order must be a non-negative integer');
     }
   }
 
@@ -410,12 +410,12 @@ export class CampaignService {
     });
 
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     // Check permissions
     if (campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to add milestones to this campaign', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to add milestones to this campaign');
     }
 
     // Validate milestone input
@@ -454,19 +454,19 @@ export class CampaignService {
   private static validateAssignmentInput(data: any): void {
     if (data.assignedAmount !== undefined) {
       if (typeof data.assignedAmount !== 'number' || data.assignedAmount < 0) {
-        throw new AppError('Assigned amount must be a non-negative number', 400);
+        throw AppError.from('CAMPAIGN_001', 'Assigned amount must be a non-negative number');
       }
     }
 
     if (data.allocatedAmount !== undefined) {
       if (typeof data.allocatedAmount !== 'number' || data.allocatedAmount < 0) {
-        throw new AppError('Allocated amount must be a non-negative number', 400);
+        throw AppError.from('CAMPAIGN_001', 'Allocated amount must be a non-negative number');
       }
     }
 
     if (data.priority !== undefined) {
       if (typeof data.priority !== 'number' || !Number.isInteger(data.priority) || data.priority < 0) {
-        throw new AppError('Priority must be a non-negative integer', 400);
+        throw AppError.from('CAMPAIGN_001', 'Priority must be a non-negative integer');
       }
     }
   }
@@ -477,12 +477,12 @@ export class CampaignService {
     });
 
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     // Check permissions
     if (campaign.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to assign beneficiaries to this campaign', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to assign beneficiaries to this campaign');
     }
 
     const beneficiary = await prisma.beneficiary.findUnique({
@@ -490,7 +490,7 @@ export class CampaignService {
     });
 
     if (!beneficiary) {
-      throw new AppError('Beneficiary not found', 404);
+      throw AppError.from('BENEFICIARY_001');
     }
 
     // Validate assignment input
@@ -534,7 +534,7 @@ export class CampaignService {
     });
 
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     const totalDonated = await prisma.donation.aggregate({

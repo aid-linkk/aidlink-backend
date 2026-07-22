@@ -183,11 +183,11 @@ export async function createCancelledCampaignCase(campaignId: string) {
 
 export async function retryRefund(recoveryCaseId: string, adminId: string) {
   const rc = await prisma.recoveryCase.findUnique({ where: { id: recoveryCaseId } });
-  if (!rc) throw new AppError('Recovery case not found', 404);
+  if (!rc) throw AppError.from('RECOVERY_001');
   if (rc.type !== RecoveryCaseType.FAILED_REFUND)
-    throw new AppError('Not a FAILED_REFUND case', 400);
+    throw AppError.from('RECOVERY_002', 'Not a FAILED_REFUND case');
   if (rc.status === RecoveryStatus.RECOVERED || rc.status === RecoveryStatus.FAILED_PERMANENTLY)
-    throw new AppError('Case is already resolved', 400);
+    throw AppError.from('RECOVERY_003', 'Case is already resolved');
 
   const newCount = rc.retryCount + 1;
   const isPermanentFailure = newCount >= rc.maxRetries;
@@ -245,11 +245,11 @@ export async function retryRefund(recoveryCaseId: string, adminId: string) {
 
 export async function retryDistribution(recoveryCaseId: string, adminId: string) {
   const rc = await prisma.recoveryCase.findUnique({ where: { id: recoveryCaseId } });
-  if (!rc) throw new AppError('Recovery case not found', 404);
+  if (!rc) throw AppError.from('RECOVERY_001');
   if (rc.type !== RecoveryCaseType.FAILED_DISTRIBUTION)
-    throw new AppError('Not a FAILED_DISTRIBUTION case', 400);
+    throw AppError.from('RECOVERY_002', 'Not a FAILED_DISTRIBUTION case');
   if (rc.status === RecoveryStatus.RECOVERED || rc.status === RecoveryStatus.FAILED_PERMANENTLY)
-    throw new AppError('Case is already resolved', 400);
+    throw AppError.from('RECOVERY_003', 'Case is already resolved');
 
   const newCount = rc.retryCount + 1;
   const isPermanentFailure = newCount >= rc.maxRetries;
@@ -297,9 +297,9 @@ export async function updateRefundDestination(
   adminId: string
 ) {
   const rc = await prisma.recoveryCase.findUnique({ where: { id: recoveryCaseId } });
-  if (!rc) throw new AppError('Recovery case not found', 404);
+  if (!rc) throw AppError.from('RECOVERY_001');
   if (rc.type !== RecoveryCaseType.FAILED_REFUND)
-    throw new AppError('Not a FAILED_REFUND case', 400);
+    throw AppError.from('RECOVERY_002', 'Not a FAILED_REFUND case');
 
   const updated = await prisma.$transaction(async (tx) => {
     const result = await tx.recoveryCase.update({
@@ -330,9 +330,9 @@ export async function updateRefundDestination(
 
 export async function markDistributionRecoveryRequired(recoveryCaseId: string, adminId: string) {
   const rc = await prisma.recoveryCase.findUnique({ where: { id: recoveryCaseId } });
-  if (!rc) throw new AppError('Recovery case not found', 404);
+  if (!rc) throw AppError.from('RECOVERY_001');
   if (rc.type !== RecoveryCaseType.FAILED_DISTRIBUTION)
-    throw new AppError('Not a FAILED_DISTRIBUTION case', 400);
+    throw AppError.from('RECOVERY_002', 'Not a FAILED_DISTRIBUTION case');
 
   const updated = await prisma.$transaction(async (tx) => {
     const result = await tx.recoveryCase.update({
@@ -377,18 +377,18 @@ export async function settleCancelledCampaign(
     where: { id: recoveryCaseId },
     include: { donorCredits: true },
   });
-  if (!rc) throw new AppError('Recovery case not found', 404);
+  if (!rc) throw AppError.from('RECOVERY_001');
   if (rc.type !== RecoveryCaseType.CANCELLED_CAMPAIGN_FUNDS)
-    throw new AppError('Not a CANCELLED_CAMPAIGN_FUNDS case', 400);
-  if (rc.status === RecoveryStatus.RECOVERED) throw new AppError('Case is already settled', 400);
-  if (!rc.campaignId) throw new AppError('No campaign linked to this case', 400);
+    throw AppError.from('RECOVERY_002', 'Not a CANCELLED_CAMPAIGN_FUNDS case');
+  if (rc.status === RecoveryStatus.RECOVERED) throw AppError.from('RECOVERY_003', 'Case is already settled');
+  if (!rc.campaignId) throw AppError.from('RECOVERY_004', 'No campaign linked to this case');
 
   if (option === SettlementOption.TRANSFER_TO_CAMPAIGN) {
     if (!targetCampaignId)
-      throw new AppError('targetCampaignId required for TRANSFER_TO_CAMPAIGN', 400);
+      throw AppError.from('RECOVERY_004', 'targetCampaignId required for TRANSFER_TO_CAMPAIGN');
     const target = await prisma.campaign.findUnique({ where: { id: targetCampaignId } });
     if (!target || target.status !== CampaignStatus.ACTIVE)
-      throw new AppError('Target campaign not found or not active', 400);
+      throw AppError.from('RECOVERY_004', 'Target campaign not found or not active');
   }
 
   const campaign = await prisma.campaign.findUnique({
@@ -397,7 +397,7 @@ export async function settleCancelledCampaign(
       donations: { where: { status: DonationStatus.CONFIRMED } },
     },
   });
-  if (!campaign) throw new AppError('Campaign not found', 404);
+  if (!campaign) throw AppError.from('CAMPAIGN_002');
 
   await prisma.$transaction(async (tx) => {
     if (option === SettlementOption.REFUND_TO_DONOR) {
@@ -467,7 +467,7 @@ export async function issueDonorCredit(
   expiresAt?: Date
 ) {
   const rc = await prisma.recoveryCase.findUnique({ where: { id: recoveryCaseId } });
-  if (!rc) throw new AppError('Recovery case not found', 404);
+  if (!rc) throw AppError.from('RECOVERY_001');
 
   const credit = await prisma.$transaction(async (tx) => {
     const created = await tx.donorCredit.create({
@@ -542,7 +542,7 @@ export async function getRecoveryCaseById(id: string) {
     where: { id },
     include: { donorCredits: true },
   });
-  if (!rc) throw new AppError('Recovery case not found', 404);
+  if (!rc) throw AppError.from('RECOVERY_001');
   return rc;
 }
 

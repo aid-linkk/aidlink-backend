@@ -66,7 +66,7 @@ export class MatchedFundAllocationService {
     `);
 
     if (rows.length === 0) {
-      throw new AppError('Multiplier not found during matched-fund allocation', 404);
+      throw AppError.from('MULTIPLIER_001', 'Multiplier not found during matched-fund allocation');
     }
 
     return new Prisma.Decimal(rows[0].applied);

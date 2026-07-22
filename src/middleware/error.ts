@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import logger from '../config/logger';
+import { ErrorCodes, ErrorCodeKey } from '../constants/errorCodes';
 
 export const ApiErrorCode = {
   VALIDATION_ERROR: 'VALIDATION_ERROR',
@@ -21,6 +22,12 @@ export type ApiErrorCode = typeof ApiErrorCode[keyof typeof ApiErrorCode];
 
 export interface ApiErrorBody {
   code: ApiErrorCode;
+  /**
+   * Stable domain error code from the taxonomy in src/constants/errorCodes.ts
+   * (e.g. "CAMPAIGN_002"). See docs/ERROR_CODES.md for the full catalog.
+   * Present whenever the error originated from `AppError.from(...)`.
+   */
+  errorCode?: ErrorCodeKey;
   message: string;
   details?: Record<string, string>;
 }
@@ -60,16 +67,19 @@ export const getDefaultErrorCode = (statusCode: number): ApiErrorCode => {
 export const createErrorResponse = (
   code: ApiErrorCode,
   message: string,
-  details?: ApiErrorBody['details']
+  details?: ApiErrorBody['details'],
+  errorCode?: ErrorCodeKey
 ): ApiErrorResponse => ({
   success: false,
-  error: details ? { code, message, details } : { code, message },
+  error: { code, message, ...(details ? { details } : {}), ...(errorCode ? { errorCode } : {}) },
 });
 
 export class AppError extends Error {
   statusCode: number;
   isOperational: boolean;
   code: ApiErrorCode;
+  /** Domain taxonomy code, set when constructed via `AppError.from`. */
+  errorCode?: ErrorCodeKey;
 
   constructor(message: string, statusCode: number = 500, code?: ApiErrorCode) {
     super(message);
@@ -77,6 +87,18 @@ export class AppError extends Error {
     this.isOperational = true;
     this.code = code || getDefaultErrorCode(statusCode);
     Error.captureStackTrace(this, this.constructor);
+  }
+
+  /**
+   * Builds an AppError from a taxonomy entry in src/constants/errorCodes.ts.
+   * Pass `message` to override the default text with call-site-specific detail
+   * (e.g. which field failed validation) while keeping the same stable code.
+   */
+  static from(errorCode: ErrorCodeKey, message?: string): AppError {
+    const entry = ErrorCodes[errorCode];
+    const err = new AppError(message ?? entry.message, entry.httpStatus);
+    err.errorCode = errorCode;
+    return err;
   }
 }
 
@@ -94,7 +116,7 @@ export const errorHandler = (
   });
 
   if (err instanceof AppError) {
-    res.status(err.statusCode).json(createErrorResponse(err.code, err.message));
+    res.status(err.statusCode).json(createErrorResponse(err.code, err.message, undefined, err.errorCode));
     return;
   }
 
