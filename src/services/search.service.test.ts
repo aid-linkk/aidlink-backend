@@ -6,6 +6,13 @@ import prisma from '../config/database';
 // Mock Prisma
 jest.mock('../config/database');
 
+// Mock the cache layer so tests don't depend on a real Redis connection —
+// getOrSet always misses and just runs the factory.
+jest.mock('../utils/cache', () => ({
+  getOrSet: jest.fn((_key: string, _ttl: number, factory: () => Promise<unknown>) => factory()),
+  buildKey: jest.fn((namespace: string, key: string) => `${namespace}:${key}`),
+}));
+
 describe('SearchService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -60,6 +67,228 @@ describe('SearchService', () => {
 
       expect(result).toHaveProperty('data');
       expect(result).toHaveProperty('pagination');
+    });
+  });
+
+  describe('relevance sorting', () => {
+    interface RawSqlCall {
+      text: string;
+      values: unknown[];
+    }
+
+    function extractLimitOffset(call: RawSqlCall): { limit: unknown; offset: unknown } {
+      const match = call.text.match(/LIMIT \$(\d+) OFFSET \$(\d+)/);
+      if (!match) throw new Error(`LIMIT/OFFSET not found in: ${call.text}`);
+      const [, limitIdx, offsetIdx] = match;
+      return {
+        limit: call.values[Number(limitIdx) - 1],
+        offset: call.values[Number(offsetIdx) - 1],
+      };
+    }
+
+    describe('searchCampaigns', () => {
+      it('uses the $queryRaw scoring path when sortBy is relevance, not the default orderBy path', async () => {
+        (prisma.$queryRaw as jest.Mock)
+          .mockResolvedValueOnce([{ id: 'camp-1', score: 50 }])
+          .mockResolvedValueOnce([{ count: 1 }]);
+        (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+          {
+            id: 'camp-1',
+            title: 'Flood Relief',
+            organization: { name: 'Org' },
+            _count: { donations: 0, beneficiaries: 0 },
+          },
+        ]);
+
+        await SearchService.searchCampaigns({ query: 'flood', sortBy: 'relevance', page: 1, limit: 20 });
+
+        expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+        expect(prisma.campaign.count).not.toHaveBeenCalled();
+
+        const findManyArgs = (prisma.campaign.findMany as jest.Mock).mock.calls[0][0];
+        expect(findManyArgs.where).toEqual({ id: { in: ['camp-1'] } });
+        expect(findManyArgs.orderBy).toBeUndefined();
+        expect(findManyArgs.skip).toBeUndefined();
+        expect(findManyArgs.take).toBeUndefined();
+      });
+
+      it('orders results by score desc with id as tiebreaker, even if findMany returns a different order', async () => {
+        (prisma.$queryRaw as jest.Mock)
+          .mockResolvedValueOnce([
+            { id: 'c', score: 90 },
+            { id: 'a', score: 50 },
+            { id: 'b', score: 50 },
+          ])
+          .mockResolvedValueOnce([{ count: 3 }]);
+
+        // findMany intentionally returns a different order than the ranked ids,
+        // since `WHERE id IN (...)` does not guarantee row order.
+        (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+          { id: 'b', title: 'B', organization: { name: 'Org' }, _count: { donations: 0, beneficiaries: 0 } },
+          { id: 'a', title: 'A', organization: { name: 'Org' }, _count: { donations: 0, beneficiaries: 0 } },
+          { id: 'c', title: 'C', organization: { name: 'Org' }, _count: { donations: 0, beneficiaries: 0 } },
+        ]);
+
+        const result = await SearchService.searchCampaigns({
+          query: 'flood',
+          sortBy: 'relevance',
+          page: 1,
+          limit: 20,
+        });
+
+        expect(result.data.map((c: any) => c.id)).toEqual(['c', 'a', 'b']);
+
+        const rankedCall = (prisma.$queryRaw as jest.Mock).mock.calls[0][0] as RawSqlCall;
+        expect(rankedCall.text).toMatch(/ORDER BY score DESC, id ASC/);
+      });
+
+      it('respects limit/offset pagination in the relevance path', async () => {
+        (prisma.$queryRaw as jest.Mock)
+          .mockResolvedValueOnce([{ id: 'camp-1', score: 50 }])
+          .mockResolvedValueOnce([{ count: 42 }]);
+        (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+          {
+            id: 'camp-1',
+            title: 'Flood Relief',
+            organization: { name: 'Org' },
+            _count: { donations: 0, beneficiaries: 0 },
+          },
+        ]);
+
+        const result = await SearchService.searchCampaigns({
+          query: 'flood',
+          sortBy: 'relevance',
+          page: 3,
+          limit: 15,
+        });
+
+        const rankedCall = (prisma.$queryRaw as jest.Mock).mock.calls[0][0] as RawSqlCall;
+        const { limit, offset } = extractLimitOffset(rankedCall);
+        expect(limit).toBe(15);
+        expect(offset).toBe(30); // (page - 1) * limit
+
+        expect(result.pagination).toEqual({ page: 3, limit: 15, total: 42, totalPages: 3 });
+      });
+
+      it('falls back to the original orderBy path for non-relevance sorts', async () => {
+        (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+          {
+            id: 'camp-1',
+            title: 'Flood Relief',
+            organization: { name: 'Org' },
+            _count: { donations: 0, beneficiaries: 0 },
+          },
+        ]);
+        (prisma.campaign.count as jest.Mock).mockResolvedValue(1);
+
+        await SearchService.searchCampaigns({
+          query: 'flood',
+          sortBy: 'createdAt',
+          sortOrder: 'desc',
+          page: 1,
+          limit: 20,
+        });
+
+        expect(prisma.$queryRaw).not.toHaveBeenCalled();
+        const findManyArgs = (prisma.campaign.findMany as jest.Mock).mock.calls[0][0];
+        expect(findManyArgs.orderBy).toEqual({ createdAt: 'desc' });
+        expect(findManyArgs.skip).toBe(0);
+        expect(findManyArgs.take).toBe(20);
+      });
+    });
+
+    describe('searchDonations', () => {
+      it('uses the $queryRaw scoring path when sortBy is relevance, not the default orderBy path', async () => {
+        (prisma.$queryRaw as jest.Mock)
+          .mockResolvedValueOnce([{ id: 'don-1', score: 50 }])
+          .mockResolvedValueOnce([{ count: 1 }]);
+        (prisma.donation.findMany as jest.Mock).mockResolvedValue([
+          { id: 'don-1', amount: 100, campaign: { id: 'c1', title: 'Flood Relief' } },
+        ]);
+
+        await SearchService.searchDonations({ query: 'thanks', sortBy: 'relevance', page: 1, limit: 20 });
+
+        expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+        expect(prisma.donation.count).not.toHaveBeenCalled();
+
+        const findManyArgs = (prisma.donation.findMany as jest.Mock).mock.calls[0][0];
+        expect(findManyArgs.where).toEqual({ id: { in: ['don-1'] } });
+        expect(findManyArgs.orderBy).toBeUndefined();
+        expect(findManyArgs.skip).toBeUndefined();
+        expect(findManyArgs.take).toBeUndefined();
+      });
+
+      it('orders results by score desc with id as tiebreaker, even if findMany returns a different order', async () => {
+        (prisma.$queryRaw as jest.Mock)
+          .mockResolvedValueOnce([
+            { id: 'z', score: 80 },
+            { id: 'x', score: 40 },
+            { id: 'y', score: 40 },
+          ])
+          .mockResolvedValueOnce([{ count: 3 }]);
+
+        (prisma.donation.findMany as jest.Mock).mockResolvedValue([
+          { id: 'y', amount: 10, campaign: { id: 'c1', title: 'C' } },
+          { id: 'x', amount: 20, campaign: { id: 'c1', title: 'C' } },
+          { id: 'z', amount: 30, campaign: { id: 'c1', title: 'C' } },
+        ]);
+
+        const result = await SearchService.searchDonations({
+          query: 'thanks',
+          sortBy: 'relevance',
+          page: 1,
+          limit: 20,
+        });
+
+        expect(result.data.map((d: any) => d.id)).toEqual(['z', 'x', 'y']);
+
+        const rankedCall = (prisma.$queryRaw as jest.Mock).mock.calls[0][0] as RawSqlCall;
+        expect(rankedCall.text).toMatch(/ORDER BY score DESC, id ASC/);
+      });
+
+      it('respects limit/offset pagination in the relevance path', async () => {
+        (prisma.$queryRaw as jest.Mock)
+          .mockResolvedValueOnce([{ id: 'don-1', score: 50 }])
+          .mockResolvedValueOnce([{ count: 17 }]);
+        (prisma.donation.findMany as jest.Mock).mockResolvedValue([
+          { id: 'don-1', amount: 100, campaign: { id: 'c1', title: 'Flood Relief' } },
+        ]);
+
+        const result = await SearchService.searchDonations({
+          query: 'thanks',
+          sortBy: 'relevance',
+          page: 2,
+          limit: 5,
+        });
+
+        const rankedCall = (prisma.$queryRaw as jest.Mock).mock.calls[0][0] as RawSqlCall;
+        const { limit, offset } = extractLimitOffset(rankedCall);
+        expect(limit).toBe(5);
+        expect(offset).toBe(5); // (page - 1) * limit
+
+        expect(result.pagination).toEqual({ page: 2, limit: 5, total: 17, totalPages: 4 });
+      });
+
+      it('falls back to the original orderBy path for non-relevance sorts', async () => {
+        (prisma.donation.findMany as jest.Mock).mockResolvedValue([
+          { id: 'don-1', amount: 100, campaign: { id: 'c1', title: 'Flood Relief' } },
+        ]);
+        (prisma.donation.count as jest.Mock).mockResolvedValue(1);
+
+        await SearchService.searchDonations({
+          query: 'thanks',
+          sortBy: 'createdAt',
+          sortOrder: 'desc',
+          page: 1,
+          limit: 20,
+        });
+
+        expect(prisma.$queryRaw).not.toHaveBeenCalled();
+        const findManyArgs = (prisma.donation.findMany as jest.Mock).mock.calls[0][0];
+        expect(findManyArgs.orderBy).toEqual({ createdAt: 'desc' });
+        expect(findManyArgs.skip).toBe(0);
+        expect(findManyArgs.take).toBe(20);
+      });
     });
   });
 

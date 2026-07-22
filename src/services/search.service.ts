@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import prisma from '../config/database';
 import { getOrSet, buildKey } from '../utils/cache';
 
@@ -131,6 +132,70 @@ function bucketize(
   return buckets.map((b, i) => ({ range: b.label, count: counts[i] }));
 }
 
+// Relative weights per match quality; multiplied by a field's weight below to
+// produce that field's contribution to the total relevance score.
+const MATCH_TIER_SCORES = {
+  exact: 100,
+  startsWith: 60,
+  contains: 20,
+} as const;
+
+// Relative importance of each searchable field, applied to MATCH_TIER_SCORES.
+const CAMPAIGN_FIELD_WEIGHTS = {
+  title: 1,
+  description: 0.4,
+};
+
+const DONATION_FIELD_WEIGHTS = {
+  memo: 1,
+  fromWallet: 0.8,
+  donorMessage: 0.3,
+};
+
+interface LikePatterns {
+  exact: string;
+  prefix: string;
+  contains: string;
+}
+
+function escapeLikeSpecialChars(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+function buildLikePatterns(query: string): LikePatterns {
+  const escaped = escapeLikeSpecialChars(query);
+  return {
+    exact: escaped,
+    prefix: `${escaped}%`,
+    contains: `%${escaped}%`,
+  };
+}
+
+function likeScoreCase(column: string, weight: number, patterns: LikePatterns): Prisma.Sql {
+  const exactScore = Math.round(MATCH_TIER_SCORES.exact * weight);
+  const prefixScore = Math.round(MATCH_TIER_SCORES.startsWith * weight);
+  const containsScore = Math.round(MATCH_TIER_SCORES.contains * weight);
+  const col = Prisma.raw(`"${column}"`);
+  return Prisma.sql`CASE
+    WHEN ${col} ILIKE ${patterns.exact} THEN ${exactScore}
+    WHEN ${col} ILIKE ${patterns.prefix} THEN ${prefixScore}
+    WHEN ${col} ILIKE ${patterns.contains} THEN ${containsScore}
+    ELSE 0
+  END`;
+}
+
+// Shared date/amount conditions for relevance queries; status is entity-specific
+// (different enum types) and pushed on by the caller.
+function relevanceFilterConditions(filters: SearchFilters, amountColumn: string): Prisma.Sql[] {
+  const { dateFrom, dateTo, minAmount, maxAmount } = filters;
+  const conditions: Prisma.Sql[] = [];
+  if (dateFrom) conditions.push(Prisma.sql`"createdAt" >= ${dateFrom}`);
+  if (dateTo) conditions.push(Prisma.sql`"createdAt" <= ${dateTo}`);
+  if (minAmount) conditions.push(Prisma.sql`${Prisma.raw(amountColumn)} >= ${minAmount}`);
+  if (maxAmount) conditions.push(Prisma.sql`${Prisma.raw(amountColumn)} <= ${maxAmount}`);
+  return conditions;
+}
+
 export class SearchService {
   static async searchCampaigns(filters: SearchFilters) {
     const {
@@ -149,6 +214,10 @@ export class SearchService {
     const cacheKey = buildKey('search', `campaigns:${JSON.stringify(filters)}`);
 
     return getOrSet(cacheKey, 120, async () => {
+      if (sortBy === 'relevance' && query) {
+        return this.searchCampaignsByRelevance(filters, query);
+      }
+
       const skip = (page - 1) * limit;
 
       const where: any = {};
@@ -225,6 +294,10 @@ export class SearchService {
       limit = 20,
     } = filters;
 
+    if (sortBy === 'relevance' && query) {
+      return this.searchDonationsByRelevance(filters, query);
+    }
+
     const skip = (page - 1) * limit;
 
     const where: any = {};
@@ -288,6 +361,123 @@ export class SearchService {
         total,
         totalPages: Math.ceil(total / limit),
       },
+    };
+  }
+
+  private static async searchCampaignsByRelevance(filters: SearchFilters, query: string) {
+    const { page = 1, limit = 20 } = filters;
+    const skip = (page - 1) * limit;
+    const patterns = buildLikePatterns(query);
+
+    const conditions = relevanceFilterConditions(filters, '"targetAmount"');
+    if (filters.status) conditions.push(Prisma.sql`status = ${filters.status}::"CampaignStatus"`);
+    const whereSql = conditions.length ? Prisma.join(conditions, ' AND ') : Prisma.sql`TRUE`;
+
+    const scoreExpr = Prisma.sql`(
+      ${likeScoreCase('title', CAMPAIGN_FIELD_WEIGHTS.title, patterns)}
+      + ${likeScoreCase('description', CAMPAIGN_FIELD_WEIGHTS.description, patterns)}
+    )`;
+
+    const cte = Prisma.sql`
+      WITH scored AS (
+        SELECT id, ${scoreExpr} AS score
+        FROM "Campaign"
+        WHERE ${whereSql}
+      )
+    `;
+
+    const [rankedRows, countRows] = await Promise.all([
+      prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
+        ${cte}
+        SELECT id, score FROM scored
+        WHERE score > 0
+        ORDER BY score DESC, id ASC
+        LIMIT ${limit} OFFSET ${skip}
+      `),
+      prisma.$queryRaw<Array<{ count: number }>>(Prisma.sql`
+        ${cte}
+        SELECT COUNT(*)::int AS count FROM scored WHERE score > 0
+      `),
+    ]);
+
+    const total = countRows[0]?.count ?? 0;
+    const ids = rankedRows.map((r) => r.id);
+
+    const campaigns = ids.length
+      ? await prisma.campaign.findMany({
+          where: { id: { in: ids } },
+          include: {
+            organization: { select: { name: true } },
+            _count: { select: { donations: true, beneficiaries: true } },
+          },
+        })
+      : [];
+
+    const rank = new Map(ids.map((id, i) => [id, i]));
+    const data = campaigns.sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
+
+    return {
+      data,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  }
+
+  private static async searchDonationsByRelevance(filters: SearchFilters, query: string) {
+    const { page = 1, limit = 20 } = filters;
+    const skip = (page - 1) * limit;
+    const patterns = buildLikePatterns(query);
+
+    const conditions = relevanceFilterConditions(filters, 'amount');
+    if (filters.status) conditions.push(Prisma.sql`status = ${filters.status}::"DonationStatus"`);
+    const whereSql = conditions.length ? Prisma.join(conditions, ' AND ') : Prisma.sql`TRUE`;
+
+    const scoreExpr = Prisma.sql`(
+      ${likeScoreCase('memo', DONATION_FIELD_WEIGHTS.memo, patterns)}
+      + ${likeScoreCase('fromWallet', DONATION_FIELD_WEIGHTS.fromWallet, patterns)}
+      + ${likeScoreCase('donorMessage', DONATION_FIELD_WEIGHTS.donorMessage, patterns)}
+    )`;
+
+    const cte = Prisma.sql`
+      WITH scored AS (
+        SELECT id, ${scoreExpr} AS score
+        FROM "Donation"
+        WHERE ${whereSql}
+      )
+    `;
+
+    const [rankedRows, countRows] = await Promise.all([
+      prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
+        ${cte}
+        SELECT id, score FROM scored
+        WHERE score > 0
+        ORDER BY score DESC, id ASC
+        LIMIT ${limit} OFFSET ${skip}
+      `),
+      prisma.$queryRaw<Array<{ count: number }>>(Prisma.sql`
+        ${cte}
+        SELECT COUNT(*)::int AS count FROM scored WHERE score > 0
+      `),
+    ]);
+
+    const total = countRows[0]?.count ?? 0;
+    const ids = rankedRows.map((r) => r.id);
+
+    const donations = ids.length
+      ? await prisma.donation.findMany({
+          where: { id: { in: ids } },
+          include: {
+            campaign: { select: { id: true, title: true } },
+            user: { select: { id: true, username: true, email: true } },
+          },
+        })
+      : [];
+
+    const rank = new Map(ids.map((id, i) => [id, i]));
+    const data = donations.sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
+
+    return {
+      data,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
   }
 
