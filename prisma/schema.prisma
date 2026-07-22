@@ -703,17 +703,28 @@ enum NotificationStatus {
   ARCHIVED
 }
 
+enum NotificationDeliveryStatus {
+  PENDING
+  SENT
+  FAILED_TRANSIENT
+  FAILED_PERMANENT
+}
+
 model Notification {
-  id        String             @id @default(cuid())
-  userId    String
-  type      NotificationType
-  title     String
-  message   String             @db.Text
-  status    NotificationStatus @default(UNREAD)
-  metadata  Json?
-  sentVia   String[]           @default([])
-  readAt    DateTime?
-  createdAt DateTime           @default(now())
+  id             String                     @id @default(cuid())
+  userId         String
+  type           NotificationType
+  title          String
+  message        String                     @db.Text
+  status         NotificationStatus         @default(UNREAD)
+  deliveryStatus NotificationDeliveryStatus @default(PENDING)
+  attemptCount   Int                        @default(0)
+  lastAttemptAt  DateTime?
+  lastError      String?                    @db.Text
+  metadata       Json?
+  sentVia        String[]                   @default([])
+  readAt         DateTime?
+  createdAt      DateTime                   @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -721,6 +732,7 @@ model Notification {
   @@index([status])
   @@index([type])
   @@index([createdAt])
+  @@index([deliveryStatus])
 }
 
 // ============================================
@@ -1279,6 +1291,9 @@ model TaxReceipt {
   generatedAt         DateTime           @default(now())
   emailSentAt         DateTime?
   emailDeliveryStatus ReceiptEmailStatus @default(PENDING)
+  attemptCount        Int                @default(0)
+  lastAttemptAt       DateTime?
+  lastError           String?            @db.Text
   metadata            Json?
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
