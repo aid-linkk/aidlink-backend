@@ -43,7 +43,8 @@ export const enqueueReceiptEmail = async (receiptId: string): Promise<void> => {
   await getReceiptQueue().add(
     'SEND_RECEIPT_EMAIL',
     { type: 'SEND_RECEIPT_EMAIL', data: { receiptId } },
-    defaultJobOpts,
+    // sendReceiptEmail retries internally (receipt.service.ts) — avoid compounding with queue-level retries.
+    { ...defaultJobOpts, attempts: 1 },
   );
 };
 
