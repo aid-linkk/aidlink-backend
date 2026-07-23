@@ -77,4 +77,17 @@ router.get(
   AnalyticsController.getAggregatedCampaignAnalytics
 );
 
+/**
+ * @route   GET /api/v1/analytics/export/:reportType
+ * @desc    Export campaign, donor, organization, or platform analytics as a
+ *          downloadable CSV or JSON file (?format=csv|json, default csv)
+ * @access  Private (Admin)
+ */
+router.get(
+  '/export/:reportType',
+  authenticate,
+  analyticsLimiter,
+  AnalyticsController.exportReport
+);
+
 export default router;
