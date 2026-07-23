@@ -1,4 +1,4 @@
-import { NotificationType, NotificationStatus } from '@prisma/client';
+import { NotificationType, NotificationStatus, NotificationDeliveryStatus } from '@prisma/client';
 
 jest.mock('nodemailer', () => ({
   createTransport: jest.fn().mockReturnValue({
@@ -260,6 +260,80 @@ describe('NotificationService', () => {
           amount: 100,
         })
       );
+    });
+
+    describe('retry behavior', () => {
+      const transientError = () => Object.assign(new Error('Connection reset'), { code: 'ECONNRESET' });
+      const permanentError = () => Object.assign(new Error('Invalid recipient'), { code: 'EENVELOPE' });
+
+      let sleepSpy: jest.SpyInstance;
+
+      beforeEach(() => {
+        sleepSpy = jest.spyOn(NotificationService as any, 'sleep').mockResolvedValue(undefined);
+      });
+
+      afterEach(() => {
+        sleepSpy.mockRestore();
+      });
+
+      it('retries a transient failure and succeeds on a later attempt', async () => {
+        transporter.sendMail
+          .mockRejectedValueOnce(transientError())
+          .mockRejectedValueOnce(transientError())
+          .mockResolvedValueOnce({ messageId: 'msg-1' });
+
+        await NotificationService.sendNotificationEmail('user-1', mockNotification());
+
+        expect(transporter.sendMail).toHaveBeenCalledTimes(3);
+        expect(sleepSpy).toHaveBeenCalledTimes(2);
+        const updateArgs = prismaMock.notification.update.mock.calls[0][0];
+        expect(updateArgs.data.deliveryStatus).toBe(NotificationDeliveryStatus.SENT);
+        expect(updateArgs.data.attemptCount).toBe(3);
+        expect(updateArgs.data.lastError).toBeNull();
+      });
+
+      it('exhausts all attempts on persistent transient failure and marks FAILED_TRANSIENT', async () => {
+        transporter.sendMail.mockRejectedValue(transientError());
+
+        await expect(
+          NotificationService.sendNotificationEmail('user-1', mockNotification())
+        ).rejects.toThrow('Connection reset');
+
+        expect(transporter.sendMail).toHaveBeenCalledTimes(3);
+        expect(sleepSpy).toHaveBeenCalledTimes(2);
+        const updateArgs = prismaMock.notification.update.mock.calls[0][0];
+        expect(updateArgs.data.deliveryStatus).toBe(NotificationDeliveryStatus.FAILED_TRANSIENT);
+        expect(updateArgs.data.attemptCount).toBe(3);
+        expect(updateArgs.data.lastError).toBe('Connection reset');
+      });
+
+      it('stops immediately on a permanent failure without retrying', async () => {
+        transporter.sendMail.mockRejectedValue(permanentError());
+
+        await expect(
+          NotificationService.sendNotificationEmail('user-1', mockNotification())
+        ).rejects.toThrow('Invalid recipient');
+
+        expect(transporter.sendMail).toHaveBeenCalledTimes(1);
+        expect(sleepSpy).not.toHaveBeenCalled();
+        const updateArgs = prismaMock.notification.update.mock.calls[0][0];
+        expect(updateArgs.data.deliveryStatus).toBe(NotificationDeliveryStatus.FAILED_PERMANENT);
+        expect(updateArgs.data.attemptCount).toBe(1);
+        expect(updateArgs.data.lastError).toBe('Invalid recipient');
+      });
+
+      it('persists SENT status and attemptCount 1 on first-attempt success', async () => {
+        transporter.sendMail.mockResolvedValueOnce({ messageId: 'msg-1' });
+
+        await NotificationService.sendNotificationEmail('user-1', mockNotification());
+
+        expect(transporter.sendMail).toHaveBeenCalledTimes(1);
+        const updateArgs = prismaMock.notification.update.mock.calls[0][0];
+        expect(updateArgs.data.deliveryStatus).toBe(NotificationDeliveryStatus.SENT);
+        expect(updateArgs.data.attemptCount).toBe(1);
+        expect(updateArgs.data.lastAttemptAt).toBeInstanceOf(Date);
+        expect(updateArgs.data.lastError).toBeNull();
+      });
     });
   });
 

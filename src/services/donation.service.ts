@@ -18,11 +18,11 @@ export class DonationService {
     });
 
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     if (campaign.status !== 'ACTIVE') {
-      throw new AppError('Campaign is not active', 400);
+      throw AppError.from('CAMPAIGN_003', 'Campaign is not active');
     }
 
     // Strip donor PII when anonymous to enforce GDPR data minimisation
@@ -49,11 +49,11 @@ export class DonationService {
     });
 
     if (!donation) {
-      throw new AppError('Donation not found', 404);
+      throw AppError.from('DONATION_001');
     }
 
     if (donation.status === DonationStatus.CONFIRMED) {
-      throw new AppError('Donation already confirmed', 400);
+      throw AppError.from('DONATION_002');
     }
 
     // IMPORTANT: multipliers must be applied at the time the payment is confirmed,
@@ -72,7 +72,7 @@ export class DonationService {
       });
 
       if (confirmResult.count === 0) {
-        throw new AppError('Donation already confirmed', 400);
+        throw AppError.from('DONATION_002');
       }
 
       const updatedDonation = await tx.donation.findUniqueOrThrow({ where: { id } });
@@ -207,7 +207,7 @@ export class DonationService {
     });
 
     if (!donation) {
-      throw new AppError('Donation not found', 404);
+      throw AppError.from('DONATION_001');
     }
 
     return sanitizeDonorIdentity(donation, requestingUserId, requestingUserRole);
@@ -224,19 +224,19 @@ export class DonationService {
     const donation = await prisma.donation.findUnique({ where: { id } });
 
     if (!donation) {
-      throw new AppError('Donation not found', 404);
+      throw AppError.from('DONATION_001');
     }
 
     if (donation.userId !== requestingUserId) {
-      throw new AppError('You can only reveal identity for your own donations', 403);
+      throw AppError.from('COMMON_001', 'You can only reveal identity for your own donations');
     }
 
     if (!donation.isAnonymous) {
-      throw new AppError('Donation is already identified', 400);
+      throw AppError.from('DONATION_003', 'Donation is already identified');
     }
 
     if (donation.revealedAt) {
-      throw new AppError('Identity already revealed for this donation', 400);
+      throw AppError.from('DONATION_003', 'Identity already revealed for this donation');
     }
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -273,15 +273,15 @@ export class DonationService {
     });
 
     if (!donation) {
-      throw new AppError('Donation not found', 404);
+      throw AppError.from('DONATION_001');
     }
 
     if (donation.status !== DonationStatus.CONFIRMED) {
-      throw new AppError('Only confirmed donations can be refunded', 400);
+      throw AppError.from('DONATION_004', 'Only confirmed donations can be refunded');
     }
 
     if (donation.userId !== userId && userRole !== Role.ADMIN) {
-      throw new AppError('You do not have permission to refund this donation', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to refund this donation');
     }
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -292,7 +292,7 @@ export class DonationService {
       });
 
       if (!campaign || Number(campaign.currentAmount) < Number(donation.amount)) {
-        throw new AppError('Refund amount exceeds campaign current balance', 400);
+        throw AppError.from('DONATION_004', 'Refund amount exceeds campaign current balance');
       }
 
       // Update donation status

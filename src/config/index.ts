@@ -9,6 +9,40 @@ export const config = {
   
   database: {
     url: process.env.DATABASE_URL!,
+
+    // Connection pool. Defaults are derived from CPU count and the server
+    // connection budget at startup; see src/config/dbPool.ts and
+    // docs/DATABASE_POOLING.md.
+    pool: {
+      // Explicit per-process pool size. Leave unset to auto-size.
+      max: process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : undefined,
+      // Number of app processes/replicas sharing this PostgreSQL server.
+      instances: parseInt(process.env.DB_POOL_INSTANCES || '1', 10),
+      // Connections reserved for the app across the whole fleet. PostgreSQL
+      // defaults to max_connections=100; leave headroom for psql/migrations.
+      serverConnectionBudget: parseInt(process.env.DB_SERVER_CONNECTION_BUDGET || '80', 10),
+      // Seconds a query waits for a free pooled connection before failing.
+      timeoutSeconds: parseInt(process.env.DB_POOL_TIMEOUT_SECONDS || '10', 10),
+      // Seconds to wait while establishing a new connection.
+      connectTimeoutSeconds: parseInt(process.env.DB_CONNECT_TIMEOUT_SECONDS || '10', 10),
+      // Seconds a single statement may hold a connection (0 disables).
+      socketTimeoutSeconds: parseInt(process.env.DB_SOCKET_TIMEOUT_SECONDS || '0', 10),
+      // Startup connect retries with exponential backoff.
+      connectRetries: parseInt(process.env.DB_CONNECT_RETRIES || '5', 10),
+      connectRetryBaseDelayMs: parseInt(process.env.DB_CONNECT_RETRY_BASE_DELAY_MS || '500', 10),
+    },
+
+    monitoring: {
+      // Periodic pool sampling. 0 disables the sampler.
+      intervalMs: parseInt(process.env.DB_MONITOR_INTERVAL_MS || '60000', 10),
+      // Warn once pool utilisation crosses this fraction of the limit.
+      saturationThreshold: parseFloat(process.env.DB_POOL_SATURATION_THRESHOLD || '0.8'),
+      // Queries slower than this are counted and logged.
+      slowQueryThresholdMs: parseInt(process.env.DB_SLOW_QUERY_THRESHOLD_MS || '500', 10),
+      logSlowQueries: process.env.DB_LOG_SLOW_QUERIES !== 'false',
+      // Client-side abort for runaway queries (0 disables, the default).
+      queryTimeoutMs: parseInt(process.env.DB_QUERY_TIMEOUT_MS || '0', 10),
+    },
   },
   
   redis: {

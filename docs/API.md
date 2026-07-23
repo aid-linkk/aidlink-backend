@@ -42,6 +42,7 @@ Content-Type: application/json
   "success": false,
   "error": {
     "code": "VALIDATION_ERROR",
+    "errorCode": "CAMPAIGN_001",
     "message": "Validation failed",
     "details": {
       "field": "Validation error"
@@ -49,6 +50,14 @@ Content-Type: application/json
   }
 }
 ```
+
+- `code` is one of a small set of generic HTTP-category codes (`VALIDATION_ERROR`, `UNAUTHORIZED`,
+  `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `RATE_LIMITED`, ...) derived from the response's HTTP status.
+- `errorCode` is a stable, domain-specific taxonomy code (e.g. `AUTH_001`, `CAMPAIGN_002`) that
+  identifies the exact error condition, independent of wording. It is present on business-logic
+  errors raised by the service layer; framework-level errors (auth middleware, request validation)
+  only set `code`. See **[Error Code Reference](ERROR_CODES.md)** for the full catalog — every code's
+  HTTP status, cause, and recommended resolution.
 
 ### Pagination
 

@@ -2,6 +2,13 @@ import { Prisma } from '@prisma/client';
 import prisma from '../config/database';
 import { getOrSet, buildKey } from '../utils/cache';
 
+const DEFAULT_PAGE = 1;
+const DEFAULT_LIMIT = 20;
+const DEFAULT_SORT_ORDER = 'desc' as const;
+
+type CampaignSortField = 'createdAt' | 'updatedAt' | 'title' | 'targetAmount' | 'status';
+type DonationSortField = 'createdAt' | 'amount' | 'status';
+
 export interface SearchFilters {
   query?: string;
   entityType?: string;
@@ -15,6 +22,57 @@ export interface SearchFilters {
   sortOrder?: 'asc' | 'desc';
   page?: number;
   limit?: number;
+}
+
+interface PaginationParams {
+  page: number;
+  limit: number;
+  skip: number;
+}
+
+interface PaginationMetadata {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+function normalizePagination(page?: number, limit?: number): PaginationParams {
+  const normalizedPage = Math.max(1, page ?? DEFAULT_PAGE);
+  const normalizedLimit = Math.max(1, Math.min(100, limit ?? DEFAULT_LIMIT));
+  return {
+    page: normalizedPage,
+    limit: normalizedLimit,
+    skip: (normalizedPage - 1) * normalizedLimit,
+  };
+}
+
+function buildPaginationMetadata(page: number, limit: number, total: number): PaginationMetadata {
+  return {
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit),
+  };
+}
+
+function validateAndNormalizeSort<T extends string>(
+  sortBy: string | undefined,
+  validFields: T[],
+  defaultField: T,
+  sortOrder: 'asc' | 'desc' | undefined
+): { sortBy: T; sortOrder: 'asc' | 'desc' } {
+  const validSortBy = validFields.includes(sortBy as T) ? (sortBy as T) : defaultField;
+  const validSortOrder = sortOrder === 'asc' ? 'asc' : DEFAULT_SORT_ORDER;
+  return { sortBy: validSortBy, sortOrder: validSortOrder };
+}
+
+function buildCampaignOrderBy(sortBy: CampaignSortField, sortOrder: 'asc' | 'desc'): any {
+  return [{ [sortBy]: sortOrder }, { id: 'asc' }];
+}
+
+function buildDonationOrderBy(sortBy: DonationSortField, sortOrder: 'asc' | 'desc'): any {
+  return [{ [sortBy]: sortOrder }, { id: 'asc' }];
 }
 
 export type BeneficiarySortField =
@@ -198,27 +256,19 @@ function relevanceFilterConditions(filters: SearchFilters, amountColumn: string)
 
 export class SearchService {
   static async searchCampaigns(filters: SearchFilters) {
-    const {
-      query,
-      dateFrom,
-      dateTo,
-      status,
-      minAmount,
-      maxAmount,
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-      page = 1,
-      limit = 20,
-    } = filters;
+    const { query, dateFrom, dateTo, status, minAmount, maxAmount, sortBy, sortOrder, page, limit } = filters;
 
     const cacheKey = buildKey('search', `campaigns:${JSON.stringify(filters)}`);
 
     return getOrSet(cacheKey, 120, async () => {
-      if (sortBy === 'relevance' && query) {
-        return this.searchCampaignsByRelevance(filters, query);
-      }
-
-      const skip = (page - 1) * limit;
+      const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(page, limit);
+      const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
+        sortBy,
+        ['createdAt', 'updatedAt', 'title', 'targetAmount', 'status'],
+        'createdAt',
+        sortOrder
+      );
+      const orderBy = buildCampaignOrderBy(validSortBy, validSortOrder);
 
       const where: any = {};
 
@@ -249,8 +299,8 @@ export class SearchService {
         prisma.campaign.findMany({
           where,
           skip,
-          take: limit,
-          orderBy: { [sortBy]: sortOrder },
+          take: normalizedLimit,
+          orderBy,
           include: {
             organization: {
               select: {
@@ -270,35 +320,22 @@ export class SearchService {
 
       return {
         data: campaigns,
-        pagination: {
-          page,
-          limit,
-          total,
-          totalPages: Math.ceil(total / limit),
-        },
+        pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, total),
       };
     });
   }
 
   static async searchDonations(filters: SearchFilters) {
-    const {
-      query,
-      dateFrom,
-      dateTo,
-      status,
-      minAmount,
-      maxAmount,
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-      page = 1,
-      limit = 20,
-    } = filters;
+    const { query, dateFrom, dateTo, status, minAmount, maxAmount, sortBy, sortOrder, page, limit } = filters;
 
-    if (sortBy === 'relevance' && query) {
-      return this.searchDonationsByRelevance(filters, query);
-    }
-
-    const skip = (page - 1) * limit;
+    const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(page, limit);
+    const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
+      sortBy,
+      ['createdAt', 'amount', 'status'],
+      'createdAt',
+      sortOrder
+    );
+    const orderBy = buildDonationOrderBy(validSortBy, validSortOrder);
 
     const where: any = {};
 
@@ -330,8 +367,8 @@ export class SearchService {
       prisma.donation.findMany({
         where,
         skip,
-        take: limit,
-        orderBy: { [sortBy]: sortOrder },
+        take: normalizedLimit,
+        orderBy,
         include: {
           campaign: {
             select: {
@@ -355,12 +392,7 @@ export class SearchService {
 
     return {
       data: donations,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-      },
+      pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, total),
     };
   }
 
@@ -604,24 +636,25 @@ export class SearchService {
   }
 
   static async searchBeneficiaries(filters: BeneficiarySearchFilters) {
-    const {
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-      page = 1,
-      limit = 20,
-    } = filters;
+    const { sortBy, sortOrder, page, limit } = filters;
 
     const now = new Date();
-    const skip = (page - 1) * limit;
+    const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(page, limit);
+    const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
+      sortBy,
+      ['relevance', 'createdAt', 'updatedAt', 'riskScore', 'age', 'familySize'],
+      'createdAt',
+      sortOrder
+    );
     const where = this.buildBeneficiaryWhere(filters, now);
-    const orderBy = this.buildBeneficiaryOrderBy(sortBy, sortOrder);
+    const orderBy = this.buildBeneficiaryOrderBy(validSortBy, validSortOrder);
     const facetQueries = this.beneficiaryFacetQueries(filters, now);
 
     const [beneficiaries, total, ...facetResults] = await prisma.$transaction([
       prisma.beneficiary.findMany({
         where,
         skip,
-        take: limit,
+        take: normalizedLimit,
         orderBy,
         include: {
           user: {
@@ -643,22 +676,19 @@ export class SearchService {
 
     return {
       data: beneficiaries,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-      },
+      pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, total),
       facets: this.assembleBeneficiaryFacets(facetResults),
     };
   }
 
   static async globalSearch(filters: SearchFilters) {
-    const { query, page = 1, limit = 10 } = filters;
+    const { query, page, limit } = filters;
 
     if (!query) {
       throw new Error('Query is required for global search');
     }
+
+    const { page: normalizedPage, limit: normalizedLimit } = normalizePagination(page, limit);
 
     // Search across multiple entities
     const [campaigns, donations, beneficiaries] = await Promise.all([
@@ -669,7 +699,7 @@ export class SearchService {
             { description: { contains: query, mode: 'insensitive' } },
           ],
         },
-        take: limit,
+        take: normalizedLimit,
         select: {
           id: true,
           title: true,
@@ -683,7 +713,7 @@ export class SearchService {
             { donorMessage: { contains: query, mode: 'insensitive' } },
           ],
         },
-        take: limit,
+        take: normalizedLimit,
         select: {
           id: true,
           amount: true,
@@ -697,7 +727,7 @@ export class SearchService {
             { lastName: { contains: query, mode: 'insensitive' } },
           ],
         },
-        take: limit,
+        take: normalizedLimit,
         select: {
           id: true,
           firstName: true,
@@ -715,12 +745,7 @@ export class SearchService {
 
     return {
       data: results,
-      pagination: {
-        page,
-        limit,
-        total: results.length,
-        totalPages: Math.ceil(results.length / limit),
-      },
+      pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, results.length),
     };
   }
 

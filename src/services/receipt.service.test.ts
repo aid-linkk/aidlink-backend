@@ -164,6 +164,16 @@ describe('ReceiptService', () => {
       organization: { name: 'Org One' },
     };
 
+    let sleepSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      sleepSpy = jest.spyOn(ReceiptService as any, 'sleep').mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      sleepSpy.mockRestore();
+    });
+
     it('sends the email with a PDF attachment and marks it SENT', async () => {
       (prisma.taxReceipt.findUnique as jest.Mock).mockResolvedValue(receipt);
       (prisma.taxReceipt.update as jest.Mock).mockResolvedValue({ ...receipt, emailDeliveryStatus: 'SENT' });
@@ -188,7 +198,10 @@ describe('ReceiptService', () => {
 
     it('marks the receipt FAILED and returns null when delivery fails', async () => {
       (prisma.taxReceipt.findUnique as jest.Mock).mockResolvedValue(receipt);
-      mockedNotification.sendEmail.mockRejectedValueOnce(new Error('smtp down'));
+      // Persistent rejection: a plain Error has no .code, so classifyDeliveryError
+      // treats it as transient and the internal retry loop will call sendEmail up
+      // to 3 times — a single mockRejectedValueOnce would let attempt 2 "succeed".
+      mockedNotification.sendEmail.mockRejectedValue(new Error('smtp down'));
       (prisma.taxReceipt.update as jest.Mock).mockResolvedValue({});
 
       const result = await ReceiptService.sendReceiptEmail('rec1');
@@ -200,12 +213,84 @@ describe('ReceiptService', () => {
 
     it('rethrows on failure when throwOnError is set (for worker retries)', async () => {
       (prisma.taxReceipt.findUnique as jest.Mock).mockResolvedValue(receipt);
-      mockedNotification.sendEmail.mockRejectedValueOnce(new Error('smtp down'));
+      mockedNotification.sendEmail.mockRejectedValue(new Error('smtp down'));
       (prisma.taxReceipt.update as jest.Mock).mockResolvedValue({});
 
       await expect(
         ReceiptService.sendReceiptEmail('rec1', { throwOnError: true }),
       ).rejects.toThrow('smtp down');
+    });
+
+    describe('retry behavior', () => {
+      const transientError = () => Object.assign(new Error('Connection reset'), { code: 'ECONNRESET' });
+      const permanentError = () => Object.assign(new Error('Invalid recipient'), { code: 'EENVELOPE' });
+
+      it('retries a transient failure and succeeds on a later attempt', async () => {
+        (prisma.taxReceipt.findUnique as jest.Mock).mockResolvedValue(receipt);
+        (prisma.taxReceipt.update as jest.Mock).mockResolvedValue({});
+        mockedNotification.sendEmail
+          .mockRejectedValueOnce(transientError())
+          .mockRejectedValueOnce(transientError())
+          .mockResolvedValueOnce(undefined);
+
+        const result = await ReceiptService.sendReceiptEmail('rec1');
+
+        expect(mockedNotification.sendEmail).toHaveBeenCalledTimes(3);
+        expect(sleepSpy).toHaveBeenCalledTimes(2);
+        expect(result).not.toBeNull();
+        const updateArgs = (prisma.taxReceipt.update as jest.Mock).mock.calls[0][0];
+        expect(updateArgs.data.emailDeliveryStatus).toBe('SENT');
+        expect(updateArgs.data.attemptCount).toBe(3);
+        expect(updateArgs.data.lastError).toBeNull();
+      });
+
+      it('exhausts all attempts on persistent transient failure and marks FAILED', async () => {
+        (prisma.taxReceipt.findUnique as jest.Mock).mockResolvedValue(receipt);
+        (prisma.taxReceipt.update as jest.Mock).mockResolvedValue({});
+        mockedNotification.sendEmail.mockRejectedValue(transientError());
+
+        const result = await ReceiptService.sendReceiptEmail('rec1');
+
+        expect(mockedNotification.sendEmail).toHaveBeenCalledTimes(3);
+        expect(sleepSpy).toHaveBeenCalledTimes(2);
+        expect(result).toBeNull();
+        const updateArgs = (prisma.taxReceipt.update as jest.Mock).mock.calls[0][0];
+        expect(updateArgs.data.emailDeliveryStatus).toBe('FAILED');
+        expect(updateArgs.data.attemptCount).toBe(3);
+        expect(updateArgs.data.lastError).toBe('Connection reset');
+      });
+
+      it('stops immediately on a permanent failure without retrying', async () => {
+        (prisma.taxReceipt.findUnique as jest.Mock).mockResolvedValue(receipt);
+        (prisma.taxReceipt.update as jest.Mock).mockResolvedValue({});
+        mockedNotification.sendEmail.mockRejectedValue(permanentError());
+
+        const result = await ReceiptService.sendReceiptEmail('rec1');
+
+        expect(mockedNotification.sendEmail).toHaveBeenCalledTimes(1);
+        expect(sleepSpy).not.toHaveBeenCalled();
+        expect(result).toBeNull();
+        const updateArgs = (prisma.taxReceipt.update as jest.Mock).mock.calls[0][0];
+        expect(updateArgs.data.emailDeliveryStatus).toBe('FAILED');
+        expect(updateArgs.data.attemptCount).toBe(1);
+        expect(updateArgs.data.lastError).toBe('Invalid recipient');
+      });
+
+      it('persists SENT status and attemptCount 1 on first-attempt success', async () => {
+        (prisma.taxReceipt.findUnique as jest.Mock).mockResolvedValue(receipt);
+        (prisma.taxReceipt.update as jest.Mock).mockResolvedValue({});
+        mockedNotification.sendEmail.mockResolvedValueOnce(undefined);
+
+        const result = await ReceiptService.sendReceiptEmail('rec1');
+
+        expect(mockedNotification.sendEmail).toHaveBeenCalledTimes(1);
+        expect(result).not.toBeNull();
+        const updateArgs = (prisma.taxReceipt.update as jest.Mock).mock.calls[0][0];
+        expect(updateArgs.data.emailDeliveryStatus).toBe('SENT');
+        expect(updateArgs.data.attemptCount).toBe(1);
+        expect(updateArgs.data.lastAttemptAt).toBeInstanceOf(Date);
+        expect(updateArgs.data.lastError).toBeNull();
+      });
     });
   });
 

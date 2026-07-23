@@ -3,7 +3,9 @@
 
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["postgresqlExtensions"]
+  // "metrics" exposes connection-pool gauges via prisma.$metrics, consumed by
+  // /health/db and /api/v1/admin/database/metrics.
+  previewFeatures = ["postgresqlExtensions", "metrics"]
 }
 
 datasource db {
@@ -655,6 +657,7 @@ model KYCSubmission {
 
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   beneficiary Beneficiary? @relation(fields: [beneficiaryId], references: [id], onDelete: Cascade)
+  documentHistory KYCDocumentHistory[]
 
   @@index([userId])
   @@index([beneficiaryId])
@@ -662,6 +665,29 @@ model KYCSubmission {
   @@index([createdAt])
   @@index([ipAddress])
   @@index([deviceFingerprint])
+}
+
+// Immutable audit trail of every KYC document replacement.
+// One row is written each time uploadKycDocument overwrites an existing URL.
+// Rows are append-only and never updated or deleted.
+model KYCDocumentHistory {
+  id            String   @id @default(cuid())
+  submissionId  String
+  // Which field was replaced: "document" | "selfie"
+  field         String
+  // The URL that was in place before this upload
+  replacedUrl   String
+  // The URL that replaced it
+  newUrl        String
+  // User who performed the upload
+  uploadedBy    String
+  replacedAt    DateTime @default(now())
+
+  submission KYCSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@index([field])
+  @@index([replacedAt])
 }
 
 // ============================================
@@ -703,17 +729,28 @@ enum NotificationStatus {
   ARCHIVED
 }
 
+enum NotificationDeliveryStatus {
+  PENDING
+  SENT
+  FAILED_TRANSIENT
+  FAILED_PERMANENT
+}
+
 model Notification {
-  id        String             @id @default(cuid())
-  userId    String
-  type      NotificationType
-  title     String
-  message   String             @db.Text
-  status    NotificationStatus @default(UNREAD)
-  metadata  Json?
-  sentVia   String[]           @default([])
-  readAt    DateTime?
-  createdAt DateTime           @default(now())
+  id             String                     @id @default(cuid())
+  userId         String
+  type           NotificationType
+  title          String
+  message        String                     @db.Text
+  status         NotificationStatus         @default(UNREAD)
+  deliveryStatus NotificationDeliveryStatus @default(PENDING)
+  attemptCount   Int                        @default(0)
+  lastAttemptAt  DateTime?
+  lastError      String?                    @db.Text
+  metadata       Json?
+  sentVia        String[]                   @default([])
+  readAt         DateTime?
+  createdAt      DateTime                   @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -721,6 +758,7 @@ model Notification {
   @@index([status])
   @@index([type])
   @@index([createdAt])
+  @@index([deliveryStatus])
 }
 
 // ============================================
@@ -1279,6 +1317,9 @@ model TaxReceipt {
   generatedAt         DateTime           @default(now())
   emailSentAt         DateTime?
   emailDeliveryStatus ReceiptEmailStatus @default(PENDING)
+  attemptCount        Int                @default(0)
+  lastAttemptAt       DateTime?
+  lastError           String?            @db.Text
   metadata            Json?
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt

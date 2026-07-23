@@ -152,6 +152,13 @@ components:
                 - RATE_LIMITED
                 - INTERNAL_SERVER_ERROR
               example: VALIDATION_ERROR
+            errorCode:
+              type: string
+              description: >
+                Stable domain-specific taxonomy code (e.g. "CAMPAIGN_002"), present on
+                business-logic errors. See docs/ERROR_CODES.md for the full catalog with HTTP
+                status, cause, and recommended resolution for every code.
+              example: CAMPAIGN_002
             message:
               type: string
               example: Validation failed
@@ -870,6 +877,173 @@ components:
 # PATHS
 # ---------------------------------------------------------------------------
 paths:
+
+  # ==========================================================================
+  # HEALTH
+  # ==========================================================================
+
+  /health/db:
+    get:
+      tags: [Admin]
+      summary: Database readiness and connection pool state
+      description: |
+        Round-trips a trivial query and reports connection pool gauges together
+        with a summary of query performance.
+
+        Status values:
+        - `healthy` — the database answered and the pool has spare capacity
+        - `degraded` — queries are queueing or pool utilisation is at/above the
+          configured saturation threshold (still HTTP 200)
+        - `unhealthy` — the probe query failed (HTTP 503)
+
+        `pool.available` is `false` when the Prisma `metrics` preview feature is
+        not enabled in the generated client; the remaining fields stay valid.
+      operationId: getDatabaseHealth
+      security: []
+      responses:
+        "200":
+          description: Database reachable (healthy or degraded)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                data:
+                  status: healthy
+                  latencyMs: 3
+                  pool:
+                    open: 4
+                    busy: 1
+                    idle: 3
+                    waiting: 0
+                    limit: 13
+                    utilization: 0.08
+                    available: true
+                  queries:
+                    total: 15234
+                    errors: 2
+                    slow: 11
+                    errorRate: 0.0001
+                    p95LatencyMs: 42.5
+                  timestamp: "2024-05-01T12:00:00.000Z"
+        "503":
+          description: Database unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: false
+                data:
+                  status: unhealthy
+                  latencyMs: null
+                  error: "Can't reach database server"
+
+  /api/v1/admin/database/metrics:
+    get:
+      tags: [Admin]
+      summary: Connection pool and query performance metrics
+      description: |
+        Full in-process metrics snapshot: pool gauges and settings, latency
+        percentiles and histogram, connection-event counters, the operations
+        consuming the most cumulative time, and recent slow queries.
+
+        Metrics are per-process and in-memory; scrape them into a time-series
+        store for historical analysis.
+      operationId: getDatabaseMetrics
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                data:
+                  pool:
+                    open: 8
+                    busy: 6
+                    idle: 2
+                    waiting: 0
+                    limit: 13
+                    utilization: 0.46
+                    available: true
+                    settings:
+                      connectionLimit: 13
+                      poolTimeoutSeconds: 10
+                      connectTimeoutSeconds: 10
+                      socketTimeoutSeconds: 0
+                    monitorIntervalMs: 60000
+                  uptimeMs: 3600000
+                  since: "2024-05-01T11:00:00.000Z"
+                  queries:
+                    total: 15234
+                    errors: 2
+                    slow: 11
+                    errorRate: 0.0001
+                    queriesPerSecond: 4.23
+                    latencyMs:
+                      avg: 12.4
+                      p50: 8
+                      p95: 42.5
+                      p99: 180.2
+                      max: 940.1
+                    histogram:
+                      "<=10ms": 9800
+                      "<=50ms": 4900
+                      ">5000ms": 0
+                  connections:
+                    connectAttempts: 1
+                    connectFailures: 0
+                    connectRetries: 0
+                    disconnects: 0
+                    poolTimeouts: 0
+                    queryTimeouts: 0
+                  topOperations:
+                    - operation: Campaign.findMany
+                      count: 2400
+                      errors: 0
+                      totalMs: 61200
+                      maxMs: 940.1
+                      avgMs: 25.5
+                  slowQueries:
+                    - operation: Donation.groupBy
+                      durationMs: 940.1
+                      at: "2024-05-01T11:58:12.000Z"
+                  slowQueryThresholdMs: 500
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/database/metrics/reset:
+    post:
+      tags: [Admin]
+      summary: Reset database metrics counters
+      description: |
+        Clears the in-memory query metrics for this process. Useful before a
+        load-test run so the resulting snapshot covers only that run.
+      operationId: resetDatabaseMetrics
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Metrics cleared
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                message: Database metrics reset
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
 
   # ==========================================================================
   # AUTH

@@ -143,6 +143,37 @@ export class AnalyticsController {
     }
   }
 
+  static async exportReport(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      if (!req.user || req.user.role !== 'ADMIN') {
+        throw new AppError('Admin access required', 403);
+      }
+
+      const { reportType } = req.params;
+      const format = (req.query.format as string || '').toLowerCase() === 'json' ? 'json' : 'csv';
+
+      const filters = {
+        campaignId: req.query.campaignId as string | undefined,
+        userId: req.query.userId as string | undefined,
+        organizationId: req.query.organizationId as string | undefined,
+        startDate: req.query.startDate ? new Date(req.query.startDate as string) : undefined,
+        endDate: req.query.endDate ? new Date(req.query.endDate as string) : undefined,
+      };
+
+      const { content, filename, contentType } = await AnalyticsService.exportReport(
+        reportType,
+        filters,
+        format
+      );
+
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.status(200).send(content);
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async getAggregatedCampaignAnalytics(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       if (!req.user || req.user.role !== 'ADMIN') {

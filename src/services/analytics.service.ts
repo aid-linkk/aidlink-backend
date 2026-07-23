@@ -3,6 +3,8 @@ import redis from '../config/redis';
 import logger from '../config/logger';
 import { config } from '../config';
 import { stripDonorPII } from '../utils/anonymity';
+import { AppError } from '../middleware/error';
+import { toCsv } from '../utils/csv';
 import {
   TrendingCampaignFilters,
   TrendingCampaign,
@@ -16,6 +18,16 @@ import {
 // Redis cache key prefixes
 const CACHE_PREFIX_STATS = 'campaign:stats:';
 const CACHE_PREFIX_TRENDING_DATA = 'campaigns:trending:data';
+
+export const EXPORT_REPORT_TYPES = ['campaign', 'donor', 'organization', 'platform'] as const;
+export type ExportReportType = (typeof EXPORT_REPORT_TYPES)[number];
+export type ExportFormat = 'csv' | 'json';
+
+export interface ExportedReport {
+  content: string;
+  filename: string;
+  contentType: string;
+}
 
 export class AnalyticsService {
   static async getCampaignAnalytics(campaignId: string): Promise<any> {
@@ -291,6 +303,159 @@ export class AnalyticsService {
 
       default:
         throw new Error('Invalid report type');
+    }
+  }
+
+  // ============================================
+  // ADMIN ANALYTICS EXPORT
+  // ============================================
+
+  /**
+   * Generate a downloadable export (CSV or JSON) for a supported report type.
+   * Reuses generateReport() for the underlying data so the export never
+   * drifts from the existing JSON analytics contract.
+   */
+  static async exportReport(
+    reportType: string,
+    filters: any,
+    format: ExportFormat = 'csv'
+  ): Promise<ExportedReport> {
+    if (!EXPORT_REPORT_TYPES.includes(reportType as ExportReportType)) {
+      throw new AppError(
+        `Invalid report type. Supported types: ${EXPORT_REPORT_TYPES.join(', ')}`,
+        400
+      );
+    }
+
+    let report: any;
+    try {
+      report = await this.generateReport(reportType, filters);
+    } catch (err) {
+      // generateReport throws plain Errors for missing/invalid filters (e.g.
+      // "Campaign ID is required") — surface those as 400s, not 500s.
+      throw err instanceof Error ? new AppError(err.message, 400) : err;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `${reportType}-analytics-${timestamp}.${format}`;
+
+    if (format === 'json') {
+      return {
+        content: JSON.stringify(report, null, 2),
+        filename,
+        contentType: 'application/json',
+      };
+    }
+
+    const { columns, rows } = this.buildExportRows(reportType as ExportReportType, report);
+    return {
+      content: toCsv(columns, rows),
+      filename,
+      contentType: 'text/csv',
+    };
+  }
+
+  /**
+   * Flattens a generateReport() result into CSV-ready columns/rows per report type.
+   */
+  private static buildExportRows(
+    reportType: ExportReportType,
+    report: any
+  ): { columns: string[]; rows: Array<Record<string, unknown>> } {
+    switch (reportType) {
+      case 'campaign':
+        return {
+          columns: [
+            'campaignId',
+            'title',
+            'status',
+            'targetAmount',
+            'currentAmount',
+            'progressPercentage',
+            'totalDonations',
+            'totalRaised',
+            'avgDonation',
+            'totalDistributions',
+            'totalDistributed',
+            'beneficiariesTotal',
+          ],
+          rows: [
+            {
+              campaignId: report.campaign.id,
+              title: report.campaign.title,
+              status: report.campaign.status,
+              targetAmount: report.campaign.targetAmount,
+              currentAmount: report.campaign.currentAmount,
+              progressPercentage: report.campaign.progress,
+              totalDonations: report.donations.total,
+              totalRaised: report.donations.totalRaised,
+              avgDonation: report.donations.avgDonation,
+              totalDistributions: report.distributions.total,
+              totalDistributed: report.distributions.totalDistributed,
+              beneficiariesTotal: report.beneficiaries.total,
+            },
+          ],
+        };
+
+      case 'donor':
+        return {
+          columns: ['donationId', 'campaignId', 'campaignTitle', 'amount', 'createdAt'],
+          rows: report.recentDonations.map((d: any) => ({
+            donationId: d.id,
+            campaignId: d.campaign?.id,
+            campaignTitle: d.campaign?.title,
+            amount: d.amount,
+            createdAt: d.createdAt,
+          })),
+        };
+
+      case 'organization':
+        return {
+          columns: [
+            'totalCampaigns',
+            'activeCampaigns',
+            'completedCampaigns',
+            'totalRaised',
+            'avgPerCampaign',
+            'totalBeneficiaries',
+            'totalDistributions',
+          ],
+          rows: [
+            {
+              totalCampaigns: report.campaigns.total,
+              activeCampaigns: report.campaigns.active,
+              completedCampaigns: report.campaigns.completed,
+              totalRaised: report.funds.totalRaised,
+              avgPerCampaign: report.funds.avgPerCampaign,
+              totalBeneficiaries: report.impact.totalBeneficiaries,
+              totalDistributions: report.impact.totalDistributions,
+            },
+          ],
+        };
+
+      case 'platform':
+        return {
+          columns: [
+            'totalUsers',
+            'totalCampaigns',
+            'totalDonations',
+            'totalDistributions',
+            'totalBeneficiaries',
+            'totalRaised',
+            'totalDistributedAmount',
+          ],
+          rows: [
+            {
+              totalUsers: report.overview.totalUsers,
+              totalCampaigns: report.overview.totalCampaigns,
+              totalDonations: report.overview.totalDonations,
+              totalDistributions: report.overview.totalDistributions,
+              totalBeneficiaries: report.overview.totalBeneficiaries,
+              totalRaised: report.financials.totalRaised,
+              totalDistributedAmount: report.financials.totalDistributed,
+            },
+          ],
+        };
     }
   }
 

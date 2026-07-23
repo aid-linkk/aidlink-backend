@@ -154,4 +154,40 @@ const prismaMock: any = {
   $queryRaw: jest.fn(),
 };
 
+export const poolSettings = {
+  connectionLimit: 10,
+  poolTimeoutSeconds: 10,
+  connectTimeoutSeconds: 10,
+  socketTimeoutSeconds: 0,
+};
+
+export const databaseMetrics = {
+  recordQuery: jest.fn(),
+  recordConnectionEvent: jest.fn(),
+  isSlow: jest.fn().mockReturnValue(false),
+  getSlowQueryThresholdMs: jest.fn().mockReturnValue(500),
+  snapshot: jest.fn().mockReturnValue({}),
+  reset: jest.fn(),
+};
+
+export const connectDatabase = jest.fn().mockResolvedValue(undefined);
+export const disconnectDatabase = jest.fn().mockResolvedValue(undefined);
+export const startPoolMonitoring = jest.fn();
+export const stopPoolMonitoring = jest.fn();
+export const getPoolStats = jest.fn().mockResolvedValue({
+  open: 0,
+  busy: 0,
+  idle: 0,
+  waiting: 0,
+  limit: 10,
+  utilization: 0,
+  available: false,
+});
+export const checkDatabaseHealth = jest.fn().mockResolvedValue({
+  status: 'healthy',
+  latencyMs: 1,
+  pool: { open: 0, busy: 0, idle: 0, waiting: 0, limit: 10, utilization: 0, available: false },
+  queries: { total: 0, errors: 0, slow: 0, errorRate: 0, p95LatencyMs: 0 },
+});
+
 export default prismaMock;

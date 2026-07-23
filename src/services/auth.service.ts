@@ -58,11 +58,11 @@ export class AuthService {
     const normalizedEmail = email.toLowerCase();
 
     const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-    if (existingUser) throw new AppError('User with this email already exists', 409);
+    if (existingUser) throw AppError.from('AUTH_001', 'User with this email already exists');
 
     if (username) {
       const existingUsername = await prisma.user.findUnique({ where: { username } });
-      if (existingUsername) throw new AppError('Username already taken', 409);
+      if (existingUsername) throw AppError.from('AUTH_001', 'Username already taken');
     }
 
     const passwordHash = await CryptoUtils.hashPassword(password);
@@ -114,7 +114,7 @@ export class AuthService {
     const user = await prisma.user.findUnique({ where: { verificationToken: tokenHash } });
 
     if (!user) {
-      throw new AppError('Verification link expired or invalid.', 400);
+      throw AppError.from('AUTH_005');
     }
 
     if (user.emailVerified) {
@@ -125,9 +125,9 @@ export class AuthService {
     // Check failed attempts lockout
     if (user.failedVerifyAttempts >= MAX_FAILED_ATTEMPTS) {
       await createVerificationLog(user.id, 'FAILED', tokenHash, meta?.ipAddress, meta?.userAgent);
-      throw new AppError(
-        'Too many failed verification attempts. Please request a new verification email.',
-        429
+      throw AppError.from(
+        'AUTH_006',
+        'Too many failed verification attempts. Please request a new verification email.'
       );
     }
 
@@ -137,7 +137,7 @@ export class AuthService {
         data: { failedVerifyAttempts: { increment: 1 } },
       });
       await createVerificationLog(user.id, 'EXPIRED', tokenHash, meta?.ipAddress, meta?.userAgent);
-      throw new AppError('Verification link expired or invalid.', 400);
+      throw AppError.from('AUTH_005');
     }
 
     await prisma.user.update({
@@ -179,7 +179,7 @@ export class AuthService {
       await redis.expire(rateLimitKey, 60 * 60); // 1 hour TTL
     }
     if (count > RESEND_RATE_LIMIT) {
-      throw new AppError('Too many resend attempts. Please try again later.', 429);
+      throw AppError.from('AUTH_006', 'Too many resend attempts. Please try again later.');
     }
 
     const token = CryptoUtils.generateVerificationToken();
@@ -207,19 +207,19 @@ export class AuthService {
     const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
 
     if (!user || !user.passwordHash) {
-      throw new AppError('Invalid credentials', 401);
+      throw AppError.from('AUTH_002');
     }
 
     const isValidPassword = await CryptoUtils.comparePassword(password, user.passwordHash);
-    if (!isValidPassword) throw new AppError('Invalid credentials', 401);
+    if (!isValidPassword) throw AppError.from('AUTH_002');
 
-    if (user.status === UserStatus.SUSPENDED) throw new AppError('Account suspended', 403);
-    if (user.status === UserStatus.DELETED) throw new AppError('Account deleted', 403);
+    if (user.status === UserStatus.SUSPENDED) throw AppError.from('AUTH_003', 'Account suspended');
+    if (user.status === UserStatus.DELETED) throw AppError.from('AUTH_003', 'Account deleted');
 
     if (!user.emailVerified) {
-      throw new AppError(
-        'Please verify your email before logging in. Check your inbox or resend the verification email.',
-        403
+      throw AppError.from(
+        'AUTH_004',
+        'Please verify your email before logging in. Check your inbox or resend the verification email.'
       );
     }
 
@@ -266,11 +266,11 @@ export class AuthService {
       const payload = JWTUtils.verifyToken(refreshToken) as JWTPayload;
 
       const session = await prisma.session.findUnique({ where: { refreshToken } });
-      if (!session) throw new AppError('Invalid refresh token', 401);
+      if (!session) throw AppError.from('AUTH_007');
 
       if (session.expiresAt < new Date()) {
         await prisma.session.delete({ where: { id: session.id } });
-        throw new AppError('Session expired', 401);
+        throw AppError.from('AUTH_007', 'Session expired');
       }
 
       const tokens = this.generateTokens(payload.id, payload.email, payload.role);
@@ -286,7 +286,7 @@ export class AuthService {
 
       return tokens;
     } catch (error) {
-      throw new AppError('Invalid refresh token', 401);
+      throw AppError.from('AUTH_007');
     }
   }
 
@@ -302,7 +302,7 @@ export class AuthService {
 
   static async getUserById(userId: string): Promise<any> {
     const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user) throw new AppError('User not found', 404);
+    if (!user) throw AppError.from('AUTH_008');
     return this.sanitizeUser(user);
   }
 
@@ -337,16 +337,16 @@ export class AuthService {
     });
 
     if (!record) {
-      throw new AppError('Invalid verification token', 400);
+      throw AppError.from('AUTH_009', 'Invalid verification token');
     }
 
     if (record.expiresAt < new Date()) {
       await prisma.emailVerificationToken.delete({ where: { token } });
-      throw new AppError('Verification token has expired', 400);
+      throw AppError.from('AUTH_009', 'Verification token has expired');
     }
 
     if (record.usedAt) {
-      throw new AppError('Verification token already used', 400);
+      throw AppError.from('AUTH_009', 'Verification token already used');
     }
 
     await prisma.user.update({
@@ -365,8 +365,8 @@ export class AuthService {
   static async resendVerificationEmail(userId: string): Promise<void> {
     const user = await prisma.user.findUnique({ where: { id: userId } });
 
-    if (!user) throw new AppError('User not found', 404);
-    if (user.emailVerified) throw new AppError('Email already verified', 400);
+    if (!user) throw AppError.from('AUTH_008');
+    if (user.emailVerified) throw AppError.from('AUTH_010');
 
     // Delete previous tokens
     await prisma.emailVerificationToken.deleteMany({ where: { userId } });

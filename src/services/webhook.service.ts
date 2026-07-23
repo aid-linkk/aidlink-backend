@@ -23,7 +23,7 @@ export class WebhookService {
     createdBy: string;
   }) {
     if (!data.url.startsWith('https://')) {
-      throw new AppError('Webhook URL must use HTTPS', 400);
+      throw AppError.from('WEBHOOK_002');
     }
     return prisma.webhookSubscription.create({ data });
   }
@@ -43,7 +43,7 @@ export class WebhookService {
 
   static async getWebhookById(id: string) {
     const webhook = await prisma.webhookSubscription.findUnique({ where: { id } });
-    if (!webhook) throw new AppError('Webhook not found', 404);
+    if (!webhook) throw AppError.from('WEBHOOK_001', 'Webhook not found');
     return webhook;
   }
 
@@ -60,7 +60,7 @@ export class WebhookService {
   ) {
     await this.getWebhookById(id);
     if (data.url && !data.url.startsWith('https://')) {
-      throw new AppError('Webhook URL must use HTTPS', 400);
+      throw AppError.from('WEBHOOK_002');
     }
     return prisma.webhookSubscription.update({ where: { id }, data });
   }
@@ -281,7 +281,7 @@ export class WebhookService {
       where: { id: eventId },
       include: { webhook: { select: { id: true, name: true, url: true } } },
     });
-    if (!event) throw new AppError('Webhook event not found', 404);
+    if (!event) throw AppError.from('WEBHOOK_001', 'Webhook event not found');
     return event;
   }
 }

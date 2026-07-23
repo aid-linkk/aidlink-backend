@@ -473,11 +473,21 @@ All frequently queried columns are indexed for performance. Review and add index
 
 ### Connection Pooling
 
-Prisma uses connection pooling by default. Adjust pool size based on your workload:
+The pool is auto-sized at startup from CPU count and the configured server
+connection budget, and the resulting parameters (`connection_limit`,
+`pool_timeout`, `connect_timeout`) are appended to `DATABASE_URL`. Any parameter
+already present in the URL is preserved, so an explicit setting still wins:
 
 ```env
 DATABASE_URL="postgresql://user:password@host:5432/db?schema=public&connection_limit=10"
 ```
+
+Pool state, query latency percentiles and slow queries are exposed via
+`GET /health/db` and `GET /api/v1/admin/database/metrics`.
+
+See [DATABASE_POOLING.md](./DATABASE_POOLING.md) for the sizing formula, the
+timeout model, every tuning variable, and how to profile connection behaviour
+with `npm run db:profile`.
 
 ### Query Optimization
 

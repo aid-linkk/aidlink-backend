@@ -8,12 +8,16 @@ import { StorageService } from './storage.service';
 import { NotificationService } from './notification.service';
 import { EmailTemplateService } from './emailTemplate.service';
 import { generateReceiptPdf, ReceiptPdfData } from '../utils/pdf.generator';
+import { classifyDeliveryError } from '../utils/deliveryErrors';
 import {
   getRegionRequirement,
   resolveRegion,
   formatCurrency,
   RECEIPT_TEMPLATE_VERSION,
 } from '../config/receipt.config';
+
+const RECEIPT_EMAIL_MAX_ATTEMPTS = 3;
+const RECEIPT_EMAIL_BASE_DELAY_MS = 200;
 
 export type ReceiptDeliveryMethod = 'EMAIL' | 'DOWNLOAD' | 'MANUAL' | 'BATCH';
 
@@ -47,6 +51,10 @@ const donationForReceiptInclude = {
 } as const;
 
 export class ReceiptService {
+  private static sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   /** Generates a unique, human-readable receipt reference number. */
   private static generateReceiptNumber(date = new Date()): string {
     const token = crypto.randomBytes(5).toString('hex').toUpperCase();
@@ -102,7 +110,7 @@ export class ReceiptService {
     });
 
     if (!donation) {
-      throw new AppError('Donation not found', 404);
+      throw AppError.from('DONATION_001');
     }
 
     if (donation.taxReceipt) {
@@ -110,14 +118,11 @@ export class ReceiptService {
     }
 
     if (donation.status !== DonationStatus.CONFIRMED) {
-      throw new AppError('Receipts can only be generated for confirmed donations', 400);
+      throw AppError.from('RECEIPT_001');
     }
 
     if (!donation.user || !donation.user.email) {
-      throw new AppError(
-        'Cannot generate a receipt: donation has no associated donor account',
-        422,
-      );
+      throw AppError.from('RECEIPT_002');
     }
 
     const region = resolveRegion(options.region ?? config.receipts.defaultRegion);
@@ -201,7 +206,7 @@ export class ReceiptService {
     });
 
     if (!receipt) {
-      throw new AppError('Receipt not found', 404);
+      throw AppError.from('RECEIPT_003');
     }
 
     return receipt;
@@ -229,8 +234,10 @@ export class ReceiptService {
     });
 
     if (!receipt) {
-      throw new AppError('Receipt not found', 404);
+      throw AppError.from('RECEIPT_003');
     }
+
+    let attemptCount = 0;
 
     try {
       const pdf = await StorageService.download(receipt.filePath);
@@ -247,26 +254,63 @@ export class ReceiptService {
         subject: `Your tax receipt ${receipt.receiptNumber}`,
       });
 
-      await NotificationService.sendEmail(
-        receipt.donor.email,
-        `Your tax receipt ${receipt.receiptNumber}`,
-        html,
+      const attachments = [
         {
-          from: config.receipts.senderEmail,
-          text,
-          attachments: [
-            {
-              filename: `${receipt.receiptNumber}.pdf`,
-              content: pdf,
-              contentType: 'application/pdf',
-            },
-          ],
+          filename: `${receipt.receiptNumber}.pdf`,
+          content: pdf,
+          contentType: 'application/pdf',
         },
-      );
+      ];
+
+      let lastError: unknown;
+
+      for (let attempt = 1; attempt <= RECEIPT_EMAIL_MAX_ATTEMPTS; attempt++) {
+        attemptCount = attempt;
+        try {
+          await NotificationService.sendEmail(
+            receipt.donor.email,
+            `Your tax receipt ${receipt.receiptNumber}`,
+            html,
+            { from: config.receipts.senderEmail, text, attachments },
+          );
+          lastError = undefined;
+          break;
+        } catch (err) {
+          lastError = err;
+          const errorClass = classifyDeliveryError(err);
+
+          if (errorClass === 'permanent') {
+            logger.error(
+              `Permanent failure sending receipt email for ${receiptId} (attempt ${attempt}):`,
+              err
+            );
+            break;
+          }
+
+          logger.error(
+            `Transient failure sending receipt email for ${receiptId} (attempt ${attempt}/${RECEIPT_EMAIL_MAX_ATTEMPTS}):`,
+            err
+          );
+
+          if (attempt < RECEIPT_EMAIL_MAX_ATTEMPTS) {
+            await this.sleep(RECEIPT_EMAIL_BASE_DELAY_MS * 2 ** (attempt - 1));
+          }
+        }
+      }
+
+      if (lastError) {
+        throw lastError;
+      }
 
       const updated = await prisma.taxReceipt.update({
         where: { id: receiptId },
-        data: { emailDeliveryStatus: ReceiptEmailStatus.SENT, emailSentAt: new Date() },
+        data: {
+          emailDeliveryStatus: ReceiptEmailStatus.SENT,
+          emailSentAt: new Date(),
+          attemptCount,
+          lastAttemptAt: new Date(),
+          lastError: null,
+        },
       });
 
       logger.info(`Receipt email sent: ${receipt.receiptNumber} -> ${receipt.donor.email}`);
@@ -276,7 +320,12 @@ export class ReceiptService {
       await prisma.taxReceipt
         .update({
           where: { id: receiptId },
-          data: { emailDeliveryStatus: ReceiptEmailStatus.FAILED },
+          data: {
+            emailDeliveryStatus: ReceiptEmailStatus.FAILED,
+            attemptCount,
+            lastAttemptAt: new Date(),
+            lastError: error instanceof Error ? error.message : String(error),
+          },
         })
         .catch(() => undefined);
       if (options.throwOnError) {
@@ -373,7 +422,7 @@ export class ReceiptService {
   static async processBatchJob(jobId: string): Promise<any> {
     const job = await prisma.receiptBatchJob.findUnique({ where: { id: jobId } });
     if (!job) {
-      throw new AppError('Batch job not found', 404);
+      throw AppError.from('RECEIPT_004');
     }
 
     await prisma.receiptBatchJob.update({
@@ -448,7 +497,7 @@ export class ReceiptService {
   static async getBatchJob(jobId: string): Promise<any> {
     const job = await prisma.receiptBatchJob.findUnique({ where: { id: jobId } });
     if (!job) {
-      throw new AppError('Batch job not found', 404);
+      throw AppError.from('RECEIPT_004');
     }
 
     const total = job.totalCount || 0;

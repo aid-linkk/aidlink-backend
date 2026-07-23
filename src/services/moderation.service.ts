@@ -79,7 +79,7 @@ export class ModerationService {
   ): Promise<any> {
     const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     const report = await prisma.fraudReport.create({
@@ -117,7 +117,7 @@ export class ModerationService {
   ): Promise<{ campaign: any; suspension: any; alreadySuspended: boolean }> {
     const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     // Idempotent: a campaign already suspended is not re-suspended and no
@@ -254,11 +254,11 @@ export class ModerationService {
   ): Promise<any> {
     const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     if (campaign.status !== CampaignStatus.SUSPENDED) {
-      throw new AppError('Campaign is not suspended', 400);
+      throw AppError.from('CAMPAIGN_003', 'Campaign is not suspended');
     }
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -317,20 +317,20 @@ export class ModerationService {
     attachments?: string[]
   ): Promise<any> {
     if (!message || typeof message !== 'string' || message.trim().length < 10) {
-      throw new AppError('Appeal message must be at least 10 characters long', 400);
+      throw AppError.from('MODERATION_004');
     }
 
     const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     if (campaign.userId !== ownerId) {
-      throw new AppError('Only the campaign owner can submit an appeal', 403);
+      throw AppError.from('COMMON_001', 'Only the campaign owner can submit an appeal');
     }
 
     if (campaign.status !== CampaignStatus.SUSPENDED) {
-      throw new AppError('Only suspended campaigns can be appealed', 400);
+      throw AppError.from('MODERATION_002', 'Only suspended campaigns can be appealed');
     }
 
     const suspension = await prisma.suspension.findFirst({
@@ -339,7 +339,7 @@ export class ModerationService {
     });
 
     if (!suspension) {
-      throw new AppError('No active suspension found for this campaign', 400);
+      throw AppError.from('MODERATION_002', 'No active suspension found for this campaign');
     }
 
     // One open appeal per suspension at a time.
@@ -351,7 +351,7 @@ export class ModerationService {
     });
 
     if (pending) {
-      throw new AppError('An appeal is already in progress for this suspension', 409);
+      throw AppError.from('MODERATION_003');
     }
 
     const appeal = await prisma.appeal.create({
@@ -382,11 +382,11 @@ export class ModerationService {
   ): Promise<any[]> {
     const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     if (campaign.userId !== userId && role !== Role.ADMIN) {
-      throw new AppError('You do not have permission to view these appeals', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to view these appeals');
     }
 
     return prisma.appeal.findMany({
@@ -410,11 +410,11 @@ export class ModerationService {
     });
 
     if (!appeal) {
-      throw new AppError('Appeal not found', 404);
+      throw AppError.from('MODERATION_001');
     }
 
     if (appeal.status === AppealStatus.APPROVED || appeal.status === AppealStatus.DENIED) {
-      throw new AppError('Appeal has already been resolved', 400);
+      throw AppError.from('MODERATION_002', 'Appeal has already been resolved');
     }
 
     const newStatus = decision === 'APPROVE' ? AppealStatus.APPROVED : AppealStatus.DENIED;
@@ -494,7 +494,7 @@ export class ModerationService {
   static async listSuspensions(campaignId: string): Promise<any> {
     const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
     if (!campaign) {
-      throw new AppError('Campaign not found', 404);
+      throw AppError.from('CAMPAIGN_002');
     }
 
     return prisma.suspension.findMany({

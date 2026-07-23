@@ -31,7 +31,7 @@ export class BeneficiaryService {
     });
 
     if (existing) {
-      throw new AppError('Beneficiary profile already exists for this user', 400);
+      throw AppError.from('BENEFICIARY_002');
     }
 
     const beneficiary = await prisma.beneficiary.create({
@@ -152,7 +152,7 @@ export class BeneficiaryService {
     });
 
     if (!beneficiary) {
-      throw new AppError('Beneficiary not found', 404);
+      throw AppError.from('BENEFICIARY_001');
     }
 
     return beneficiary;
@@ -164,12 +164,12 @@ export class BeneficiaryService {
     });
 
     if (!beneficiary) {
-      throw new AppError('Beneficiary not found', 404);
+      throw AppError.from('BENEFICIARY_001');
     }
 
     // Check permissions
     if (beneficiary.userId !== userId && userRole !== Role.ADMIN && userRole !== Role.VERIFIER) {
-      throw new AppError('You do not have permission to update this beneficiary', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to update this beneficiary');
     }
 
     const updated = await prisma.beneficiary.update({
@@ -190,12 +190,12 @@ export class BeneficiaryService {
     });
 
     if (!beneficiary) {
-      throw new AppError('Beneficiary not found', 404);
+      throw AppError.from('BENEFICIARY_001');
     }
 
     // Check permissions
     if (userRole !== Role.ADMIN && userRole !== Role.VERIFIER) {
-      throw new AppError('You do not have permission to update beneficiary status', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to update beneficiary status');
     }
 
     const updated = await prisma.beneficiary.update({
@@ -227,7 +227,7 @@ export class BeneficiaryService {
     });
 
     if (!beneficiary) {
-      throw new AppError('Beneficiary not found', 404);
+      throw AppError.from('BENEFICIARY_001');
     }
 
     let riskScore = 0;
@@ -257,11 +257,11 @@ export class BeneficiaryService {
     });
 
     if (!beneficiary) {
-      throw new AppError('Beneficiary not found', 404);
+      throw AppError.from('BENEFICIARY_001');
     }
 
     if (beneficiary.userId !== userId) {
-      throw new AppError('You can only submit KYC for your own profile', 403);
+      throw AppError.from('COMMON_001', 'You can only submit KYC for your own profile');
     }
 
     // Prevent duplicate active submissions
@@ -273,7 +273,7 @@ export class BeneficiaryService {
     });
 
     if (activeSubmission) {
-      throw new AppError('An active KYC submission already exists. Please wait for the current review to complete.', 409);
+      throw AppError.from('BENEFICIARY_003');
     }
 
     const submission = await prisma.kYCSubmission.create({
@@ -311,11 +311,11 @@ export class BeneficiaryService {
     });
 
     if (!submission) {
-      throw new AppError('KYC submission not found', 404);
+      throw AppError.from('BENEFICIARY_004');
     }
 
     if (userRole !== Role.ADMIN && userRole !== Role.VERIFIER) {
-      throw new AppError('You do not have permission to review KYC submissions', 403);
+      throw AppError.from('COMMON_001', 'You do not have permission to review KYC submissions');
     }
 
     // Compute fraud score and signals before persisting
@@ -466,7 +466,7 @@ export class BeneficiaryService {
     });
 
     if (!beneficiary) {
-      throw new AppError('Beneficiary profile not found', 404);
+      throw AppError.from('BENEFICIARY_001', 'Beneficiary profile not found');
     }
 
     return beneficiary;

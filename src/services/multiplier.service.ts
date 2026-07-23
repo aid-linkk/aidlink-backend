@@ -42,9 +42,9 @@ export class MultiplierService {
       if (actorRole === Role.ADMIN) return;
 
       const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { userId: true } });
-      if (!campaign) throw new AppError('Campaign not found', 404);
+      if (!campaign) throw AppError.from('CAMPAIGN_002');
 
-      if (campaign.userId !== actorId) throw new AppError('You do not have permission to manage multipliers', 403);
+      if (campaign.userId !== actorId) throw AppError.from('COMMON_001', 'You do not have permission to manage multipliers');
     })();
   }
 
@@ -75,36 +75,36 @@ export class MultiplierService {
     } = data;
 
     if (typeof multiplier !== 'number' || !Number.isFinite(multiplier)) {
-      throw new AppError('multiplier must be a valid number', 400);
+      throw AppError.from('MULTIPLIER_002', 'multiplier must be a valid number');
     }
     if (multiplier <= 1.0) {
-      throw new AppError('multiplier must be > 1.0', 400);
+      throw AppError.from('MULTIPLIER_002', 'multiplier must be > 1.0');
     }
 
     if (matchCap !== null && matchCap !== undefined) {
       if (typeof matchCap !== 'number' || !Number.isFinite(matchCap) || matchCap < 0) {
-        throw new AppError('matchCap must be >= 0', 400);
+        throw AppError.from('MULTIPLIER_002', 'matchCap must be >= 0');
       }
     }
 
     if (perDonationCap !== null && perDonationCap !== undefined) {
       if (typeof perDonationCap !== 'number' || !Number.isFinite(perDonationCap) || perDonationCap < 0) {
-        throw new AppError('perDonationCap must be >= 0', 400);
+        throw AppError.from('MULTIPLIER_002', 'perDonationCap must be >= 0');
       }
     }
 
     const start = startAt ? new Date(startAt) : null;
     const end = endAt ? new Date(endAt) : null;
 
-    if (startAt && (!start || isNaN(start.getTime()))) throw new AppError('startAt must be a valid date', 400);
-    if (endAt && (!end || isNaN(end.getTime()))) throw new AppError('endAt must be a valid date', 400);
+    if (startAt && (!start || isNaN(start.getTime()))) throw AppError.from('MULTIPLIER_002', 'startAt must be a valid date');
+    if (endAt && (!end || isNaN(end.getTime()))) throw AppError.from('MULTIPLIER_002', 'endAt must be a valid date');
 
     if (start && end && end <= start) {
-      throw new AppError('startAt must be before endAt', 400);
+      throw AppError.from('MULTIPLIER_002', 'startAt must be before endAt');
     }
 
     if (type === MultiplierType.MILESTONE) {
-      if (!milestoneId) throw new AppError('milestoneId is required for MILESTONE multipliers', 400);
+      if (!milestoneId) throw AppError.from('MULTIPLIER_002', 'milestoneId is required for MILESTONE multipliers');
     }
 
     return {
@@ -134,7 +134,7 @@ export class MultiplierService {
     if (input.type === MultiplierType.MILESTONE && validated.milestoneId) {
       const milestone = await prisma.milestone.findUnique({ where: { id: validated.milestoneId } });
       if (!milestone || milestone.campaignId !== input.campaignId) {
-        throw new AppError('Milestone not found for this campaign', 404);
+        throw AppError.from('MILESTONE_001', 'Milestone not found for this campaign');
       }
     }
 
@@ -168,7 +168,7 @@ export class MultiplierService {
     await MultiplierService.assertCanManage(campaignId, actorId, actorRole);
 
     const existing = await prisma.multiplier.findUnique({ where: { id: multiplierId } });
-    if (!existing || existing.campaignId !== campaignId) throw new AppError('Multiplier not found', 404);
+    if (!existing || existing.campaignId !== campaignId) throw AppError.from('MULTIPLIER_001');
 
     const next = {
       multiplier: patch.multiplier ?? (Number(existing.multiplier) as any),
@@ -193,7 +193,7 @@ export class MultiplierService {
     if (existing.type === MultiplierType.MILESTONE && validated.milestoneId) {
       const milestone = await prisma.milestone.findUnique({ where: { id: validated.milestoneId } });
       if (!milestone || milestone.campaignId !== campaignId) {
-        throw new AppError('Milestone not found for this campaign', 404);
+        throw AppError.from('MILESTONE_001', 'Milestone not found for this campaign');
       }
     }
 
@@ -202,7 +202,7 @@ export class MultiplierService {
     // reads it directly instead of re-aggregating MatchedFund rows.
     if (patch.matchCap !== undefined && patch.matchCap !== null) {
       if (Number(patch.matchCap) < Number(existing.matchedTotal)) {
-        throw new AppError('matchCap cannot be reduced below already-matched amount', 400);
+        throw AppError.from('MULTIPLIER_003');
       }
     }
 
@@ -227,7 +227,7 @@ export class MultiplierService {
     await MultiplierService.assertCanManage(campaignId, actorId, actorRole);
 
     const existing = await prisma.multiplier.findUnique({ where: { id: multiplierId } });
-    if (!existing || existing.campaignId !== campaignId) throw new AppError('Multiplier not found', 404);
+    if (!existing || existing.campaignId !== campaignId) throw AppError.from('MULTIPLIER_001');
 
     const updated = await prisma.multiplier.update({
       where: { id: multiplierId },

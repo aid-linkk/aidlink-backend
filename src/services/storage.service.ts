@@ -104,6 +104,11 @@ export interface UploadOutput {
   thumbnailKey?: string;
 }
 
+export interface ThumbnailResult {
+  thumbnailUrl: string;
+  thumbnailKey: string;
+}
+
 export class StorageService {
   private static adapter: IStorageAdapter = createStorageAdapter();
 
@@ -193,23 +198,20 @@ export class StorageService {
     const config = UPLOAD_CONFIGS[uploadType];
 
     if (buffer.length === 0) {
-      throw new AppError('Uploaded file is empty', 400);
+      throw AppError.from('STORAGE_001', 'Uploaded file is empty');
     }
 
     if (buffer.length > config.maxSizeBytes) {
       const mb = Math.round(config.maxSizeBytes / 1024 / 1024);
-      throw new AppError(`File size exceeds the ${mb}MB limit`, 413);
+      throw AppError.from('STORAGE_002', `File size exceeds the ${mb}MB limit`);
     }
 
     const detectedMime = StorageService.detectMimeType(buffer);
     if (!detectedMime) {
-      throw new AppError('Unsupported or malformed file — cannot determine type', 415);
+      throw AppError.from('STORAGE_003', 'Unsupported or malformed file — cannot determine type');
     }
     if (!config.allowedMimes.has(detectedMime)) {
-      throw new AppError(
-        `File type ${detectedMime} is not allowed for ${uploadType}`,
-        415,
-      );
+      throw AppError.from('STORAGE_003', `File type ${detectedMime} is not allowed for ${uploadType}`);
     }
 
     let uploadBuffer = buffer;
@@ -226,14 +228,14 @@ export class StorageService {
         try {
           meta = await sharp(buffer).metadata();
         } catch {
-          throw new AppError('File appears to be corrupt or in an unsupported format', 422);
+          throw AppError.from('STORAGE_004');
         }
         const { width = 0, height = 0 } = meta;
         const { width: minW, height: minH } = config.minDimensions;
         if (width < minW || height < minH) {
-          throw new AppError(
-            `Image is too small. Minimum required dimensions are ${minW}×${minH}px (uploaded: ${width}×${height}px)`,
-            422,
+          throw AppError.from(
+            'STORAGE_005',
+            `Image is too small. Minimum required dimensions are ${minW}×${minH}px (uploaded: ${width}×${height}px)`
           );
         }
       }
@@ -246,29 +248,18 @@ export class StorageService {
           .toBuffer();
         outputMime = 'image/webp';
       } catch {
-        throw new AppError('File appears to be corrupt or in an unsupported format', 422);
+        throw AppError.from('STORAGE_004');
       }
 
-      // Generate thumbnail if configured
-      if (opt.generateThumbnail && opt.thumbnailWidth && opt.thumbnailHeight) {
-        try {
-          const thumbBuffer = await sharp(buffer)
-            .resize(opt.thumbnailWidth, opt.thumbnailHeight, { fit: 'cover' })
-            .webp({ quality: 70 })
-            .toBuffer();
-          thumbnailKey = StorageService.generateKey(
-            `${config.prefix}/${entityId}/thumbnails`,
-            'image/webp',
-          );
-          const thumbResult = await StorageService.adapter.upload(thumbnailKey, thumbBuffer, {
-            contentType: 'image/webp',
-            metadata: { entityId, uploadType },
-          });
-          thumbnailUrl = thumbResult.url;
-          thumbnailKey = thumbResult.key;
-        } catch {
-          // Thumbnail failure is non-fatal — log in production, continue with main upload
-        }
+      // Generate thumbnail if configured. Failure here is non-fatal — the
+      // main image already uploaded successfully, so we log and move on
+      // rather than fail the whole request over a missing preview.
+      try {
+        const thumb = await StorageService.createThumbnail(uploadType, entityId, buffer);
+        thumbnailUrl = thumb?.thumbnailUrl;
+        thumbnailKey = thumb?.thumbnailKey;
+      } catch {
+        // Non-fatal — see comment above.
       }
     }
 
@@ -279,6 +270,87 @@ export class StorageService {
     });
 
     return { url: result.url, key: result.key, thumbnailUrl, thumbnailKey };
+  }
+
+  /**
+   * Derives and stores a thumbnail from an already-decoded image buffer,
+   * per the calling upload type's configured thumbnail size. Shared by the
+   * upload flow and by `regenerateThumbnail` so there is exactly one place
+   * that knows how a thumbnail is produced.
+   *
+   * Returns null if the upload type has no thumbnail configuration.
+   */
+  private static async createThumbnail(
+    uploadType: UploadType,
+    entityId: string,
+    sourceBuffer: Buffer,
+  ): Promise<ThumbnailResult | null> {
+    const config = UPLOAD_CONFIGS[uploadType];
+    const opt = config.imageOptimization;
+    if (!opt?.generateThumbnail || !opt.thumbnailWidth || !opt.thumbnailHeight) {
+      return null;
+    }
+
+    const thumbBuffer = await sharp(sourceBuffer)
+      .resize(opt.thumbnailWidth, opt.thumbnailHeight, { fit: 'cover' })
+      .webp({ quality: 70 })
+      .toBuffer();
+
+    const draftKey = StorageService.generateKey(
+      `${config.prefix}/${entityId}/thumbnails`,
+      'image/webp',
+    );
+    const result = await StorageService.adapter.upload(draftKey, thumbBuffer, {
+      contentType: 'image/webp',
+      metadata: { entityId, uploadType },
+    });
+
+    return { thumbnailUrl: result.url, thumbnailKey: result.key };
+  }
+
+  /**
+   * Regenerates the thumbnail for an already-uploaded image without touching
+   * the original file. Downloads the original object by its storage URL,
+   * re-derives the thumbnail from it via the same path `upload` uses, and
+   * stores it as a fresh object.
+   *
+   * Unlike the best-effort thumbnail step inside `upload` (where the main
+   * image has already succeeded and a preview is a nice-to-have), a failure
+   * here is the whole point of the call, so it's surfaced as an `AppError`
+   * rather than swallowed.
+   *
+   * Returns null if the upload type has no thumbnail configuration —
+   * there is nothing to regenerate.
+   */
+  static async regenerateThumbnail(
+    uploadType: UploadType,
+    entityId: string,
+    sourceUrl: string,
+  ): Promise<ThumbnailResult | null> {
+    const config = UPLOAD_CONFIGS[uploadType];
+    if (!config.imageOptimization?.generateThumbnail) {
+      return null;
+    }
+
+    const sourceKey = StorageService.parseStorageKey(sourceUrl);
+    if (!sourceKey) {
+      throw new AppError('Could not resolve a storage key from the given URL', 400);
+    }
+
+    const sourceBuffer = await StorageService.adapter.download(sourceKey);
+    const detectedMime = StorageService.detectMimeType(sourceBuffer);
+    if (!detectedMime || !detectedMime.startsWith('image/')) {
+      throw new AppError(
+        'Stored object is not a supported image — cannot regenerate thumbnail',
+        415,
+      );
+    }
+
+    try {
+      return await StorageService.createThumbnail(uploadType, entityId, sourceBuffer);
+    } catch {
+      throw new AppError('Failed to regenerate thumbnail — source image may be corrupt', 422);
+    }
   }
 
   /**
@@ -293,7 +365,7 @@ export class StorageService {
     metadata?: Record<string, string>,
   ): Promise<UploadOutput> {
     if (buffer.length === 0) {
-      throw new AppError('Cannot store an empty document', 400);
+      throw AppError.from('STORAGE_001', 'Cannot store an empty document');
     }
 
     const result = await StorageService.adapter.upload(key, buffer, {
@@ -339,7 +411,7 @@ export class StorageService {
     const config = UPLOAD_CONFIGS[uploadType];
 
     if (!config.allowedMimes.has(mimeType)) {
-      throw new AppError(`File type ${mimeType} is not allowed for ${uploadType}`, 415);
+      throw AppError.from('STORAGE_003', `File type ${mimeType} is not allowed for ${uploadType}`);
     }
 
     const key = StorageService.generateKey(`${config.prefix}/${entityId}`, mimeType);
