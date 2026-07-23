@@ -4,6 +4,7 @@ import { ModerationController } from '../controllers/moderation.controller';
 import { OrganizationController } from '../controllers/organization.controller';
 import { MilestoneController } from '../controllers/milestone.controller';
 import { RecoveryController } from '../controllers/recovery.controller';
+import { DatabaseController } from '../controllers/database.controller';
 import { authenticate, authorize } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
@@ -244,5 +245,26 @@ router.post('/distributions/:id/retry', authenticate, RecoveryController.retryDi
 router.post('/distributions/:id/flag-recovery', authenticate, RecoveryController.flagDistributionRecovery);
 
 router.post('/campaigns/:id/settle', authenticate, RecoveryController.settleCampaign);
+
+// ─── Database Connection Pool (Admin) ────────────────────────────
+
+/**
+ * @route   GET /api/v1/admin/database/metrics
+ * @desc    Connection pool gauges and query performance metrics
+ * @access  Private (Admin)
+ */
+router.get('/database/metrics', authenticate, authorize('ADMIN'), DatabaseController.getMetrics);
+
+/**
+ * @route   POST /api/v1/admin/database/metrics/reset
+ * @desc    Reset the in-memory query metrics counters
+ * @access  Private (Admin)
+ */
+router.post(
+  '/database/metrics/reset',
+  authenticate,
+  authorize('ADMIN'),
+  DatabaseController.resetMetrics
+);
 
 export default router;

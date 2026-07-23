@@ -3,7 +3,9 @@
 
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["postgresqlExtensions"]
+  // "metrics" exposes connection-pool gauges via prisma.$metrics, consumed by
+  // /health/db and /api/v1/admin/database/metrics.
+  previewFeatures = ["postgresqlExtensions", "metrics"]
 }
 
 datasource db {

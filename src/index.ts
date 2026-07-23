@@ -34,6 +34,7 @@ import { initializeWebSocket } from './websocket/socket.server';
 import { stopRecoveryWorker } from './workers/recovery.worker';
 import { EmailTemplateService } from './services/emailTemplate.service';
 import userRoutes from './routes/user.routes';
+import healthRoutes from './routes/health.routes';
 
 const app: Application = express();
 const httpServer = createServer(app);
@@ -74,6 +75,9 @@ app.get('/health', (req, res) => {
     environment: config.env,
   });
 });
+
+// Dependency-level health probes (database pool readiness)
+app.use('/health', healthRoutes);
 
 // API routes
 app.use(`/api/${config.apiVersion}/auth`, authRoutes);
