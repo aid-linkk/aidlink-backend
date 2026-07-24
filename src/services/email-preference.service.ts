@@ -1,6 +1,7 @@
-import prisma from '../config/database';
+﻿import prisma from '../config/database';
 import logger from '../config/logger';
-import { NotificationType } from '@prisma/client';
+import { NotificationType, AuditAction } from '@prisma/client';
+import { writeAuditLog } from './audit.service';
 
 /** Shape of the categories JSON stored in EmailPreference */
 export interface EmailPreferenceCategories {
@@ -32,7 +33,7 @@ function toCategories(json: unknown): EmailPreferenceCategories {
 }
 
 export class EmailPreferenceService {
-  /** Default preferences — all enabled for new users */
+  /** Default preferences â€” all enabled for new users */
   static readonly DEFAULT_PREFERENCES: EmailPreferenceCategories = {
     donationReceived: true,
     campaignUpdates: true,
@@ -69,7 +70,7 @@ export class EmailPreferenceService {
    */
   private static readonly MANDATORY_TYPES: NotificationType[] = ['SECURITY_ALERT'];
 
-  // ── CRUD ──────────────────────────────────────────────────────────
+  // â”€â”€ CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /** Fetch preferences for a user; creates defaults if none exist. */
   static async getPreferences(userId: string): Promise<{
@@ -131,6 +132,14 @@ export class EmailPreferenceService {
       },
     });
 
+    await writeAuditLog(
+      AuditAction.SETTINGS_UPDATED,
+      'User',
+      userId,
+      userId,
+      { field: 'emailPreferences', from: existingCategories, to: mergedCategories }
+    );
+
     logger.info(`Email preferences updated for user ${userId}`);
 
     return {
@@ -159,7 +168,7 @@ export class EmailPreferenceService {
     };
   }
 
-  // ── Gate Logic ────────────────────────────────────────────────────
+  // â”€â”€ Gate Logic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Determine whether an email should be sent to a user for a given
@@ -193,7 +202,7 @@ export class EmailPreferenceService {
       where: { userId },
     });
 
-    // No preferences record yet — create defaults and allow
+    // No preferences record yet â€” create defaults and allow
     if (!prefs) {
       await this.createDefault(userId);
       return true;
@@ -207,7 +216,7 @@ export class EmailPreferenceService {
     // 5. Category-specific check
     const categoryKey = this.CATEGORY_MAP[notificationType];
     if (!categoryKey) {
-      // Unknown notification type — allow by default
+      // Unknown notification type â€” allow by default
       return true;
     }
 
@@ -215,3 +224,4 @@ export class EmailPreferenceService {
     return categories[categoryKey] !== false;
   }
 }
+
