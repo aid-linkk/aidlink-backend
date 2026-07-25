@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { BeneficiaryController } from '../controllers/beneficiary.controller';
 import { BulkBeneficiaryController } from '../controllers/bulkBeneficiary.controller';
+import { BeneficiaryPortalController } from '../controllers/beneficiaryPortal.controller';
 import { authenticate, requireVerified, authorize } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
@@ -322,6 +323,112 @@ router.post(
   authenticate,
   authorize('ADMIN'),
   BulkBeneficiaryController.rollbackJob
+);
+
+// ── Self-Service Portal Routes (BENEFICIARY role only) ──────────────────────
+// All portal routes live under /portal/* so they are clearly separated from
+// admin/org endpoints. Ownership is enforced inside the service by resolving
+// the beneficiary from req.user.id — no :id param, no spoofing risk.
+
+const updateProfileSchema = z.object({
+  phoneNumber: z.string().min(5).optional(),
+  address: z.string().min(3).optional(),
+  city: z.string().min(1).optional(),
+  country: z.string().min(2).optional(),
+  coordinates: z.string().optional(),
+  familySize: z.number().int().min(1).max(50).optional(),
+  needsAssessment: z.string().max(2000).optional(),
+  needsCategory: z.string().max(100).optional(),
+}).partial().refine((d) => Object.keys(d).length > 0, { message: 'At least one field is required' });
+
+const supportTicketSchema = z.object({
+  subject: z.string().min(5).max(200),
+  message: z.string().min(20).max(5000),
+  category: z.enum(['VERIFICATION', 'DISTRIBUTION', 'PROFILE', 'OTHER']),
+});
+
+/**
+ * @route   GET /api/v1/beneficiaries/portal/profile
+ * @desc    Get own full profile with KYC summary and distribution totals
+ * @access  Private (Beneficiary — own account)
+ */
+router.get(
+  '/portal/profile',
+  authenticate,
+  BeneficiaryPortalController.getProfile
+);
+
+/**
+ * @route   PATCH /api/v1/beneficiaries/portal/profile
+ * @desc    Update mutable contact/needs fields (name, ID, status are immutable)
+ * @access  Private (Beneficiary — own account)
+ */
+router.patch(
+  '/portal/profile',
+  authenticate,
+  validate(updateProfileSchema),
+  BeneficiaryPortalController.updateProfile
+);
+
+/**
+ * @route   GET /api/v1/beneficiaries/portal/verification
+ * @desc    Get KYC / verification status, submission history, and whether new submission is allowed
+ * @access  Private (Beneficiary — own account)
+ */
+router.get(
+  '/portal/verification',
+  authenticate,
+  BeneficiaryPortalController.getVerificationStatus
+);
+
+/**
+ * @route   POST /api/v1/beneficiaries/portal/kyc/document
+ * @desc    Upload KYC document or selfie. Multipart/form-data with field `file`.
+ *          Body: documentType, submissionType, deviceFingerprint (optional)
+ *          Query: ?field=selfie to target selfieUrl; default targets primary documentUrl
+ * @access  Private (Beneficiary — verified email required)
+ */
+router.post(
+  '/portal/kyc/document',
+  authenticate,
+  requireVerified,
+  uploadSingle('file'),
+  BeneficiaryPortalController.uploadKYCDocument
+);
+
+/**
+ * @route   GET /api/v1/beneficiaries/portal/campaigns
+ * @desc    Campaigns I am assigned to, with org and funding info
+ * @access  Private (Beneficiary — own account)
+ */
+router.get(
+  '/portal/campaigns',
+  authenticate,
+  BeneficiaryPortalController.getMyCampaigns
+);
+
+/**
+ * @route   GET /api/v1/beneficiaries/portal/distributions
+ * @desc    Distributions I have received, with per-currency summary
+ *          Optional query: ?status=COMPLETED|PENDING|FAILED|IN_PROGRESS|CANCELLED
+ * @access  Private (Beneficiary — own account)
+ */
+router.get(
+  '/portal/distributions',
+  authenticate,
+  BeneficiaryPortalController.getMyDistributions
+);
+
+/**
+ * @route   POST /api/v1/beneficiaries/portal/support
+ * @desc    Submit a support ticket (confirmation email sent, support team alerted)
+ * @access  Private (Beneficiary — own account)
+ */
+router.post(
+  '/portal/support',
+  authenticate,
+  validate(supportTicketSchema),
+  BeneficiaryPortalController.contactSupport
 );
 
 export default router;
