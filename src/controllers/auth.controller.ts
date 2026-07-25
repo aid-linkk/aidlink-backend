@@ -96,6 +96,20 @@ export class AuthController {
     }
   }
 
+  static async getWalletChallenge(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const address = String(req.query.address || '');
+      const challenge = await AuthService.issueWalletChallenge(address);
+
+      res.status(200).json({
+        success: true,
+        data: challenge,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async walletAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { walletAddress, signature, message } = req.body;

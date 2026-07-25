@@ -1,5 +1,7 @@
 import { AuthService } from './auth.service';
 import { Role, UserStatus } from '@prisma/client';
+import { Keypair } from 'soroban-client';
+import redis from '../config/redis';
 
 jest.mock('../config/database', () => {
   const mock = {
@@ -225,21 +227,58 @@ describe('AuthService', () => {
     });
   });
 
-  describe('walletAuth', () => {
-    const walletAddress = 'GABCDEF123456';
+  describe('walletAuth (issue #170 — Ed25519 signature verification)', () => {
+    // These tests exercise the real challenge/verification flow, which uses
+    // the live Redis instance (same as resendVerificationEmail's rate-limit
+    // tests above) rather than a mock — Prisma remains mocked.
+    let keypair: Keypair;
+    let walletAddress: string;
 
-    it('authenticates existing wallet user', async () => {
+    beforeEach(async () => {
+      keypair = Keypair.random();
+      walletAddress = keypair.publicKey();
+      // Belt-and-braces: clear any leftover state for this fresh address.
+      await redis.del(`wallet-challenge:${walletAddress}`);
+      await redis.del(`wallet-auth-fail:${walletAddress}`);
+    });
+
+    async function signedChallenge(kp: Keypair, address: string) {
+      const challenge = await AuthService.issueWalletChallenge(address);
+      const signature = kp.sign(Buffer.from(challenge.message, 'utf8')).toString('base64');
+      return { ...challenge, signature };
+    }
+
+    it('rejects empty signature and message with a 401', async () => {
+      await expect(AuthService.walletAuth(walletAddress, '', '')).rejects.toMatchObject({
+        statusCode: 401,
+      });
+      expect(prismaMock.user.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects a valid message signed by a different keypair with a 401', async () => {
+      const attacker = Keypair.random();
+      const challenge = await AuthService.issueWalletChallenge(walletAddress);
+      const badSignature = attacker.sign(Buffer.from(challenge.message, 'utf8')).toString('base64');
+
+      await expect(
+        AuthService.walletAuth(walletAddress, badSignature, challenge.message)
+      ).rejects.toMatchObject({ statusCode: 401 });
+      expect(prismaMock.user.create).not.toHaveBeenCalled();
+    });
+
+    it('authenticates an existing wallet user on a valid signature', async () => {
       prismaMock.user.findUnique.mockResolvedValue(mockUser({ walletAddress }));
       prismaMock.user.update.mockResolvedValue(mockUser({ walletAddress }));
       prismaMock.session.create.mockResolvedValue(mockSession());
 
-      const result = await AuthService.walletAuth(walletAddress, 'sig', 'msg');
+      const { signature, message } = await signedChallenge(keypair, walletAddress);
+      const result = await AuthService.walletAuth(walletAddress, signature, message);
 
       expect(result).toHaveProperty('tokens');
       expect(prismaMock.user.create).not.toHaveBeenCalled();
     });
 
-    it('creates new user for unknown wallet', async () => {
+    it('creates a new user only after successful signature verification', async () => {
       prismaMock.user.findUnique.mockResolvedValue(null);
       prismaMock.user.create.mockResolvedValue(
         mockUser({ walletAddress, email: `${walletAddress}@wallet.aidlink.org` })
@@ -247,12 +286,89 @@ describe('AuthService', () => {
       prismaMock.user.update.mockResolvedValue(mockUser({ walletAddress }));
       prismaMock.session.create.mockResolvedValue(mockSession());
 
-      const result = await AuthService.walletAuth(walletAddress, 'sig', 'msg');
+      const { signature, message } = await signedChallenge(keypair, walletAddress);
+      const result = await AuthService.walletAuth(walletAddress, signature, message);
 
       expect(result).toHaveProperty('tokens');
       expect(prismaMock.user.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ walletAddress }) })
       );
+    });
+
+    it('does not create a user row for a failed verification attempt', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(null);
+
+      await expect(AuthService.walletAuth(walletAddress, 'bogus', 'bogus')).rejects.toMatchObject({
+        statusCode: 401,
+      });
+      expect(prismaMock.user.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects reuse of an already-consumed {signature, message} pair', async () => {
+      prismaMock.user.findUnique.mockResolvedValue(mockUser({ walletAddress }));
+      prismaMock.user.update.mockResolvedValue(mockUser({ walletAddress }));
+      prismaMock.session.create.mockResolvedValue(mockSession());
+
+      const { signature, message } = await signedChallenge(keypair, walletAddress);
+
+      await expect(AuthService.walletAuth(walletAddress, signature, message)).resolves.toHaveProperty('tokens');
+      await expect(AuthService.walletAuth(walletAddress, signature, message)).rejects.toMatchObject({
+        statusCode: 401,
+      });
+    });
+
+    it('rejects a challenge whose stored domain no longer matches the server domain', async () => {
+      const challenge = await AuthService.issueWalletChallenge(walletAddress);
+
+      // Simulate a challenge that was (somehow) issued for a foreign domain
+      // by overwriting the stored payload directly, the way a cross-service
+      // replay would look from the verifier's point of view.
+      const tamperedPayload = { nonce: challenge.nonce, domain: 'evil.com', issuedAt: challenge.issuedAt };
+      await redis.setex(`wallet-challenge:${walletAddress}`, 300, JSON.stringify(tamperedPayload));
+
+      const foreignMessage = [
+        'AidLink wallet authentication',
+        'domain: evil.com',
+        `address: ${walletAddress}`,
+        `nonce: ${challenge.nonce}`,
+        `issuedAt: ${challenge.issuedAt}`,
+      ].join('\n');
+      const signature = keypair.sign(Buffer.from(foreignMessage, 'utf8')).toString('base64');
+
+      await expect(
+        AuthService.walletAuth(walletAddress, signature, foreignMessage)
+      ).rejects.toMatchObject({ statusCode: 401 });
+    });
+
+    it('rejects a challenge that has expired (nonce no longer in Redis)', async () => {
+      const challenge = await AuthService.issueWalletChallenge(walletAddress);
+      const signature = keypair.sign(Buffer.from(challenge.message, 'utf8')).toString('base64');
+
+      // Force-expire: delete the stored challenge directly instead of
+      // waiting out the real 5-minute TTL.
+      await redis.del(`wallet-challenge:${walletAddress}`);
+
+      await expect(
+        AuthService.walletAuth(walletAddress, signature, challenge.message)
+      ).rejects.toMatchObject({ statusCode: 401 });
+    });
+
+    it('rate-limits after 5 failed attempts: the 6th fails with 429', async () => {
+      for (let i = 0; i < 5; i++) {
+        await expect(AuthService.walletAuth(walletAddress, 'bogus', 'bogus')).rejects.toMatchObject({
+          statusCode: 401,
+        });
+      }
+
+      await expect(AuthService.walletAuth(walletAddress, 'bogus', 'bogus')).rejects.toMatchObject({
+        statusCode: 429,
+      });
+    });
+
+    it('issueWalletChallenge rejects a malformed Stellar address', async () => {
+      await expect(AuthService.issueWalletChallenge('not-a-real-address')).rejects.toMatchObject({
+        statusCode: 400,
+      });
     });
   });
 

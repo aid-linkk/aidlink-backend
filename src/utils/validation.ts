@@ -18,6 +18,12 @@ export const walletAuthSchema = z.object({
   message: z.string().min(1, 'Message is required'),
 });
 
+export const walletChallengeQuerySchema = z.object({
+  address: z
+    .string()
+    .regex(/^G[A-Z2-7]{55}$/, 'address must be a valid Stellar public key'),
+});
+
 export const campaignSchema = z.object({
   title: z.string().min(5, 'Title must be at least 5 characters'),
   description: z.string().min(20, 'Description must be at least 20 characters'),
@@ -241,6 +247,7 @@ export const generateBatchReceiptsSchema = z
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type WalletAuthInput = z.infer<typeof walletAuthSchema>;
+export type WalletChallengeQuery = z.infer<typeof walletChallengeQuerySchema>;
 export type CampaignInput = z.infer<typeof campaignSchema>;
 export type DonationInput = z.infer<typeof donationSchema>;
 export type BeneficiaryInput = z.infer<typeof beneficiarySchema>;

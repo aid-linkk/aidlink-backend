@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { AuthController } from '../controllers/auth.controller';
 import { authenticate } from '../middleware/auth';
-import { validate } from '../middleware/validation';
-import { registerSchema, loginSchema, walletAuthSchema } from '../utils/validation';
+import { validate, validateQuery } from '../middleware/validation';
+import { registerSchema, loginSchema, walletAuthSchema, walletChallengeQuerySchema } from '../utils/validation';
 import { authLimiter, resendVerificationLimiter } from '../middleware/rateLimit';
 
 const router = Router();
@@ -99,10 +99,46 @@ router.post('/login', authLimiter, validate(loginSchema), AuthController.login);
 
 /**
  * @swagger
+ * /api/v1/auth/wallet-challenge:
+ *   get:
+ *     summary: Issue a single-use signing challenge for Stellar wallet authentication
+ *     description: >
+ *       Step 1 of wallet auth. Returns a message that must be signed with the
+ *       Ed25519 private key matching `address`, then submitted to
+ *       POST /api/v1/auth/wallet along with the signature. The challenge
+ *       expires after 5 minutes and is invalidated after first use.
+ *     tags: [Authentication]
+ *     parameters:
+ *       - in: query
+ *         name: address
+ *         required: true
+ *         schema: { type: string }
+ *         description: Stellar Ed25519 public key (G...)
+ *     responses:
+ *       200:
+ *         description: Challenge issued
+ *       400:
+ *         description: Invalid Stellar wallet address
+ */
+router.get('/wallet-challenge', authLimiter, validateQuery(walletChallengeQuerySchema), AuthController.getWalletChallenge);
+
+/**
+ * @swagger
  * /api/v1/auth/wallet:
  *   post:
  *     summary: Authenticate with Stellar wallet
+ *     description: >
+ *       Step 2 of wallet auth. Verifies an Ed25519 signature over the message
+ *       returned by GET /api/v1/auth/wallet-challenge. See issue #170 —
+ *       previously this endpoint did not verify signature or message at all.
  *     tags: [Authentication]
+ *     responses:
+ *       200:
+ *         description: Authenticated
+ *       401:
+ *         description: Missing/invalid signature, expired or reused challenge, or domain mismatch
+ *       429:
+ *         description: Too many failed verification attempts for this wallet address
  */
 router.post('/wallet', authLimiter, validate(walletAuthSchema), AuthController.walletAuth);
 

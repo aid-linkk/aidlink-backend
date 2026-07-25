@@ -60,6 +60,13 @@ export const config = {
   
   walletAuth: {
     secret: process.env.WALLET_AUTH_SECRET!,
+    // Domain string embedded in and checked against every signed wallet-auth
+    // challenge, so a signature obtained for another service/domain can't be
+    // replayed against this one. Falls back to the CORS origin if unset.
+    appDomain: process.env.APP_DOMAIN || process.env.CORS_ORIGIN || 'aidlink.org',
+    challengeTtlSeconds: parseInt(process.env.WALLET_AUTH_CHALLENGE_TTL_SECONDS || '300', 10),
+    maxFailedAttempts: parseInt(process.env.WALLET_AUTH_MAX_FAILED_ATTEMPTS || '5', 10),
+    failedAttemptWindowSeconds: parseInt(process.env.WALLET_AUTH_FAILED_ATTEMPT_WINDOW_SECONDS || '900', 10),
   },
   
   email: {

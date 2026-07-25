@@ -95,6 +95,33 @@ export const ErrorCodes = {
     cause: 'A resend/verify action was requested for an account whose email is already verified.',
     solution: 'No action needed — proceed to log in.',
   },
+  AUTH_011: {
+    httpStatus: 400,
+    message: 'Invalid Stellar wallet address',
+    cause: 'The supplied wallet address is not a well-formed Stellar Ed25519 public key.',
+    solution: 'Double-check the address; it must be a 56-character Stellar public key starting with "G".',
+  },
+  AUTH_012: {
+    httpStatus: 401,
+    message: 'Wallet challenge not found, already used, or expired',
+    cause: 'No matching challenge was issued for this address, it was already consumed by a prior ' +
+      'wallet-auth attempt, or it was not submitted within its 5-minute validity window.',
+    solution: 'Call GET /auth/wallet-challenge again to obtain a fresh challenge, sign it, and retry immediately.',
+  },
+  AUTH_013: {
+    httpStatus: 401,
+    message: 'Wallet signature verification failed',
+    cause: 'The submitted signature does not verify against the claimed wallet address for the given message, ' +
+      'or the message does not match the challenge that was issued for this domain.',
+    solution: 'Sign the exact message returned by GET /auth/wallet-challenge with the matching private key.',
+  },
+  AUTH_014: {
+    httpStatus: 429,
+    message: 'Too many failed wallet authentication attempts. Please try again later',
+    cause: 'The wallet address exceeded the allowed number of failed signature-verification attempts ' +
+      'in the current window.',
+    solution: 'Wait for the cooldown window to pass before requesting another wallet-challenge attempt.',
+  },
 
   // ── CAMPAIGN ────────────────────────────────────────────────────────
   CAMPAIGN_001: {
