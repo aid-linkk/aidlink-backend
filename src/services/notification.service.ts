@@ -1,5 +1,5 @@
 import prisma from '../config/database';
-import { NotificationType, NotificationStatus, NotificationDeliveryStatus } from '@prisma/client';
+import { NotificationType, NotificationStatus, NotificationDeliveryStatus, Role } from '@prisma/client';
 import logger from '../config/logger';
 import nodemailer from 'nodemailer';
 import { config } from '../config';
@@ -8,6 +8,7 @@ import { EmailTemplateService } from './emailTemplate.service';
 import { EmailPreferenceService } from './email-preference.service';
 import { sanitizeObject, sanitizeString } from '../utils/sanitization';
 import { classifyDeliveryError } from '../utils/deliveryErrors';
+import { AdminNotificationPreferenceService } from './adminNotificationPreference.service';
 
 const EMAIL_DELIVERY_MAX_ATTEMPTS = 3;
 const EMAIL_DELIVERY_BASE_DELAY_MS = 200;
@@ -70,6 +71,70 @@ export class NotificationService {
     message: string,
     metadata?: any
   ): Promise<any> {
+    // Check admin-specific notification preferences before persisting
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+
+    if (user?.role === Role.ADMIN || user?.role === Role.VERIFIER || user?.role === Role.AUDITOR) {
+      const decision = await AdminNotificationPreferenceService.shouldDeliver(
+        userId, type, metadata as Record<string, unknown> | undefined
+      );
+
+      if (!decision.deliver) {
+        logger.info(
+          `Admin notification suppressed for ${userId} [${type}]: ${decision.reason ?? 'preference'}`
+        );
+        // Return a minimal stub so callers don't have to null-check
+        return {
+          id: `suppressed-${Date.now()}`,
+          userId, type, title, message,
+          status: 'ARCHIVED',
+          suppressed: true,
+          suppressReason: decision.reason,
+        };
+      }
+
+      // Persist the notification record
+      const notification = await prisma.notification.create({
+        data: {
+          userId,
+          type,
+          title: sanitizeString(title),
+          message: sanitizeString(message),
+          metadata: metadata ? sanitizeObject(metadata) : undefined,
+          sentVia: [],
+        },
+      });
+
+      // Queue for digest if frequency is not IMMEDIATE
+      if (decision.queued) {
+        const pref = await prisma.adminNotificationPreference.findUnique({ where: { userId } });
+        const frequency = pref?.frequency ?? 'IMMEDIATE';
+        if (frequency !== 'IMMEDIATE') {
+          await AdminNotificationPreferenceService.enqueueForDigest(userId, notification.id, frequency as any);
+          logger.info(`Admin notification ${notification.id} queued for ${frequency} digest`);
+          return notification;
+        }
+      }
+
+      // Broadcast in-app only if IN_APP is in channels
+      if (decision.channels.includes('IN_APP' as any)) {
+        try {
+          const unreadCount = await prisma.notification.count({
+            where: { userId, status: NotificationStatus.UNREAD },
+          });
+          sendNotificationWithCount(userId, notification, unreadCount);
+        } catch (wsError) {
+          logger.error('Error broadcasting admin notification via WebSocket:', wsError);
+        }
+      }
+
+      return notification;
+    }
+
+    // Non-admin path (unchanged behaviour)
     const notification = await prisma.notification.create({
       data: {
         userId,
@@ -148,6 +213,27 @@ export class NotificationService {
    *  7. Log template render to audit table
    */
   static async sendNotificationEmail(userId: string, notification: any): Promise<void> {
+    // Suppressed stub — nothing to deliver
+    if (notification.suppressed) return;
+
+    // For admin/verifier/auditor: respect channel preferences
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+
+    if (user?.role === Role.ADMIN || user?.role === Role.VERIFIER || user?.role === Role.AUDITOR) {
+      const decision = await AdminNotificationPreferenceService.shouldDeliver(
+        userId,
+        notification.type as NotificationType,
+        (notification.metadata ?? {}) as Record<string, unknown>
+      );
+      if (!decision.deliver || !decision.channels.includes('EMAIL' as any)) {
+        logger.info(`Email skipped for admin ${userId} — not in channel preferences`);
+        return;
+      }
+    }
+
     // 1. Check preferences (user existence, emailVerified, category opt-in)
     const shouldSend = await EmailPreferenceService.shouldSendEmail(
       userId,

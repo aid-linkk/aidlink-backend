@@ -5,6 +5,7 @@ import { OrganizationController } from '../controllers/organization.controller';
 import { MilestoneController } from '../controllers/milestone.controller';
 import { RecoveryController } from '../controllers/recovery.controller';
 import { DatabaseController } from '../controllers/database.controller';
+import { AdminNotificationPreferenceController } from '../controllers/adminNotificationPreference.controller';
 import { authenticate, authorize } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
@@ -250,21 +251,111 @@ router.post('/campaigns/:id/settle', authenticate, RecoveryController.settleCamp
 
 /**
  * @route   GET /api/v1/admin/database/metrics
- * @desc    Connection pool gauges and query performance metrics
- * @access  Private (Admin)
  */
 router.get('/database/metrics', authenticate, authorize('ADMIN'), DatabaseController.getMetrics);
 
 /**
  * @route   POST /api/v1/admin/database/metrics/reset
- * @desc    Reset the in-memory query metrics counters
- * @access  Private (Admin)
  */
 router.post(
   '/database/metrics/reset',
   authenticate,
   authorize('ADMIN'),
   DatabaseController.resetMetrics
+);
+
+// ─── Admin Notification Preferences ──────────────────────────────────
+
+const notifPrefSchema = z.object({
+  typePreferences: z.record(
+    z.enum([
+      'DONATION_RECEIVED', 'CAMPAIGN_UPDATE', 'DISTRIBUTION_SENT', 'KYC_APPROVED', 'KYC_REJECTED',
+      'ORGANIZATION_PROFILE_UPDATED', 'ORGANIZATION_VERIFICATION_SUBMITTED',
+      'ORGANIZATION_VERIFICATION_APPROVED', 'ORGANIZATION_VERIFICATION_REJECTED',
+      'ORGANIZATION_VERIFICATION_INFO_REQUESTED', 'BANK_ACCOUNT_ADDED',
+      'BANK_ACCOUNT_REVIEW_REQUIRED', 'SYSTEM_ALERT', 'SECURITY_ALERT',
+      'CAMPAIGN_SUSPENDED', 'CAMPAIGN_REINSTATED', 'APPEAL_UPDATE',
+      'MILESTONE_SUBMISSION_RECEIVED', 'MILESTONE_APPROVED', 'MILESTONE_REJECTED',
+      'MILESTONE_REVISION_REQUESTED', 'REFUND_FAILED', 'REFUND_RECOVERED',
+      'DISTRIBUTION_FAILED', 'CAMPAIGN_SETTLEMENT', 'DONOR_CREDIT_ISSUED',
+    ]),
+    z.enum(['ALL', 'ALERTS_ONLY', 'NONE'])
+  ).optional(),
+  channels: z.array(z.enum(['EMAIL', 'IN_APP', 'SMS'])).min(1).optional(),
+  frequency: z.enum(['IMMEDIATE', 'DAILY_DIGEST', 'WEEKLY']).optional(),
+  campaignFilter: z.array(z.string()).optional(),
+  userRoleFilter: z.array(z.enum(['ADMIN', 'ORGANIZATION', 'DONOR', 'BENEFICIARY', 'VERIFIER', 'AUDITOR'])).optional(),
+  muteAll: z.boolean().optional(),
+  quietHoursStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),
+  quietHoursEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),
+}).refine(
+  (d) => {
+    if (d.quietHoursStart && !d.quietHoursEnd) return false;
+    if (d.quietHoursEnd && !d.quietHoursStart) return false;
+    return true;
+  },
+  { message: 'quietHoursStart and quietHoursEnd must both be set or both omitted' }
+);
+
+/**
+ * @route   GET  /api/v1/admin/notification-preferences
+ * @desc    Get the authenticated admin's notification preferences
+ * @access  Private (ADMIN, VERIFIER, AUDITOR)
+ */
+router.get(
+  '/notification-preferences',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER', 'AUDITOR'),
+  AdminNotificationPreferenceController.getPreferences
+);
+
+/**
+ * @route   PUT  /api/v1/admin/notification-preferences
+ * @desc    Create or update notification preferences (partial merge)
+ * @access  Private (ADMIN, VERIFIER, AUDITOR)
+ */
+router.put(
+  '/notification-preferences',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER', 'AUDITOR'),
+  validate(notifPrefSchema),
+  AdminNotificationPreferenceController.upsertPreferences
+);
+
+/**
+ * @route   DELETE /api/v1/admin/notification-preferences
+ * @desc    Reset notification preferences to platform defaults
+ * @access  Private (ADMIN, VERIFIER, AUDITOR)
+ */
+router.delete(
+  '/notification-preferences',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER', 'AUDITOR'),
+  AdminNotificationPreferenceController.resetPreferences
+);
+
+/**
+ * @route   GET  /api/v1/admin/notification-preferences/digest
+ * @desc    List pending digest-queue entries
+ * @access  Private (ADMIN, VERIFIER, AUDITOR)
+ */
+router.get(
+  '/notification-preferences/digest',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER', 'AUDITOR'),
+  AdminNotificationPreferenceController.getPendingDigest
+);
+
+/**
+ * @route   POST /api/v1/admin/notification-preferences/digest/flush
+ * @desc    Manually flush all due digest notifications
+ * @access  Private (ADMIN, VERIFIER, AUDITOR)
+ */
+router.post(
+  '/notification-preferences/digest/flush',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER', 'AUDITOR'),
+  AdminNotificationPreferenceController.flushDigest
 );
 
 export default router;
