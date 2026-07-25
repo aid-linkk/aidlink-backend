@@ -54,6 +54,12 @@ export class ModerationService {
     changes?: any
   ): Promise<void> {
     try {
+      // `changes` may include a `campaignId` field — promote it into `metadata`
+      // so CampaignAuditService queries (which filter on metadata.campaignId) pick
+      // up suspension, reinstatement, appeal, and fraud-report events.
+      const campaignId: string | undefined =
+        changes?.campaignId ?? (entityType === 'Campaign' ? entityId : undefined);
+
       await prisma.auditLog.create({
         data: {
           userId: actorId ?? undefined,
@@ -61,6 +67,7 @@ export class ModerationService {
           entityType,
           entityId,
           changes,
+          metadata: campaignId ? { campaignId } : undefined,
         },
       });
     } catch (error) {
@@ -665,7 +672,7 @@ export class ModerationService {
     let cursor: string | undefined;
 
     // Keyset pagination over active campaigns.
-    for (;;) {
+    for (; ;) {
       const campaigns = await prisma.campaign.findMany({
         where: { status: CampaignStatus.ACTIVE },
         take: batchSize,

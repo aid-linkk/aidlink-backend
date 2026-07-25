@@ -892,6 +892,11 @@ enum AuditAction {
   RECOVERY_MANUAL_OVERRIDE
   DONOR_CREDIT_ISSUED
   DONATION_IDENTITY_REVEALED
+  CAMPAIGN_STATUS_CHANGED
+  MILESTONE_ADDED
+  BENEFICIARY_ASSIGNED
+  DISTRIBUTION_CREATED
+  DISTRIBUTION_CONFIRMED
 }
 
 model AuditLog {
@@ -913,6 +918,7 @@ model AuditLog {
   @@index([entityType])
   @@index([entityId])
   @@index([createdAt])
+  @@index([entityType, entityId, createdAt(sort: Desc)])
 }
 
 // ============================================
