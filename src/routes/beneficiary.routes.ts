@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { BeneficiaryController } from '../controllers/beneficiary.controller';
-import { authenticate, requireVerified } from '../middleware/auth';
+import { BulkBeneficiaryController } from '../controllers/bulkBeneficiary.controller';
+import { authenticate, requireVerified, authorize } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
+import { uploadSingle } from '../middleware/upload';
 
 const router = Router();
 
@@ -168,6 +170,158 @@ router.patch(
   authenticate,
   validate(kycReviewSchema),
   BeneficiaryController.reviewKYC
+);
+
+// ── Bulk / Batch Routes ──────────────────────────────────────────────────────
+
+const bulkStatusUpdateSchema = z.object({
+  items: z.array(z.object({
+    beneficiaryId: z.string().min(1),
+    status: z.enum(['PENDING', 'VERIFIED', 'REJECTED', 'SUSPENDED', 'ACTIVE']),
+    reason: z.string().optional(),
+  })).min(1, 'At least one item is required').max(1000, 'Maximum 1000 items per batch'),
+});
+
+const bulkKYCSchema = z.object({
+  items: z.array(z.object({
+    beneficiaryId: z.string().min(1),
+    documentType: z.string().min(1),
+    documentUrl: z.string().url(),
+    submissionType: z.string().min(1),
+    selfieUrl: z.string().url().optional(),
+  })).min(1).max(500),
+});
+
+const batchDistributionSchema = z.object({
+  campaignId: z.string().min(1, 'Campaign ID is required'),
+  items: z.array(z.object({
+    beneficiaryId: z.string().min(1),
+    amount: z.number().positive(),
+    method: z.enum(['CASH', 'BANK_TRANSFER', 'MOBILE_MONEY', 'CRYPTO', 'VOUCHER', 'IN_KIND']),
+    notes: z.string().optional(),
+  })).min(1).max(500),
+});
+
+const bulkNotifySchema = z.object({
+  items: z.array(z.object({
+    beneficiaryId: z.string().min(1),
+    title: z.string().min(1).max(255),
+    message: z.string().min(1).max(2000),
+    metadata: z.record(z.unknown()).optional(),
+  })).min(1).max(1000),
+});
+
+/**
+ * @route   GET /api/v1/beneficiaries/bulk/import/template
+ * @desc    Download CSV template for bulk import
+ * @access  Private (Admin, Organization)
+ */
+router.get(
+  '/bulk/import/template',
+  authenticate,
+  authorize('ADMIN', 'ORGANIZATION'),
+  BulkBeneficiaryController.getImportTemplate
+);
+
+/**
+ * @route   POST /api/v1/beneficiaries/bulk/import
+ * @desc    Import beneficiaries from a CSV file
+ * @access  Private (Admin, Organization)
+ */
+router.post(
+  '/bulk/import',
+  authenticate,
+  authorize('ADMIN', 'ORGANIZATION'),
+  uploadSingle('file'),
+  BulkBeneficiaryController.importCSV
+);
+
+/**
+ * @route   POST /api/v1/beneficiaries/bulk/status
+ * @desc    Batch update beneficiary statuses
+ * @access  Private (Admin, Verifier)
+ */
+router.post(
+  '/bulk/status',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER'),
+  validate(bulkStatusUpdateSchema),
+  BulkBeneficiaryController.batchStatusUpdate
+);
+
+/**
+ * @route   POST /api/v1/beneficiaries/bulk/kyc
+ * @desc    Bulk KYC submission for multiple beneficiaries
+ * @access  Private (Admin, Organization)
+ */
+router.post(
+  '/bulk/kyc',
+  authenticate,
+  authorize('ADMIN', 'ORGANIZATION'),
+  validate(bulkKYCSchema),
+  BulkBeneficiaryController.bulkKYCSubmit
+);
+
+/**
+ * @route   POST /api/v1/beneficiaries/bulk/distributions
+ * @desc    Batch create distributions for a campaign
+ * @access  Private (Admin, Organization)
+ */
+router.post(
+  '/bulk/distributions',
+  authenticate,
+  authorize('ADMIN', 'ORGANIZATION'),
+  validate(batchDistributionSchema),
+  BulkBeneficiaryController.batchCreateDistributions
+);
+
+/**
+ * @route   POST /api/v1/beneficiaries/bulk/notify
+ * @desc    Send bulk notifications to beneficiaries
+ * @access  Private (Admin, Organization)
+ */
+router.post(
+  '/bulk/notify',
+  authenticate,
+  authorize('ADMIN', 'ORGANIZATION'),
+  validate(bulkNotifySchema),
+  BulkBeneficiaryController.bulkNotify
+);
+
+/**
+ * @route   GET /api/v1/beneficiaries/bulk/jobs
+ * @desc    List batch jobs for the authenticated actor
+ * @access  Private (Admin, Organization, Verifier)
+ */
+router.get(
+  '/bulk/jobs',
+  authenticate,
+  authorize('ADMIN', 'ORGANIZATION', 'VERIFIER'),
+  BulkBeneficiaryController.listJobs
+);
+
+/**
+ * @route   GET /api/v1/beneficiaries/bulk/jobs/:jobId
+ * @desc    Get batch job status and progress
+ * @access  Private (Admin, Organization, Verifier)
+ */
+router.get(
+  '/bulk/jobs/:jobId',
+  authenticate,
+  authorize('ADMIN', 'ORGANIZATION', 'VERIFIER'),
+  BulkBeneficiaryController.getJobStatus
+);
+
+/**
+ * @route   POST /api/v1/beneficiaries/bulk/jobs/:jobId/rollback
+ * @desc    Rollback a completed or partial batch job
+ * @access  Private (Admin)
+ */
+router.post(
+  '/bulk/jobs/:jobId/rollback',
+  authenticate,
+  authorize('ADMIN'),
+  BulkBeneficiaryController.rollbackJob
 );
 
 export default router;

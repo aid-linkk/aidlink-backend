@@ -1067,6 +1067,50 @@ model WebhookEvent {
 }
 
 // ============================================
+// BATCH JOBS
+// ============================================
+
+enum BatchJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  PARTIAL
+  ROLLED_BACK
+}
+
+enum BatchJobType {
+  BENEFICIARY_IMPORT
+  BENEFICIARY_STATUS_UPDATE
+  KYC_BULK_SUBMIT
+  DISTRIBUTION_BATCH_CREATE
+  BULK_NOTIFICATION
+}
+
+model BatchJob {
+  id             String         @id @default(cuid())
+  type           BatchJobType
+  status         BatchJobStatus @default(PENDING)
+  createdBy      String
+  totalItems     Int            @default(0)
+  processedItems Int            @default(0)
+  successCount   Int            @default(0)
+  failureCount   Int            @default(0)
+  errors         Json?          // Array of {index, message, data}
+  metadata       Json?          // Input params, filters, etc.
+  rollbackData   Json?          // Saved state for rollback capability
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([createdBy])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ============================================
 // QUEUE JOBS
 // ============================================
 
