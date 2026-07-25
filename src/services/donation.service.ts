@@ -1,6 +1,6 @@
 import prisma from '../config/database';
 import { DonationInput, DonationFilters, PaginatedResponse } from '../types';
-import { AuditAction, DonationStatus, Role } from '@prisma/client';
+import { AuditAction, DonationStatus, Prisma, Role } from '@prisma/client';
 import { MultiplierService } from './multiplier.service';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
@@ -11,7 +11,133 @@ import { sanitizeString } from '../utils/sanitization';
 import { sanitizeAnonymousInput, sanitizeDonorIdentity } from '../utils/anonymity';
 import { MatchedFundAllocationService } from './matchedFundAllocation.service';
 
+export interface CreateConfirmedDonationInput {
+  campaignId: string;
+  userId?: string | null;
+  amount: Prisma.Decimal.Value;
+  currency?: string;
+  blockchainTxHash: string;
+  isAnonymous?: boolean;
+  memo?: string;
+  fromWallet?: string;
+  toWallet?: string;
+}
+
 export class DonationService {
+  /**
+   * @notice Shared side-effect path for "a donation has just been confirmed":
+   * multiplier evaluation, matched-fund allocation, and the campaign balance
+   * update. Used by both confirmDonation (existing donation, PENDING ->
+   * CONFIRMED) and createConfirmedDonation (new donation created directly as
+   * CONFIRMED, e.g. from the pledge worker) so the two flows can never drift
+   * apart. Must be called from within the caller's own transaction.
+   */
+  private static async applyConfirmationEffects(
+    tx: Prisma.TransactionClient,
+    params: { donationId: string; campaignId: string; donorAmount: Prisma.Decimal.Value },
+  ) {
+    const multiplier = await MultiplierService.evaluateMultiplierAtDonation(
+      { campaignId: params.campaignId, donationTime: new Date(), milestoneId: null },
+      tx,
+    );
+
+    const matchedFund = await MatchedFundAllocationService.allocate(tx, {
+      donationId: params.donationId,
+      campaignId: params.campaignId,
+      donorAmount: params.donorAmount,
+      multiplier,
+    });
+
+    await tx.campaign.update({
+      where: { id: params.campaignId },
+      data: {
+        currentAmount: {
+          increment: params.donorAmount,
+        },
+      },
+    });
+
+    return { multiplier, matchedFund };
+  }
+
+  /**
+   * @notice Post-commit side effects shared by every donation-confirmation
+   * path: webhook dispatch, analytics cache increment, and receipt
+   * generation. Intentionally fire-and-forget (errors are logged, not
+   * thrown) and intentionally called AFTER the DB transaction commits, since
+   * none of these are safe or necessary to run inside it.
+   */
+  static dispatchPostConfirmationSideEffects(params: {
+    donationId: string;
+    campaignId: string;
+    amount: Prisma.Decimal.Value;
+    currency: string;
+    txHash: string;
+    isAnonymous: boolean;
+    userId?: string | null;
+  }): void {
+    const { donationId, campaignId, amount, currency, txHash, isAnonymous, userId } = params;
+
+    dispatchWebhookEvent('DONATION_CONFIRMED', {
+      donationId,
+      campaignId,
+      amount,
+      currency,
+      blockchainTxHash: txHash,
+      isAnonymous,
+    }).catch((err) => logger.error('Webhook dispatch error (donation.confirmed):', err));
+
+    AnalyticsService.incrementDonationStats(campaignId, Number(amount)).catch((err) =>
+      logger.error('Analytics increment error (donation.confirmed):', err),
+    );
+
+    if (config.receipts.enabled && userId) {
+      import('../workers/receipt.worker.js')
+        .then(({ enqueueReceiptGeneration }) => enqueueReceiptGeneration(donationId))
+        .catch((error) =>
+          logger.error(`Failed to enqueue receipt generation for donation ${donationId}:`, error),
+        );
+    }
+  }
+
+  /**
+   * @notice Atomically creates a Donation row already in CONFIRMED status
+   * and runs the same matched-fund / campaign-balance effects as
+   * confirmDonation. For flows (like the pledge worker) where there is no
+   * pre-existing PENDING donation to transition — the charge has already
+   * succeeded off-band, and this is the durable record of it. Must be
+   * called from within the caller's own prisma.$transaction so it commits
+   * atomically with whatever else the caller writes in the same tx (e.g. a
+   * PledgeAttempt row).
+   */
+  static async createConfirmedDonation(
+    tx: Prisma.TransactionClient,
+    input: CreateConfirmedDonationInput,
+  ) {
+    const donation = await tx.donation.create({
+      data: {
+        campaignId: input.campaignId,
+        userId: input.userId ?? undefined,
+        amount: input.amount,
+        currency: input.currency ?? 'XLM',
+        status: DonationStatus.CONFIRMED,
+        blockchainTxHash: input.blockchainTxHash,
+        fromWallet: input.fromWallet,
+        toWallet: input.toWallet,
+        isAnonymous: input.isAnonymous ?? false,
+        memo: input.memo,
+      },
+    });
+
+    const { matchedFund } = await DonationService.applyConfirmationEffects(tx, {
+      donationId: donation.id,
+      campaignId: input.campaignId,
+      donorAmount: donation.amount,
+    });
+
+    return { donation, matchedFund };
+  }
+
   static async createDonation(data: DonationInput, userId?: string): Promise<any> {
     const campaign = await prisma.campaign.findUnique({
       where: { id: data.campaignId },
@@ -77,32 +203,13 @@ export class DonationService {
 
       const updatedDonation = await tx.donation.findUniqueOrThrow({ where: { id } });
 
-      // Multiplier evaluation reads through the same transaction so it sees a
-      // consistent view of the multiplier set relative to the allocation below.
-      const multiplier = await MultiplierService.evaluateMultiplierAtDonation(
-        {
-          campaignId: donation.campaignId,
-          donationTime: new Date(),
-          milestoneId: null,
-        },
-        tx,
-      );
-
-      const matchedFund = await MatchedFundAllocationService.allocate(tx, {
+      // Multiplier evaluation + matched-fund allocation + campaign balance
+      // update — shared with createConfirmedDonation (pledge worker) so the
+      // two confirmation paths can never drift apart.
+      const { matchedFund } = await DonationService.applyConfirmationEffects(tx, {
         donationId: updatedDonation.id,
         campaignId: donation.campaignId,
         donorAmount: updatedDonation.amount,
-        multiplier,
-      });
-
-      // Update campaign current amount (donor-sourced only)
-      await tx.campaign.update({
-        where: { id: donation.campaignId },
-        data: {
-          currentAmount: {
-            increment: donation.amount,
-          },
-        },
       });
 
       // Backwards-compatible response: top-level donation fields
@@ -115,22 +222,15 @@ export class DonationService {
 
     logger.info(`Donation confirmed: ${id} with tx ${txHash}`);
 
-    dispatchWebhookEvent('DONATION_CONFIRMED', {
+    DonationService.dispatchPostConfirmationSideEffects({
       donationId: id,
       campaignId: donation.campaignId,
       amount: updated.amount,
       currency: updated.currency,
-      blockchainTxHash: txHash,
+      txHash,
       isAnonymous: donation.isAnonymous,
-    }).catch((err) => logger.error('Webhook dispatch error (donation.confirmed):', err));
-
-    if (config.receipts.enabled && donation.userId) {
-      import('../workers/receipt.worker.js')
-        .then(({ enqueueReceiptGeneration }) => enqueueReceiptGeneration(id))
-        .catch((error) =>
-          logger.error(`Failed to enqueue receipt generation for donation ${id}:`, error),
-        );
-    }
+      userId: donation.userId,
+    });
 
     return updated;
   }

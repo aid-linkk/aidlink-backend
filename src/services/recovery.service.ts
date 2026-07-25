@@ -107,6 +107,70 @@ export async function createFailedRefundCase(
   return rc;
 }
 
+/**
+ * @notice Dead-letter case for a recurring pledge whose payment has failed
+ * MAX_RETRIES times within a single billing cycle (see pledge.worker.ts).
+ * Notifies the donor and creates an admin-facing recovery case, mirroring
+ * createFailedRefundCase's shape.
+ */
+export async function createFailedPledgeCase(
+  pledgeId: string,
+  donorUserId: string,
+  failureReason: string,
+  failureMetadata?: object
+) {
+  const existing = await prisma.recoveryCase.findFirst({
+    where: {
+      pledgeId,
+      type: RecoveryCaseType.FAILED_PLEDGE,
+      status: { notIn: [RecoveryStatus.RECOVERED, RecoveryStatus.FAILED_PERMANENTLY] },
+    },
+  });
+  if (existing) return existing;
+
+  const rc = await prisma.$transaction(async (tx) => {
+    const created = await tx.recoveryCase.create({
+      data: {
+        type: RecoveryCaseType.FAILED_PLEDGE,
+        pledgeId,
+        failureReason,
+        ...(failureMetadata !== undefined ? { failureMetadata } : {}),
+        status: RecoveryStatus.PENDING,
+        maxRetries: MAX_RETRIES,
+        nextRetryAt: nextRetryAt(0),
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        userId: null,
+        action: AuditAction.RECOVERY_CASE_CREATED,
+        entityType: 'RecoveryCase',
+        entityId: created.id,
+        metadata: { type: created.type, pledgeId, failureReason },
+      },
+    });
+
+    if (donorUserId) {
+      await tx.notification.create({
+        data: {
+          userId: donorUserId,
+          type: NotificationType.PLEDGE_PAYMENT_FAILED,
+          title: 'Pledge Payment Failed',
+          message: `We were unable to process your pledge payment after multiple attempts: ${failureReason}. Our team has been notified and will follow up.`,
+          metadata: { recoveryCaseId: created.id, pledgeId },
+          sentVia: [],
+        },
+      });
+    }
+
+    return created;
+  });
+
+  logger.info(`Recovery case created [FAILED_PLEDGE]: ${rc.id}`);
+  return rc;
+}
+
 export async function createFailedDistributionCase(
   distributionId: string,
   failureReason: string,
