@@ -3,7 +3,8 @@ import { CampaignController } from '../controllers/campaign.controller';
 import { ModerationController } from '../controllers/moderation.controller';
 import { MilestoneController } from '../controllers/milestone.controller';
 import { AnalyticsController } from '../controllers/analytics.controller';
-import { authenticate } from '../middleware/auth';
+import { CampaignAuditController } from '../controllers/campaignAudit.controller';
+import { authenticate, authorize } from '../middleware/auth';
 import milestoneSubmissionRoutes from './milestone.routes';
 import { campaignCreateLimiter, reportLimiter } from '../middleware/rateLimit';
 import { validate } from '../middleware/validation';
@@ -482,6 +483,30 @@ router.use('/:campaignId/milestones/:milestoneId/submissions', milestoneSubmissi
 router.get(
   '/:campaignId/milestones/:milestoneId/verification-report',
   MilestoneController.getVerificationReport
+);
+
+/**
+ * @route   GET /api/v1/campaigns/:id/audit-log
+ * @desc    Get paginated audit trail for a campaign
+ * @access  Private (campaign owner, ADMIN, AUDITOR)
+ *
+ * Query params: page, limit, action, entityType, actorId, startDate, endDate
+ */
+router.get(
+  '/:id/audit-log',
+  authorize('ADMIN', 'AUDITOR', 'ORGANIZATION'),
+  CampaignAuditController.getAuditLog
+);
+
+/**
+ * @route   GET /api/v1/campaigns/:id/audit-log/:entryId
+ * @desc    Get a single audit log entry by ID
+ * @access  Private (campaign owner, ADMIN, AUDITOR)
+ */
+router.get(
+  '/:id/audit-log/:entryId',
+  authorize('ADMIN', 'AUDITOR', 'ORGANIZATION'),
+  CampaignAuditController.getAuditEntry
 );
 
 export default router;

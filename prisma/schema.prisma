@@ -67,6 +67,7 @@ model User {
   emailPreference         EmailPreference?
   emailVerificationTokens EmailVerificationToken[]
   verificationLogs        VerificationLog[]
+  adminNotificationPref   AdminNotificationPreference?
 
   @@index([email])
   @@index([walletAddress])
@@ -779,6 +780,79 @@ model EmailPreference {
   @@index([userId])
 }
 
+// ── Admin notification preferences ──────────────────────────────────────────
+
+enum NotificationChannel {
+  EMAIL
+  IN_APP
+  SMS
+}
+
+enum NotificationFrequency {
+  IMMEDIATE
+  DAILY_DIGEST
+  WEEKLY
+}
+
+enum AdminNotificationTypePreference {
+  ALL
+  ALERTS_ONLY
+  NONE
+}
+
+/// Per-admin granular control over which notifications are received, on which
+/// channels, at what frequency, and scoped to which entities.
+model AdminNotificationPreference {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  /// Per-type overrides. Keys are NotificationType values; values are
+  /// AdminNotificationTypePreference. Missing keys fall back to ALL.
+  typePreferences Json @default("{}")
+
+  /// Channels the admin wants notifications delivered on.
+  channels NotificationChannel[] @default([EMAIL, IN_APP])
+
+  /// Whether to batch or deliver immediately.
+  frequency NotificationFrequency @default(IMMEDIATE)
+
+  /// Optional whitelist of campaign IDs. Empty array = no filter (all campaigns).
+  campaignFilter String[] @default([])
+
+  /// Optional whitelist of user role strings (e.g. ["BENEFICIARY", "ORGANIZATION"]).
+  /// Empty array = no filter (all roles).
+  userRoleFilter String[] @default([])
+
+  /// Mute everything except SECURITY_ALERT.
+  muteAll Boolean @default(false)
+
+  /// Quiet hours (UTC 24h "HH:MM"). Immediate notifications are deferred until end.
+  quietHoursStart String?
+  quietHoursEnd   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Staging table for DAILY_DIGEST and WEEKLY batched delivery.
+model NotificationDigestQueue {
+  id             String                @id @default(cuid())
+  userId         String
+  notificationId String
+  frequency      NotificationFrequency
+  scheduledFor   DateTime
+  sent           Boolean               @default(false)
+  sentAt         DateTime?
+  createdAt      DateTime              @default(now())
+
+  @@index([userId, sent])
+  @@index([scheduledFor, sent])
+}
+
 model EmailTemplate {
   id              String   @id @default(cuid())
   name            String
@@ -893,6 +967,11 @@ enum AuditAction {
   RECOVERY_MANUAL_OVERRIDE
   DONOR_CREDIT_ISSUED
   DONATION_IDENTITY_REVEALED
+  CAMPAIGN_STATUS_CHANGED
+  MILESTONE_ADDED
+  BENEFICIARY_ASSIGNED
+  DISTRIBUTION_CREATED
+  DISTRIBUTION_CONFIRMED
 }
 
 model AuditLog {
@@ -914,6 +993,7 @@ model AuditLog {
   @@index([entityType])
   @@index([entityId])
   @@index([createdAt])
+  @@index([entityType, entityId, createdAt(sort: Desc)])
 }
 
 // ============================================
@@ -1067,6 +1147,50 @@ model WebhookEvent {
   @@index([eventType])
   @@index([status])
   @@index([nextRetryAt])
+  @@index([createdAt])
+}
+
+// ============================================
+// BATCH JOBS
+// ============================================
+
+enum BatchJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  PARTIAL
+  ROLLED_BACK
+}
+
+enum BatchJobType {
+  BENEFICIARY_IMPORT
+  BENEFICIARY_STATUS_UPDATE
+  KYC_BULK_SUBMIT
+  DISTRIBUTION_BATCH_CREATE
+  BULK_NOTIFICATION
+}
+
+model BatchJob {
+  id             String         @id @default(cuid())
+  type           BatchJobType
+  status         BatchJobStatus @default(PENDING)
+  createdBy      String
+  totalItems     Int            @default(0)
+  processedItems Int            @default(0)
+  successCount   Int            @default(0)
+  failureCount   Int            @default(0)
+  errors         Json?          // Array of {index, message, data}
+  metadata       Json?          // Input params, filters, etc.
+  rollbackData   Json?          // Saved state for rollback capability
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([createdBy])
+  @@index([type])
+  @@index([status])
   @@index([createdAt])
 }
 

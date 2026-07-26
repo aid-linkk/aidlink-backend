@@ -5,6 +5,7 @@ import { AppError } from '../middleware/error';
 import logger from '../config/logger';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 import { AnalyticsService } from './analytics.service';
+import { CampaignAuditService } from './campaignAudit.service';
 
 export class DistributionService {
   static async createDistribution(
@@ -58,6 +59,23 @@ export class DistributionService {
 
     logger.info(`Distribution created: ${distribution.id} for campaign ${data.campaignId}`);
 
+    CampaignAuditService.log({
+      campaignId: data.campaignId,
+      action: 'DISTRIBUTION_CREATED',
+      entityType: 'Distribution',
+      entityId: distribution.id,
+      actorId: userId,
+      changes: {
+        after: {
+          beneficiaryId: distribution.beneficiaryId,
+          amount: distribution.amount,
+          currency: distribution.currency,
+          method: distribution.method,
+          status: distribution.status,
+        },
+      },
+    });
+
     return distribution;
   }
 
@@ -100,6 +118,29 @@ export class DistributionService {
     });
 
     logger.info(`Distribution confirmed: ${id} with tx ${txHash}`);
+
+    CampaignAuditService.log({
+      campaignId: distribution.campaignId,
+      action: 'DISTRIBUTION_CONFIRMED',
+      entityType: 'Distribution',
+      entityId: id,
+      actorId: userId,
+      changes: {
+        diff: {
+          status: { old: distribution.status, new: DistributionStatus.COMPLETED },
+          blockchainTxHash: { old: distribution.blockchainTxHash, new: txHash },
+        },
+        after: {
+          status: DistributionStatus.COMPLETED,
+          blockchainTxHash: txHash,
+          distributedAt: updated.distributedAt,
+          distributedBy: userId,
+          amount: updated.amount,
+          currency: updated.currency,
+          beneficiaryId: distribution.beneficiaryId,
+        },
+      },
+    });
 
     dispatchWebhookEvent('DISTRIBUTION_COMPLETED', {
       distributionId: id,

@@ -1,7 +1,6 @@
 import express, { Application } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import compression from 'compression';
 import morgan from 'morgan';
 import path from 'path';
 import swaggerJsdoc from 'swagger-jsdoc';
@@ -15,6 +14,7 @@ import { connectRedis, disconnectRedis } from './config/redis';
 import { apiLimiter } from './middleware/rateLimit';
 import { errorHandler, notFoundHandler } from './middleware/error';
 import { requestLogger } from './middleware/requestLogger';
+import { configuredCompression } from './middleware/compression';
 import authRoutes from './routes/auth.routes';
 import campaignRoutes from './routes/campaign.routes';
 import beneficiaryRoutes from './routes/beneficiary.routes';
@@ -53,8 +53,8 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Compression middleware
-app.use(compression());
+// Compression middleware — gzip/br for responses >1KB, with metrics
+app.use(configuredCompression);
 
 // Logging middleware
 if (config.env === 'development') {
@@ -173,7 +173,7 @@ const startServer = async (): Promise<void> => {
         .then(() => logger.info('Campaign moderation worker started'))
         .catch((error) => logger.error('Failed to start moderation worker:', error));
     }
-    
+
     // Start tax-receipt worker (generation, email delivery, batch processing).
     // Dynamically imported so the BullMQ worker only connects when enabled.
     if (config.receipts.enabled) {

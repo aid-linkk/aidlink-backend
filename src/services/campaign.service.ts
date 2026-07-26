@@ -8,6 +8,7 @@ import { CampaignDuplicateService, DuplicateMatch as CampaignDuplicateMatch } fr
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 import { getOrSet, invalidateCampaignCache, invalidateSearchCache } from '../utils/cache';
 import { sanitizeString } from '../utils/sanitization';
+import { CampaignAuditService, diffObjects } from './campaignAudit.service';
 
 export class CampaignService {
   static async createCampaign(data: CampaignInput, userId: string, organizationId: string): Promise<any> {
@@ -49,6 +50,25 @@ export class CampaignService {
     });
 
     logger.info(`Campaign created: ${campaign.id} by user ${userId}`);
+
+    CampaignAuditService.log({
+      campaignId: campaign.id,
+      action: 'CAMPAIGN_CREATED',
+      entityType: 'Campaign',
+      entityId: campaign.id,
+      actorId: userId,
+      changes: {
+        after: {
+          title: campaign.title,
+          description: campaign.description,
+          targetAmount: campaign.targetAmount,
+          startDate: campaign.startDate,
+          endDate: campaign.endDate,
+          status: campaign.status,
+          organizationId: campaign.organizationId,
+        },
+      },
+    });
 
     if (duplicates.hasPotentialDuplicates) {
       logger.info(
@@ -304,6 +324,32 @@ export class CampaignService {
 
     logger.info(`Campaign updated: ${id} by user ${userId}`);
 
+    // Compute field-level diff for the audit entry
+    const before: Record<string, unknown> = {
+      title: campaign.title,
+      description: campaign.description,
+      targetAmount: campaign.targetAmount,
+      imageUrl: campaign.imageUrl,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+    };
+    const after: Record<string, unknown> = {
+      title: updated.title,
+      description: updated.description,
+      targetAmount: updated.targetAmount,
+      imageUrl: updated.imageUrl,
+      startDate: updated.startDate,
+      endDate: updated.endDate,
+    };
+    CampaignAuditService.log({
+      campaignId: id,
+      action: 'CAMPAIGN_UPDATED',
+      entityType: 'Campaign',
+      entityId: id,
+      actorId: userId,
+      changes: { diff: diffObjects(before, after), before, after },
+    });
+
     // Invalidate campaign listing caches
     await invalidateCampaignCache(id);
 
@@ -342,6 +388,21 @@ export class CampaignService {
     await invalidateCampaignCache(id);
     await invalidateSearchCache();
 
+    CampaignAuditService.log({
+      campaignId: id,
+      action: 'CAMPAIGN_DELETED',
+      entityType: 'Campaign',
+      entityId: id,
+      actorId: userId,
+      changes: {
+        before: {
+          title: campaign.title,
+          status: campaign.status,
+          targetAmount: campaign.targetAmount,
+        },
+      },
+    });
+
     logger.info(`Campaign deleted: ${id} by user ${userId}`);
   }
 
@@ -375,6 +436,17 @@ export class CampaignService {
     });
 
     logger.info(`Campaign status updated: ${id} to ${status} by user ${userId}`);
+
+    CampaignAuditService.log({
+      campaignId: id,
+      action: 'CAMPAIGN_STATUS_CHANGED',
+      entityType: 'Campaign',
+      entityId: id,
+      actorId: userId,
+      changes: {
+        diff: { status: { old: campaign.status, new: status } },
+      },
+    });
 
     // Invalidate campaign caches
     await invalidateCampaignCache(id);
@@ -435,6 +507,22 @@ export class CampaignService {
     });
 
     logger.info(`Milestone added to campaign ${campaignId} by user ${userId}`);
+
+    CampaignAuditService.log({
+      campaignId,
+      action: 'MILESTONE_ADDED',
+      entityType: 'Milestone',
+      entityId: milestone.id,
+      actorId: userId,
+      changes: {
+        after: {
+          title: milestone.title,
+          description: milestone.description,
+          targetAmount: milestone.targetAmount,
+          order: milestone.order,
+        },
+      },
+    });
 
     dispatchWebhookEvent('CAMPAIGN_MILESTONE_REACHED', {
       milestoneId: milestone.id,
@@ -515,6 +603,23 @@ export class CampaignService {
     });
 
     logger.info(`Beneficiary ${beneficiaryId} assigned to campaign ${campaignId} by user ${userId}`);
+
+    CampaignAuditService.log({
+      campaignId,
+      action: 'BENEFICIARY_ASSIGNED',
+      entityType: 'BeneficiaryAssignment',
+      entityId: assignment.id,
+      actorId: userId,
+      changes: {
+        after: {
+          beneficiaryId,
+          assignedAmount: assignment.assignedAmount,
+          allocatedAmount: assignment.allocatedAmount,
+          priority: assignment.priority,
+          notes: assignment.notes,
+        },
+      },
+    });
 
     return assignment;
   }

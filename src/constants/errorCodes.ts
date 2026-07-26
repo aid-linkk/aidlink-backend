@@ -358,6 +358,38 @@ export const ErrorCodes = {
     solution: 'Upload a higher-resolution image that meets the minimum dimensions.',
   },
 
+  // ── BATCH OPERATIONS ────────────────────────────────────────────────
+  BATCH_001: {
+    httpStatus: 404,
+    message: 'Batch job not found',
+    cause: 'No batch job exists for the given ID.',
+    solution: 'Verify the batch job ID.',
+  },
+  BATCH_002: {
+    httpStatus: 400,
+    message: 'Batch job cannot be rolled back in its current state',
+    cause: 'Rollback is only supported for COMPLETED or PARTIAL batch jobs.',
+    solution: 'Check the batch job status before attempting a rollback.',
+  },
+  BATCH_003: {
+    httpStatus: 400,
+    message: 'CSV file is required for bulk import',
+    cause: 'No CSV file was attached to the import request.',
+    solution: 'Attach a CSV file with the correct column headers and retry.',
+  },
+  BATCH_004: {
+    httpStatus: 400,
+    message: 'Batch operation requires at least one item',
+    cause: 'The items array in the request body was empty.',
+    solution: 'Provide at least one item in the batch request.',
+  },
+  BATCH_005: {
+    httpStatus: 422,
+    message: 'CSV contains no valid rows',
+    cause: 'Every row in the uploaded CSV failed validation.',
+    solution: 'Fix the data in the CSV file and re-upload. Check the errors field for details.',
+  },
+
   // ── RECEIPT ─────────────────────────────────────────────────────────
   RECEIPT_001: {
     httpStatus: 400,
