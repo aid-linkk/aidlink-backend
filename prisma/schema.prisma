@@ -721,6 +721,7 @@ enum NotificationType {
   DISTRIBUTION_FAILED
   CAMPAIGN_SETTLEMENT
   DONOR_CREDIT_ISSUED
+  PLEDGE_PAYMENT_FAILED
 }
 
 enum NotificationStatus {
@@ -923,6 +924,7 @@ enum RecoveryCaseType {
   FAILED_REFUND
   FAILED_DISTRIBUTION
   CANCELLED_CAMPAIGN_FUNDS
+  FAILED_PLEDGE
 }
 
 enum RecoveryStatus {
@@ -947,6 +949,7 @@ model RecoveryCase {
   donationId      String?
   distributionId  String?
   campaignId      String?
+  pledgeId        String?
   // failure metadata
   failureReason   String?           @db.Text
   failureMetadata Json?
@@ -971,6 +974,7 @@ model RecoveryCase {
   @@index([donationId])
   @@index([distributionId])
   @@index([campaignId])
+  @@index([pledgeId])
   @@index([nextRetryAt])
   @@index([createdAt])
 }
@@ -1267,6 +1271,12 @@ model PledgeAttempt {
   attemptAt        DateTime            @default(now())
   status           PledgeAttemptStatus @default(PENDING)
   providerReference String?
+  // The billing-cycle window (captured from Pledge.nextRunAt at the start of
+  // the processing tick, before any attempt is recorded) this attempt
+  // belongs to. Used to scope retry counts to the current cycle instead of
+  // counting all-time attempts, and to audit which cycle a SUCCESS row
+  // completed. Nullable so existing rows are unaffected.
+  billingCycleAt   DateTime?
   failureReason    String?
   retryCount       Int                 @default(0)
   metadata         Json?
@@ -1276,6 +1286,10 @@ model PledgeAttempt {
 
   @@index([pledgeId])
   @@index([status])
+  // A SUCCESS attempt with providerReference = idempotencyKey for a given
+  // (pledgeId, billingCycleAt) marks that cycle as completed — this partial
+  // covering index makes the restart-safety lookup in the worker cheap.
+  @@index([pledgeId, providerReference, status])
   @@map("pledge_attempts")
 }
 
