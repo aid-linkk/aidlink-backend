@@ -1,9 +1,10 @@
-import { Response, NextFunction } from 'express';
+﻿import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../types';
 import { AppError } from '../middleware/error';
 import prisma from '../config/database';
 import { getCacheMetrics } from '../utils/cache';
-import { Role, UserStatus, CampaignStatus, DonationStatus, DistributionStatus, KYCStatus } from '@prisma/client';
+import { Role, UserStatus, CampaignStatus, DonationStatus, DistributionStatus, KYCStatus, AuditAction } from '@prisma/client';
+import { writeAuditLog } from '../services/audit.service';
 
 export class AdminController {
   static async getDashboardStats(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
@@ -235,10 +236,23 @@ export class AdminController {
       const { id } = req.params;
       const { status } = req.body;
 
+      const previousUser = await prisma.user.findUnique({
+        where: { id },
+        select: { status: true },
+      });
+
       const user = await prisma.user.update({
         where: { id },
         data: { status },
       });
+
+      await writeAuditLog(
+        AuditAction.USER_UPDATED,
+        'User',
+        id,
+        req.user.id,
+        { field: 'status', from: previousUser?.status, to: status }
+      );
 
       res.status(200).json({
         success: true,
@@ -259,10 +273,23 @@ export class AdminController {
       const { id } = req.params;
       const { role } = req.body;
 
+      const previousUser = await prisma.user.findUnique({
+        where: { id },
+        select: { role: true },
+      });
+
       const user = await prisma.user.update({
         where: { id },
         data: { role },
       });
+
+      await writeAuditLog(
+        AuditAction.ROLE_CHANGED,
+        'User',
+        id,
+        req.user.id,
+        { field: 'role', from: previousUser?.role, to: role }
+      );
 
       res.status(200).json({
         success: true,
@@ -371,3 +398,4 @@ export class AdminController {
     }
   }
 }
+

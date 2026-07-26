@@ -1,4 +1,4 @@
-import { EmailPreferenceService } from './email-preference.service';
+﻿import { EmailPreferenceService } from './email-preference.service';
 import { NotificationType } from '@prisma/client';
 
 jest.mock('../config/database', () => {
@@ -12,6 +12,9 @@ jest.mock('../config/database', () => {
       },
       user: {
         findUnique: jest.fn(),
+      },
+      auditLog: {
+        create: jest.fn(),
       },
     },
   };
@@ -137,6 +140,60 @@ describe('EmailPreferenceService', () => {
       // Security alerts must remain true regardless of input
       expect(result.categories.securityAlerts).toBe(true);
     });
+
+    it('writes a SETTINGS_UPDATED audit log entry with before/after categories', async () => {
+      const existingCategories = {
+        donationReceived: true,
+        campaignUpdates: true,
+        distributionNotices: true,
+        kycNotifications: true,
+        securityAlerts: true,
+      };
+
+      prismaMock.emailPreference.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        categories: existingCategories,
+        allEmailsDisabled: false,
+      });
+
+      prismaMock.emailPreference.upsert.mockResolvedValue({
+        userId: 'user-1',
+        categories: { ...existingCategories, campaignUpdates: false },
+        allEmailsDisabled: false,
+      });
+
+      await EmailPreferenceService.upsertPreferences('user-1', {
+        campaignUpdates: false,
+      });
+
+      expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          userId: 'user-1',
+          action: 'SETTINGS_UPDATED',
+          entityType: 'User',
+          entityId: 'user-1',
+          changes: {
+            field: 'emailPreferences',
+            from: existingCategories,
+            to: { ...existingCategories, campaignUpdates: false },
+          },
+        },
+      });
+    });
+
+    it('does not throw if the audit log write fails', async () => {
+      prismaMock.emailPreference.findUnique.mockResolvedValue(null);
+      prismaMock.emailPreference.upsert.mockResolvedValue({
+        userId: 'user-1',
+        categories: EmailPreferenceService.DEFAULT_PREFERENCES,
+        allEmailsDisabled: false,
+      });
+      prismaMock.auditLog.create.mockRejectedValue(new Error('db down'));
+
+      await expect(
+        EmailPreferenceService.upsertPreferences('user-1', {})
+      ).resolves.not.toThrow();
+    });
   });
 
   describe('shouldSendEmail', () => {
@@ -180,7 +237,7 @@ describe('EmailPreferenceService', () => {
 
     it('returns true for verified user with defaults', async () => {
       mockUser(true);
-      mockPrefs(); // null — creates defaults
+      mockPrefs(); // null â€” creates defaults
 
       const result = await EmailPreferenceService.shouldSendEmail('user-1', 'DONATION_RECEIVED');
       expect(result).toBe(true);
