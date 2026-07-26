@@ -373,7 +373,7 @@ export class ReceiptService {
   ): Promise<{ job: any; totalMatched: number }> {
     const where = ReceiptService.batchWhere(filter);
     const matched = await prisma.donation.count({ where });
-    const totalMatched = Math.min(matched, config.receipts.maxBatchSize);
+    const totalMatched = matched;
 
     const job = await prisma.receiptBatchJob.create({
       data: {
@@ -433,37 +433,58 @@ export class ReceiptService {
     const filter = ReceiptService.filterFromJob(job);
     const where = ReceiptService.batchWhere(filter);
 
-    let generatedCount = 0;
-    let failedCount = 0;
+    let generatedCount = job.generatedCount || 0;
+    let failedCount = job.failedCount || 0;
+    let lastProcessedId = (job.jobMetadata as any)?.lastProcessedId;
+    let currentMetadata = job.jobMetadata as any ?? {};
 
     try {
-      const donations = await prisma.donation.findMany({
-        where,
-        select: { id: true },
-        take: config.receipts.maxBatchSize,
-        orderBy: { createdAt: 'asc' },
-      });
+      while (true) {
+        const queryOpts: any = {
+          where,
+          select: { id: true },
+          take: config.receipts.maxBatchSize,
+          orderBy: { id: 'asc' },
+        };
+        
+        if (lastProcessedId) {
+          queryOpts.cursor = { id: lastProcessedId };
+          queryOpts.skip = 1;
+        }
+        
+        const donations = await prisma.donation.findMany(queryOpts);
 
-      for (const { id } of donations) {
-        try {
-          const receipt = await ReceiptService.generateReceipt(id, {
-            region: filter.region,
-            deliveryMethod: 'BATCH',
-          });
-          generatedCount += 1;
-          await ReceiptService.sendReceiptEmail(receipt.id).catch(() => undefined);
-        } catch (error) {
-          failedCount += 1;
-          logger.error(`Batch ${jobId}: failed to generate receipt for donation ${id}:`, error);
+        if (donations.length === 0) {
+          break;
         }
 
-        // Persist progress incrementally so the status endpoint stays live.
-        await prisma.receiptBatchJob
-          .update({
-            where: { id: jobId },
-            data: { generatedCount, failedCount },
-          })
-          .catch(() => undefined);
+        for (const { id } of donations) {
+          try {
+            const receipt = await ReceiptService.generateReceipt(id, {
+              region: filter.region,
+              deliveryMethod: 'BATCH',
+            });
+            generatedCount += 1;
+            await ReceiptService.sendReceiptEmail(receipt.id).catch(() => undefined);
+          } catch (error) {
+            failedCount += 1;
+            logger.error(`Batch ${jobId}: failed to generate receipt for donation ${id}:`, error);
+          }
+
+          lastProcessedId = id;
+          currentMetadata = {
+            ...currentMetadata,
+            lastProcessedId,
+          };
+
+          // Persist progress incrementally so the status endpoint stays live.
+          await prisma.receiptBatchJob
+            .update({
+              where: { id: jobId },
+              data: { generatedCount, failedCount, jobMetadata: currentMetadata },
+            })
+            .catch(() => undefined);
+        }
       }
 
       const completed = await prisma.receiptBatchJob.update({
