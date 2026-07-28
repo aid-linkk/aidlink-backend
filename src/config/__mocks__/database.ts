@@ -65,7 +65,27 @@ const prismaMock: any = {
   },
   beneficiaryAssignment: {
     upsert: jest.fn(),
+     count: jest.fn().mockResolvedValue(0),
   },
+
+  campaignHourlyStat: {
+    findMany: jest.fn().mockResolvedValue([]),
+    upsert: jest.fn(),
+  },
+  campaignMonthlyStat: {
+    findMany: jest.fn().mockResolvedValue([]),
+    upsert: jest.fn(),
+  },
+  campaignTrending: {
+    findMany: jest.fn().mockResolvedValue([]),
+    upsert: jest.fn(),
+    deleteMany: jest.fn(),
+  },
+  rollupTracker: {
+    findUnique: jest.fn(),
+    upsert: jest.fn(),
+  },
+  
   milestone: {
     create: jest.fn(),
     update: jest.fn(),

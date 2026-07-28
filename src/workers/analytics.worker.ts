@@ -126,16 +126,17 @@ const analyticsWorker = new Worker(
     logger.info(`Processing analytics job: ${job.id}, type: ${type}`);
 
     switch (type) {
+
       case 'HOURLY_ROLLUP': {
-        const result = await AnalyticsService.runHourlyRollup();
-        logger.info(`Hourly rollup completed: ${result.processed} campaigns for ${result.hourOf}`);
-        return result;
+      const result = await AnalyticsService.catchUpHourlyRollups();
+      logger.info(`Hourly rollup completed: ${result.hoursProcessed} hours processed`);
+      return result;
       }
 
       case 'MONTHLY_ROLLUP': {
-        const result = await AnalyticsService.runMonthlyRollup();
-        logger.info(`Monthly rollup completed: ${result.processed} campaigns for ${result.monthOf}`);
-        return result;
+      const result = await AnalyticsService.catchUpMonthlyRollups();
+      logger.info(`Monthly rollup completed: ${result.monthsProcessed} months processed`);
+      return result;
       }
 
       case 'TRENDING_REFRESH': {

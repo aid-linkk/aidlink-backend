@@ -263,6 +263,9 @@ donations     Donation[]
   appeals       Appeal[]
   fraudReports  FraudReport[]
   pledges       Pledge[]
+  hourlyStats   CampaignHourlyStat[]
+  monthlyStats  CampaignMonthlyStat[]
+  trendings     CampaignTrending[]
 
   @@index([organizationId])
   @@index([userId])
@@ -1371,4 +1374,81 @@ model EmailVerificationToken {
 
   @@index([userId])
   @@index([token])
+}
+
+// ============================================
+// ANALYTICS ROLLUPS & TRENDING
+// ============================================
+
+model CampaignHourlyStat {
+  id                 String   @id @default(cuid())
+  campaignId         String
+  hour               DateTime
+  donationCount      Int      @default(0)
+  donationVolume     Decimal  @default(0) @db.Decimal(20, 8)
+  uniqueDonors       Int      @default(0)
+  distributionCount  Int      @default(0)
+  distributionVolume Decimal  @default(0) @db.Decimal(20, 8)
+  itemsDistributed   Int      @default(0)
+  newBeneficiaries   Int      @default(0)
+  activeDonors       Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, hour])
+  @@index([campaignId])
+  @@index([hour])
+}
+
+model CampaignMonthlyStat {
+  id                 String   @id @default(cuid())
+  campaignId         String
+  month              DateTime
+  donationCount      Int      @default(0)
+  donationVolume     Decimal  @default(0) @db.Decimal(20, 8)
+  uniqueDonors       Int      @default(0)
+  distributionCount  Int      @default(0)
+  distributionVolume Decimal  @default(0) @db.Decimal(20, 8)
+  itemsDistributed   Int      @default(0)
+  donorGrowth        Int      @default(0)
+  distributionReach  Int      @default(0)
+  campaignActivity   Int      @default(0)
+  activeDonors       Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, month])
+  @@index([campaignId])
+  @@index([month])
+}
+
+model CampaignTrending {
+  id                 String   @id @default(cuid())
+  campaignId         String
+  period             String   // 'last24h' | 'last7d' | 'last30d'
+  trendScore         Decimal  @default(0) @db.Decimal(12, 4)
+  donationVelocity   Decimal  @default(0) @db.Decimal(20, 8)
+  donorGrowth        Int      @default(0)
+  distributionImpact Decimal  @default(0) @db.Decimal(20, 8)
+  rank               Int
+  refreshedAt        DateTime @default(now())
+  createdAt          DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, period])
+  @@index([period, rank])
+  @@index([period, trendScore])
+}
+
+model RollupTracker {
+  id                     String    @id @default(cuid())
+  type                   String    @unique
+  lastProcessedTimestamp DateTime
+  lastHour               DateTime?
+  lastMonth              DateTime?
 }
