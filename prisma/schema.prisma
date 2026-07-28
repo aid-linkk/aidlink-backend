@@ -648,6 +648,7 @@ model KYCSubmission {
   reviewedAt        DateTime?
   expiresAt         DateTime?
   fraudScore        Int       @default(0)
+  fraudScoreFloat   Float?    // Full-precision calibrated probability (0-1)
   fraudSignals      Json?     // Array of { signal, severity, detail }
   fraudReason       String?   @db.Text
   ipAddress         String?
@@ -1509,4 +1510,55 @@ model EmailVerificationToken {
 
   @@index([userId])
   @@index([token])
+}
+
+// ============================================
+// FRAUD DETECTION MODEL VERSIONING & LABELING
+// ============================================
+
+// Versioned Platt scaling parameters for fraud score calibration.
+// Each row represents a deployed model version with its A and B parameters
+// for the sigmoid transformation: p = 1 / (1 + exp(A * rawScore + B))
+model FraudModelVersion {
+  id              String   @id @default(cuid())
+  version         String   @unique // e.g., "v1.0.0"
+  plattA          Float    // A parameter for Platt scaling
+  plattB          Float    // B parameter for Platt scaling
+  isActive        Boolean  @default(true)
+  calibratedAt    DateTime @default(now())
+  calibratedBy    String?  // User who calibrated this version
+  ece             Float?   // Expected Calibration Error (from evaluation)
+  auc             Float?   // AUC-ROC score (from evaluation)
+  metadata        Json?    // Additional version metadata
+  createdAt       DateTime @default(now())
+
+  fraudLabels     FraudLabel[]
+
+  @@index([isActive])
+  @@index([version])
+  @@index([calibratedAt])
+}
+
+// Ground truth labels for KYC submissions, used for model recalibration.
+// Written when a KYC submission transitions to APPROVED or REJECTED status.
+model FraudLabel {
+  id              String   @id @default(cuid())
+  submissionId    String   @unique
+  modelVersionId  String
+  outcome         String   // "APPROVED" or "REJECTED"
+  reviewedBy      String
+  reviewedAt      DateTime @default(now())
+  // Snapshot of features at scoring time for reproducibility
+  featureSnapshot Json     // { rawScore, signals: [...], interactionFeatures: {...} }
+  fraudScore      Int      // The fraud score at time of labeling
+  fraudScoreFloat Float?   // Full-precision calibrated probability
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  modelVersion    FraudModelVersion @relation(fields: [modelVersionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@index([modelVersionId])
+  @@index([outcome])
+  @@index([reviewedAt])
 }

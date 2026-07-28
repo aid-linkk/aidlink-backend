@@ -10,8 +10,21 @@ export interface FraudSignal {
 
 export interface FraudAssessment {
   fraudScore: number;
+  fraudScoreFloat: number;
   fraudSignals: FraudSignal[];
   fraudReason: string;
+  featureSnapshot: {
+    rawScore: number;
+    signals: FraudSignal[];
+    interactionFeatures: InteractionFeatures;
+  };
+}
+
+export interface InteractionFeatures {
+  geoAnomalyHighAndVelocityHigh: number; // geoAnomaly=high AND velocity=high
+  deviceFingerprintSharedAndSubmissionCount: number; // deviceFingerprint shared * submission count
+  documentReuseAndGeoAnomaly: number; // documentReuse AND geoAnomaly
+  highSeveritySignalCount: number; // Count of high-severity signals
 }
 
 export interface FraudInput {
@@ -205,6 +218,87 @@ function buildContinentMap(): Record<string, string> {
   return map;
 }
 
+// ─── Interaction Features ───────────────────────────────────────────────────────
+
+function computeInteractionFeatures(
+  signals: FraudSignal[],
+  submissionCount: number
+): InteractionFeatures {
+  const severityMap = new Map<string, 'low' | 'medium' | 'high'>();
+  for (const sig of signals) {
+    severityMap.set(sig.signal, sig.severity);
+  }
+
+  const geoSeverity = severityMap.get('geoAnomaly') || 'low';
+  const velocitySeverity = severityMap.get('velocityRisk') || 'low';
+  const deviceSeverity = severityMap.get('deviceFingerprintRisk') || 'low';
+  const docSeverity = severityMap.get('documentReuse') || 'low';
+
+  // Binary indicators for high severity
+  const geoHigh = geoSeverity === 'high' ? 1 : 0;
+  const velocityHigh = velocitySeverity === 'high' ? 1 : 0;
+  const deviceShared = deviceSeverity !== 'low' ? 1 : 0;
+  const docReuse = docSeverity !== 'low' ? 1 : 0;
+
+  // Interaction features
+  const geoAnomalyHighAndVelocityHigh = geoHigh * velocityHigh;
+  const deviceFingerprintSharedAndSubmissionCount = deviceShared * Math.min(submissionCount, 10);
+  const documentReuseAndGeoAnomaly = docReuse * geoHigh;
+  const highSeveritySignalCount = signals.filter(s => s.severity === 'high').length;
+
+  return {
+    geoAnomalyHighAndVelocityHigh,
+    deviceFingerprintSharedAndSubmissionCount,
+    documentReuseAndGeoAnomaly,
+    highSeveritySignalCount,
+  };
+}
+
+async function getSubmissionCount(input: FraudInput): Promise<number> {
+  const count = await prisma.kYCSubmission.count({
+    where: {
+      userId: input.userId,
+      id: { not: input.submissionId },
+    },
+  });
+  return count;
+}
+
+// ─── Platt Scaling Calibration ─────────────────────────────────────────────────
+
+interface PlattParams {
+  A: number;
+  B: number;
+}
+
+// Default Platt parameters (identity transformation until calibrated)
+const DEFAULT_PLATT_PARAMS: PlattParams = { A: 1, B: 0 };
+
+async function getActivePlattParams(): Promise<PlattParams> {
+  try {
+    const activeVersion = await prisma.fraudModelVersion.findFirst({
+      where: { isActive: true },
+      orderBy: { calibratedAt: 'desc' },
+    });
+
+    if (activeVersion) {
+      return { A: activeVersion.plattA, B: activeVersion.plattB };
+    }
+  } catch (error) {
+    logger.warn('Failed to fetch Platt parameters, using defaults', { error });
+  }
+
+  return DEFAULT_PLATT_PARAMS;
+}
+
+function applyPlattScaling(rawScore: number, params: PlattParams): number {
+  // p = 1 / (1 + exp(A * rawScore + B))
+  const z = params.A * rawScore + params.B;
+  // Clamp to avoid numerical overflow
+  const clampedZ = Math.max(Math.min(z, 20), -20);
+  return 1 / (1 + Math.exp(clampedZ));
+}
+
 // ─── Third-Party Fraud Service ────────────────────────────────────────────────
 
 export async function getThirdPartyFraudScore(
@@ -213,6 +307,12 @@ export async function getThirdPartyFraudScore(
   if (!config.kycFraud.thirdPartyEnabled || !config.kycFraud.thirdPartyApiKey) return null;
 
   try {
+    // Use Node.js fetch if available (Node 18+), otherwise skip
+    if (typeof fetch === 'undefined') {
+      logger.warn('fetch API not available, skipping third-party fraud service');
+      return null;
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), config.kycFraud.thirdPartyTimeoutMs);
 
@@ -259,11 +359,12 @@ export async function getThirdPartyFraudScore(
 export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
   const { weights } = config.kycFraud;
 
-  const [docSignal, velocitySignal, deviceSignal, geoSignal] = await Promise.all([
+  const [docSignal, velocitySignal, deviceSignal, geoSignal, submissionCount] = await Promise.all([
     checkDocumentReuse(input),
     checkVelocity(input),
     checkDeviceFingerprint(input),
     checkGeoAnomaly(input),
+    getSubmissionCount(input),
   ]);
 
   const signals: FraudSignal[] = [docSignal, velocitySignal, deviceSignal, geoSignal].filter(
@@ -273,20 +374,107 @@ export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
   // Per-signal score contribution = weight * severity multiplier
   const severityMult = { low: 0.4, medium: 0.7, high: 1.0 };
 
-  let score = 0;
+  let rawScore = 0;
   for (const sig of signals) {
     const mult = severityMult[sig.severity];
-    if (sig.signal === 'documentReuse') score += weights.documentReuse * mult;
-    else if (sig.signal === 'velocityRisk') score += weights.velocity * mult;
-    else if (sig.signal === 'deviceFingerprintRisk') score += weights.deviceFingerprint * mult;
-    else if (sig.signal === 'geoAnomaly') score += weights.geoAnomaly * mult;
+    if (sig.signal === 'documentReuse') rawScore += weights.documentReuse * mult;
+    else if (sig.signal === 'velocityRisk') rawScore += weights.velocity * mult;
+    else if (sig.signal === 'deviceFingerprintRisk') rawScore += weights.deviceFingerprint * mult;
+    else if (sig.signal === 'geoAnomaly') rawScore += weights.geoAnomaly * mult;
   }
 
-  const fraudScore = Math.min(Math.round(score), 100);
+  // Compute interaction features
+  const interactionFeatures = computeInteractionFeatures(signals, submissionCount);
+
+  // Add interaction feature contributions to raw score
+  const interactionWeights = {
+    geoAnomalyHighAndVelocityHigh: 15,
+    deviceFingerprintSharedAndSubmissionCount: 2,
+    documentReuseAndGeoAnomaly: 10,
+    highSeveritySignalCount: 5,
+  };
+
+  rawScore += interactionFeatures.geoAnomalyHighAndVelocityHigh * interactionWeights.geoAnomalyHighAndVelocityHigh;
+  rawScore += interactionFeatures.deviceFingerprintSharedAndSubmissionCount * interactionWeights.deviceFingerprintSharedAndSubmissionCount;
+  rawScore += interactionFeatures.documentReuseAndGeoAnomaly * interactionWeights.documentReuseAndGeoAnomaly;
+  rawScore += interactionFeatures.highSeveritySignalCount * interactionWeights.highSeveritySignalCount;
+
+  // Clamp raw score to 0-100 range
+  rawScore = Math.max(0, Math.min(rawScore, 100));
+
+  // Apply Platt scaling for calibrated probability
+  const plattParams = await getActivePlattParams();
+  const calibratedProbability = applyPlattScaling(rawScore, plattParams);
+
+  // Convert to integer score for UI compatibility (0-100)
+  const fraudScore = Math.round(calibratedProbability * 100);
+  const fraudScoreFloat = calibratedProbability;
+
   const fraudReason =
     signals.length > 0
       ? signals.map((s) => s.detail).join('; ')
       : 'No fraud signals detected';
 
-  return { fraudScore, fraudSignals: signals, fraudReason };
+  return {
+    fraudScore,
+    fraudScoreFloat,
+    fraudSignals: signals,
+    fraudReason,
+    featureSnapshot: {
+      rawScore,
+      signals,
+      interactionFeatures,
+    },
+  };
+}
+
+// ─── Feedback Loop: Fraud Label Creation ───────────────────────────────────────
+
+export async function createFraudLabel(
+  submissionId: string,
+  outcome: 'APPROVED' | 'REJECTED',
+  reviewedBy: string,
+  assessment: FraudAssessment
+): Promise<void> {
+  try {
+    // Get active model version
+    const activeVersion = await prisma.fraudModelVersion.findFirst({
+      where: { isActive: true },
+      orderBy: { calibratedAt: 'desc' },
+    });
+
+    if (!activeVersion) {
+      logger.warn('No active fraud model version found, skipping label creation');
+      return;
+    }
+
+    // Check if label already exists
+    const existing = await prisma.fraudLabel.findUnique({
+      where: { submissionId },
+    });
+
+    if (existing) {
+      logger.info(`FraudLabel already exists for submission ${submissionId}, skipping`);
+      return;
+    }
+
+    // Create fraud label
+    await prisma.fraudLabel.create({
+      data: {
+        submissionId,
+        modelVersionId: activeVersion.id,
+        outcome,
+        reviewedBy,
+        reviewedAt: new Date(),
+        featureSnapshot: assessment.featureSnapshot as any,
+        fraudScore: assessment.fraudScore,
+        fraudScoreFloat: assessment.fraudScoreFloat,
+      },
+    });
+
+    logger.info(`FraudLabel created for submission ${submissionId} with outcome ${outcome}`);
+  } catch (error) {
+    logger.error('Failed to create FraudLabel', { error, submissionId });
+    // Don't throw - label creation failure should not block KYC review
+  }
 }

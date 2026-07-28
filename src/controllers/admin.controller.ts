@@ -5,6 +5,7 @@ import prisma from '../config/database';
 import { getCacheMetrics } from '../utils/cache';
 import { Role, UserStatus, CampaignStatus, DonationStatus, DistributionStatus, KYCStatus, AuditAction } from '@prisma/client';
 import { writeAuditLog } from '../services/audit.service';
+import { getFraudModelHealth } from '../services/fraudCalibration.service';
 
 export class AdminController {
   static async getDashboardStats(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
@@ -373,6 +374,9 @@ export class AdminController {
         prisma.blockchainTransaction.count({ where: { status: 'CONFIRMED' } }),
       ]);
 
+      // Get fraud model health
+      const fraudModelHealth = await getFraudModelHealth();
+
       res.status(200).json({
         success: true,
         data: {
@@ -389,6 +393,7 @@ export class AdminController {
             pendingTransactions: pendingTx,
             confirmedTransactions: confirmedTx,
           },
+          fraudModel: fraudModelHealth,
           cache: await getCacheMetrics(),
           timestamp: new Date().toISOString(),
         },
