@@ -385,6 +385,19 @@ export class DonationService {
     }
 
     const updated = await prisma.$transaction(async (tx) => {
+      // Atomic guard: only one concurrent refund for this donation can win the
+      // updateMany. A competing refund (or a retry of this same call after a
+      // successful commit) sees count === 0 and is rejected before any campaign
+      // balance decrement happens, making the operation idempotent.
+      const refundResult = await tx.donation.updateMany({
+        where: { id, status: DonationStatus.CONFIRMED },
+        data: { status: DonationStatus.REFUNDED },
+      });
+
+      if (refundResult.count === 0) {
+        throw AppError.from('DONATION_004', 'Donation has already been refunded');
+      }
+
       // Re-read campaign balance inside transaction to prevent TOCTOU race condition
       const campaign = await tx.campaign.findUnique({
         where: { id: donation.campaignId },
@@ -395,10 +408,9 @@ export class DonationService {
         throw AppError.from('DONATION_004', 'Refund amount exceeds campaign current balance');
       }
 
-      // Update donation status
-      const updatedDonation = await tx.donation.update({
+      // Return the updated donation for the response
+      const updatedDonation = await tx.donation.findUniqueOrThrow({
         where: { id },
-        data: { status: DonationStatus.REFUNDED },
       });
 
       await tx.campaign.update({
