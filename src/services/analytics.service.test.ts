@@ -4,6 +4,21 @@ import prisma from '../config/database';
 // Mock Prisma
 jest.mock('../config/database');
 
+jest.mock('../config/redis', () => ({
+  __esModule: true,
+  default: {
+    hgetall: jest.fn().mockResolvedValue({}),
+    hset: jest.fn().mockResolvedValue(1),
+    expire: jest.fn().mockResolvedValue(1),
+    hincrbyfloat: jest.fn().mockResolvedValue(0),
+    hincrby: jest.fn().mockResolvedValue(0),
+    exists: jest.fn().mockResolvedValue(0),
+    del: jest.fn().mockResolvedValue(1),
+    get: jest.fn().mockResolvedValue(null),
+    setex: jest.fn().mockResolvedValue('OK'),
+  },
+}));
+
 describe('AnalyticsService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -201,5 +216,32 @@ describe('AnalyticsService', () => {
       expect(result).toHaveProperty('financials');
       expect(result).toHaveProperty('recent');
     });
+  });
+});
+
+describe('runHourlyRollup', () => {
+  it('produces identical upsert payloads when run twice for the same hour (idempotency)', async () => {
+    const fixedHour = new Date('2026-07-28T14:00:00.000Z');
+
+    (prisma.donation.findMany as jest.Mock).mockResolvedValue([{ campaignId: 'camp1' }]);
+    (prisma.distribution.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.donation.aggregate as jest.Mock).mockResolvedValue({ _count: 3, _sum: { amount: 150 } });
+    (prisma.distribution.aggregate as jest.Mock).mockResolvedValue({ _count: 1, _sum: { amount: 50 } });
+    (prisma.donation.groupBy as jest.Mock).mockResolvedValue([{ userId: 'u1' }, { userId: 'u2' }]);
+    (prisma.beneficiaryAssignment.count as jest.Mock).mockResolvedValue(0);
+    (prisma.campaignHourlyStat.upsert as jest.Mock).mockResolvedValue({});
+    (prisma.rollupTracker.upsert as jest.Mock).mockResolvedValue({});
+    (prisma.campaign.findUnique as jest.Mock).mockResolvedValue({
+      id: 'camp1', title: 'T', targetAmount: 1000, currentAmount: 100, status: 'ACTIVE',
+    });
+
+    await AnalyticsService.runHourlyRollup(fixedHour);
+    const firstCallArgs = (prisma.campaignHourlyStat.upsert as jest.Mock).mock.calls[0][0];
+
+    await AnalyticsService.runHourlyRollup(fixedHour);
+    const secondCallArgs = (prisma.campaignHourlyStat.upsert as jest.Mock).mock.calls[1][0];
+
+    expect(firstCallArgs.update).toEqual(secondCallArgs.update);
+    expect(firstCallArgs.where).toEqual(secondCallArgs.where);
   });
 });

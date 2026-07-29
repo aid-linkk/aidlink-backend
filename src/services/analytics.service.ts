@@ -769,7 +769,10 @@ export class AnalyticsService {
         });
 
         // Sort by trendScore descending, assign ranks
-        enriched.sort((a, b) => b.trendScore - a.trendScore);
+       enriched.sort((a, b) => {
+          if (b.trendScore !== a.trendScore) return b.trendScore - a.trendScore;
+          return a.campaignId.localeCompare(b.campaignId); // deterministic tiebreaker
+        });
         const topN = enriched.slice(0, count);
 
         // Upsert into CampaignTrending table (compound key: campaignId + period)
@@ -1288,13 +1291,40 @@ export class AnalyticsService {
     return { processed, hourOf: targetHour };
   }
 
+
+  /**
+ * Catch up any hours missed since the last successful run.
+ * Called by the worker's scheduled job instead of runHourlyRollup() directly.
+ */
+static async catchUpHourlyRollups(): Promise<{ hoursProcessed: number }> {
+  const trackerKey = 'campaign_hourly_stats';
+  const currentHour = this.floorToHour(new Date());
+  const lastHour = await this.getLastProcessedHour(trackerKey);
+
+  // First run ever — nothing to catch up, just process the current hour.
+  if (!lastHour) {
+    await this.runHourlyRollup(currentHour);
+    return { hoursProcessed: 1 };
+  }
+
+  let cursor = new Date(lastHour.getTime() + 60 * 60 * 1000); // next hour after last processed
+  let hoursProcessed = 0;
+
+  while (cursor <= currentHour) {
+    await this.runHourlyRollup(cursor);
+    cursor = new Date(cursor.getTime() + 60 * 60 * 1000);
+    hoursProcessed++;
+  }
+
+  return { hoursProcessed };
+}
   /**
    * Run the monthly rollup for a given month.
    * Idempotent — uses upsert to safely retry.
    */
   static async runMonthlyRollup(monthStart?: Date): Promise<{ processed: number; monthOf: Date }> {
     const targetMonth = monthStart || this.floorToMonth(new Date());
-    const monthEnd = new Date(targetMonth.getFullYear(), targetMonth.getMonth() + 1, 1);
+    const monthEnd = new Date(Date.UTC(targetMonth.getUTCFullYear(), targetMonth.getUTCMonth() + 1, 1));
     const trackerKey = 'campaign_monthly_stats';
 
     // Get all active campaigns
@@ -1343,7 +1373,7 @@ export class AnalyticsService {
         ]);
 
         // Donor growth: unique donors this month vs previous month
-        const prevMonthStart = new Date(targetMonth.getFullYear(), targetMonth.getMonth() - 1, 1);
+        const prevMonthStart = new Date(Date.UTC(targetMonth.getUTCFullYear(), targetMonth.getUTCMonth() - 1, 1));
         const prevMonthDonors = await prisma.donation.groupBy({
           by: ['userId'],
           where: {
@@ -1406,18 +1436,102 @@ export class AnalyticsService {
   }
 
   /**
+ * Catch up any months missed since the last successful run.
+ * Called by the worker's scheduled job instead of runMonthlyRollup() directly.
+ */
+static async catchUpMonthlyRollups(): Promise<{ monthsProcessed: number }> {
+  const trackerKey = 'campaign_monthly_stats';
+  const currentMonth = this.floorToMonth(new Date());
+  const lastMonth = await this.getLastProcessedMonth(trackerKey);
+
+  // First run ever — nothing to catch up, just process the current month.
+  if (!lastMonth) {
+    await this.runMonthlyRollup(currentMonth);
+    return { monthsProcessed: 1 };
+  }
+
+  // Months aren't a fixed duration, so advance by month index rather than milliseconds.
+  let cursor = new Date(Date.UTC(lastMonth.getUTCFullYear(), lastMonth.getUTCMonth() + 1, 1));
+  let monthsProcessed = 0;
+
+  while (cursor <= currentMonth) {
+    await this.runMonthlyRollup(cursor);
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+    monthsProcessed++;
+  }
+
+  return { monthsProcessed };
+}
+
+/**
+ * Backfill hourly rollups for an explicit time range.
+ * Unlike catchUpHourlyRollups (gap detection via tracker), this is for
+ * manual/on-demand recomputation — e.g. after a data fix, or hydrating
+ * history for a specific campaign. Does NOT touch the rollup tracker,
+ * since backfill runs are independent of the "current" processing cursor.
+ */
+static async backfillHourlyRollups(
+  startHour: Date,
+  endHour: Date
+): Promise<{ hoursProcessed: number }> {
+  let cursor = this.floorToHour(startHour);
+  const end = this.floorToHour(endHour);
+  let hoursProcessed = 0;
+
+  while (cursor <= end) {
+    await this.runHourlyRollup(cursor);
+    cursor = new Date(cursor.getTime() + 60 * 60 * 1000);
+    hoursProcessed++;
+  }
+
+  logger.info(`Backfill completed: ${hoursProcessed} hours processed from ${startHour.toISOString()} to ${endHour.toISOString()}`);
+  return { hoursProcessed };
+}
+
+/**
+ * Backfill monthly rollups for an explicit time range.
+ */
+static async backfillMonthlyRollups(
+  startMonth: Date,
+  endMonth: Date
+): Promise<{ monthsProcessed: number }> {
+  let cursor = this.floorToMonth(startMonth);
+  const end = this.floorToMonth(endMonth);
+  let monthsProcessed = 0;
+
+  while (cursor <= end) {
+    await this.runMonthlyRollup(cursor);
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+    monthsProcessed++;
+  }
+
+  logger.info(`Backfill completed: ${monthsProcessed} months processed from ${startMonth.toISOString()} to ${endMonth.toISOString()}`);
+  return { monthsProcessed };
+}
+
+  /**
    * Floor a date to the start of the current hour.
    */
-  private static floorToHour(date: Date): Date {
-    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours(), 0, 0, 0);
-  }
+private static floorToHour(date: Date): Date {
+  return new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate(),
+    date.getUTCHours(),
+    0, 0, 0
+  ));
+}
 
   /**
    * Floor a date to the start of the current month.
    */
-  private static floorToMonth(date: Date): Date {
-    return new Date(date.getFullYear(), date.getMonth(), 1);
-  }
+private static floorToMonth(date: Date): Date {
+  return new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    1
+  ));
+}
 
   /**
    * Rebuild all campaign caches — full reconciliation.
