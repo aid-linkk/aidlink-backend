@@ -231,6 +231,93 @@ describe('DonationService', () => {
     });
   });
 
+  describe('createConfirmedDonation', () => {
+    it('creates a donation already CONFIRMED and increments the campaign balance', async () => {
+      (prisma.donation.create as jest.Mock).mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'donation-1', ...data }),
+      );
+      (prisma.multiplier.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.campaign.update as jest.Mock).mockResolvedValue({});
+
+      const { donation, matchedFund } = await DonationService.createConfirmedDonation(prisma as any, {
+        campaignId: 'camp1',
+        userId: 'donor-1',
+        amount: 25,
+        currency: 'USD',
+        blockchainTxHash: 'pledge-p1-2026-07-01',
+        memo: 'Recurring pledge p1',
+      });
+
+      expect(prisma.donation.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            campaignId: 'camp1',
+            userId: 'donor-1',
+            status: 'CONFIRMED',
+            blockchainTxHash: 'pledge-p1-2026-07-01',
+          }),
+        }),
+      );
+      expect(prisma.campaign.update).toHaveBeenCalledWith({
+        where: { id: 'camp1' },
+        data: { currentAmount: { increment: 25 } },
+      });
+      expect(donation.status).toBe('CONFIRMED');
+      expect(matchedFund).toBeNull();
+    });
+
+    it('allocates a matched fund the same way confirmDonation does', async () => {
+      (prisma.donation.create as jest.Mock).mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'donation-1', ...data }),
+      );
+      const multiplier = {
+        id: 'mult-1',
+        campaignId: 'camp1',
+        type: 'CAMPAIGN_WIDE',
+        multiplier: 2,
+        matchCap: 1000,
+        perDonationCap: null,
+        matchedTotal: 0,
+        startAt: null,
+        endAt: null,
+        milestoneId: null,
+        active: true,
+        createdAt: new Date('2026-01-01'),
+      };
+      (prisma.multiplier.findMany as jest.Mock).mockResolvedValue([multiplier]);
+      (prisma.$queryRaw as jest.Mock).mockResolvedValue([{ applied: '25' }]);
+      (prisma.matchedFund.create as jest.Mock).mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'mf-1', ...data }),
+      );
+      (prisma.campaign.update as jest.Mock).mockResolvedValue({});
+
+      const { matchedFund } = await DonationService.createConfirmedDonation(prisma as any, {
+        campaignId: 'camp1',
+        userId: 'donor-1',
+        amount: 25,
+        blockchainTxHash: 'pledge-p1-2026-07-01',
+      });
+
+      expect(matchedFund?.matchedAmount.toString()).toBe('25');
+    });
+  });
+
+  describe('dispatchPostConfirmationSideEffects', () => {
+    it('dispatches a webhook and increments analytics without throwing', () => {
+      expect(() =>
+        DonationService.dispatchPostConfirmationSideEffects({
+          donationId: 'donation-1',
+          campaignId: 'camp1',
+          amount: 25,
+          currency: 'USD',
+          txHash: 'pledge-p1-2026-07-01',
+          isAnonymous: false,
+          userId: 'donor-1',
+        }),
+      ).not.toThrow();
+    });
+  });
+
   describe('getDonations', () => {
     const defaultPagination = {
       page: 1,

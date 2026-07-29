@@ -12,10 +12,18 @@ import { config } from '../config';
 import logger from '../config/logger';
 import { EmailPreferenceService } from './email-preference.service';
 import crypto from 'crypto';
+import { Keypair } from 'soroban-client';
+import { buildWalletChallengeMessage, STELLAR_PUBLIC_KEY_RE, WalletChallengePayload } from '../utils/walletChallenge';
 
 const TOKEN_EXPIRY_HOURS = parseInt(process.env.VERIFICATION_TOKEN_EXPIRY_HOURS || '24', 10);
 const RESEND_RATE_LIMIT = parseInt(process.env.VERIFICATION_RESEND_RATE_LIMIT || '3', 10);
 const MAX_FAILED_ATTEMPTS = parseInt(process.env.VERIFICATION_MAX_FAILED_ATTEMPTS || '10', 10);
+
+// Wallet-auth challenge/response (issue #170). Kept separate from the email
+// verification constants above even though the shape rhymes, since these
+// govern a distinct Redis-backed flow with its own TTL and failure budget.
+const WALLET_CHALLENGE_REDIS_PREFIX = 'wallet-challenge:';
+const WALLET_AUTH_FAIL_REDIS_PREFIX = 'wallet-auth-fail:';
 
 function renderTemplate(filename: string, vars: Record<string, string>): string {
   const tplPath = path.join(__dirname, '../templates', filename);
@@ -232,7 +240,130 @@ export class AuthService {
     return { user: this.sanitizeUser(user), tokens };
   }
 
+  /**
+   * Step 1 of wallet auth (issue #170): issue a server-signed, single-use
+   * challenge for the given Stellar public key. The caller must sign the
+   * returned `message` with the matching Ed25519 private key and submit it
+   * to `walletAuth` below.
+   *
+   * GET /api/v1/auth/wallet-challenge?address=<G...>
+   */
+  static async issueWalletChallenge(walletAddress: string): Promise<{
+    message: string;
+    nonce: string;
+    issuedAt: string;
+    expiresAt: string;
+    domain: string;
+  }> {
+    if (!walletAddress || !STELLAR_PUBLIC_KEY_RE.test(walletAddress)) {
+      throw AppError.from('AUTH_011');
+    }
+
+    // Full cryptographic/checksum validation, not just the regex shape check
+    // above. Keypair.fromPublicKey throws on a malformed key.
+    try {
+      Keypair.fromPublicKey(walletAddress);
+    } catch {
+      throw AppError.from('AUTH_011');
+    }
+
+    const nonce = crypto.randomBytes(32).toString('hex');
+    const issuedAt = new Date();
+    const expiresAt = new Date(issuedAt.getTime() + config.walletAuth.challengeTtlSeconds * 1000);
+    const domain = config.walletAuth.appDomain;
+
+    const payload: WalletChallengePayload = {
+      nonce,
+      domain,
+      issuedAt: issuedAt.toISOString(),
+    };
+
+    // Store only the payload fields, not the assembled message string — the
+    // message is rebuilt deterministically from these on verification via
+    // buildWalletChallengeMessage, so there's no risk of the stored and
+    // reconstructed strings silently diverging.
+    await redis.setex(
+      `${WALLET_CHALLENGE_REDIS_PREFIX}${walletAddress}`,
+      config.walletAuth.challengeTtlSeconds,
+      JSON.stringify(payload)
+    );
+
+    return {
+      message: buildWalletChallengeMessage(walletAddress, payload),
+      nonce,
+      issuedAt: payload.issuedAt,
+      expiresAt: expiresAt.toISOString(),
+      domain,
+    };
+  }
+
+  /**
+   * Step 2 of wallet auth (issue #170): verify the Ed25519 signature over
+   * the previously issued challenge before looking up or creating the user.
+   *
+   * Replaces the old implementation, which accepted any walletAddress with
+   * no proof of key ownership — `signature` and `message` were previously
+   * unused parameters.
+   */
   static async walletAuth(walletAddress: string, signature: string, message: string): Promise<{ user: any; tokens: TokenPair }> {
+    if (!walletAddress || !signature || !message) {
+      throw AppError.from('AUTH_013');
+    }
+
+    await this.assertWalletAuthNotRateLimited(walletAddress);
+
+    let keypair: Keypair;
+    try {
+      keypair = Keypair.fromPublicKey(walletAddress);
+    } catch {
+      // Malformed address: still record a failure so probing many
+      // addresses doesn't dodge the rate limit by tripping the 400 path.
+      await this.recordWalletAuthFailure(walletAddress);
+      throw AppError.from('AUTH_011');
+    }
+
+    // Atomically fetch-and-delete so a nonce can never be read twice by
+    // concurrent requests before it's removed (GETDEL, Redis >= 6.2).
+    const stored = await redis.getdel(`${WALLET_CHALLENGE_REDIS_PREFIX}${walletAddress}`);
+    if (!stored) {
+      await this.recordWalletAuthFailure(walletAddress);
+      throw AppError.from('AUTH_012');
+    }
+
+    const payload: WalletChallengePayload = JSON.parse(stored);
+
+    // Domain binding: reject if the stored challenge wasn't issued for this
+    // server's current domain, independent of whatever the client submitted.
+    if (payload.domain !== config.walletAuth.appDomain) {
+      await this.recordWalletAuthFailure(walletAddress);
+      throw AppError.from('AUTH_013');
+    }
+
+    // The submitted message must exactly match what was actually issued and
+    // stored — this is what binds the nonce + domain + timestamp into the
+    // bytes that get signed, and rejects tampered or foreign messages.
+    const expectedMessage = buildWalletChallengeMessage(walletAddress, payload);
+    if (message !== expectedMessage) {
+      await this.recordWalletAuthFailure(walletAddress);
+      throw AppError.from('AUTH_013');
+    }
+
+    let signatureValid = false;
+    try {
+      signatureValid = keypair.verify(Buffer.from(expectedMessage, 'utf8'), Buffer.from(signature, 'base64'));
+    } catch {
+      signatureValid = false;
+    }
+
+    if (!signatureValid) {
+      await this.recordWalletAuthFailure(walletAddress);
+      throw AppError.from('AUTH_013');
+    }
+
+    // Only past this point has cryptographic ownership been proven, so this
+    // is the earliest point account lookup/creation may safely occur.
+    await this.clearWalletAuthFailures(walletAddress);
+
     let user = await prisma.user.findUnique({ where: { walletAddress } });
 
     if (!user) {
@@ -259,6 +390,25 @@ export class AuthService {
 
     logger.info(`User authenticated via wallet: ${walletAddress}`);
     return { user: this.sanitizeUser(user), tokens };
+  }
+
+  private static async assertWalletAuthNotRateLimited(walletAddress: string): Promise<void> {
+    const attempts = await redis.get(`${WALLET_AUTH_FAIL_REDIS_PREFIX}${walletAddress}`);
+    if (attempts && parseInt(attempts, 10) >= config.walletAuth.maxFailedAttempts) {
+      throw AppError.from('AUTH_014');
+    }
+  }
+
+  private static async recordWalletAuthFailure(walletAddress: string): Promise<void> {
+    const key = `${WALLET_AUTH_FAIL_REDIS_PREFIX}${walletAddress}`;
+    const count = await redis.incr(key);
+    if (count === 1) {
+      await redis.expire(key, config.walletAuth.failedAttemptWindowSeconds);
+    }
+  }
+
+  private static async clearWalletAuthFailures(walletAddress: string): Promise<void> {
+    await redis.del(`${WALLET_AUTH_FAIL_REDIS_PREFIX}${walletAddress}`);
   }
 
   static async refreshToken(refreshToken: string): Promise<TokenPair> {

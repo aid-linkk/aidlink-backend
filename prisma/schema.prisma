@@ -67,6 +67,7 @@ model User {
   emailPreference         EmailPreference?
   emailVerificationTokens EmailVerificationToken[]
   verificationLogs        VerificationLog[]
+  adminNotificationPref   AdminNotificationPreference?
 
   @@index([email])
   @@index([walletAddress])
@@ -650,6 +651,7 @@ model KYCSubmission {
   reviewedAt        DateTime?
   expiresAt         DateTime?
   fraudScore        Int       @default(0)
+  fraudScoreFloat   Float?    // Full-precision calibrated probability (0-1)
   fraudSignals      Json?     // Array of { signal, severity, detail }
   fraudReason       String?   @db.Text
   ipAddress         String?
@@ -724,6 +726,7 @@ enum NotificationType {
   DISTRIBUTION_FAILED
   CAMPAIGN_SETTLEMENT
   DONOR_CREDIT_ISSUED
+  PLEDGE_PAYMENT_FAILED
 }
 
 enum NotificationStatus {
@@ -779,6 +782,79 @@ model EmailPreference {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+// ── Admin notification preferences ──────────────────────────────────────────
+
+enum NotificationChannel {
+  EMAIL
+  IN_APP
+  SMS
+}
+
+enum NotificationFrequency {
+  IMMEDIATE
+  DAILY_DIGEST
+  WEEKLY
+}
+
+enum AdminNotificationTypePreference {
+  ALL
+  ALERTS_ONLY
+  NONE
+}
+
+/// Per-admin granular control over which notifications are received, on which
+/// channels, at what frequency, and scoped to which entities.
+model AdminNotificationPreference {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  /// Per-type overrides. Keys are NotificationType values; values are
+  /// AdminNotificationTypePreference. Missing keys fall back to ALL.
+  typePreferences Json @default("{}")
+
+  /// Channels the admin wants notifications delivered on.
+  channels NotificationChannel[] @default([EMAIL, IN_APP])
+
+  /// Whether to batch or deliver immediately.
+  frequency NotificationFrequency @default(IMMEDIATE)
+
+  /// Optional whitelist of campaign IDs. Empty array = no filter (all campaigns).
+  campaignFilter String[] @default([])
+
+  /// Optional whitelist of user role strings (e.g. ["BENEFICIARY", "ORGANIZATION"]).
+  /// Empty array = no filter (all roles).
+  userRoleFilter String[] @default([])
+
+  /// Mute everything except SECURITY_ALERT.
+  muteAll Boolean @default(false)
+
+  /// Quiet hours (UTC 24h "HH:MM"). Immediate notifications are deferred until end.
+  quietHoursStart String?
+  quietHoursEnd   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Staging table for DAILY_DIGEST and WEEKLY batched delivery.
+model NotificationDigestQueue {
+  id             String                @id @default(cuid())
+  userId         String
+  notificationId String
+  frequency      NotificationFrequency
+  scheduledFor   DateTime
+  sent           Boolean               @default(false)
+  sentAt         DateTime?
+  createdAt      DateTime              @default(now())
+
+  @@index([userId, sent])
+  @@index([scheduledFor, sent])
 }
 
 model EmailTemplate {
@@ -895,6 +971,11 @@ enum AuditAction {
   RECOVERY_MANUAL_OVERRIDE
   DONOR_CREDIT_ISSUED
   DONATION_IDENTITY_REVEALED
+  CAMPAIGN_STATUS_CHANGED
+  MILESTONE_ADDED
+  BENEFICIARY_ASSIGNED
+  DISTRIBUTION_CREATED
+  DISTRIBUTION_CONFIRMED
 }
 
 model AuditLog {
@@ -916,6 +997,7 @@ model AuditLog {
   @@index([entityType])
   @@index([entityId])
   @@index([createdAt])
+  @@index([entityType, entityId, createdAt(sort: Desc)])
 }
 
 // ============================================
@@ -926,6 +1008,7 @@ enum RecoveryCaseType {
   FAILED_REFUND
   FAILED_DISTRIBUTION
   CANCELLED_CAMPAIGN_FUNDS
+  FAILED_PLEDGE
 }
 
 enum RecoveryStatus {
@@ -950,6 +1033,7 @@ model RecoveryCase {
   donationId      String?
   distributionId  String?
   campaignId      String?
+  pledgeId        String?
   // failure metadata
   failureReason   String?           @db.Text
   failureMetadata Json?
@@ -974,6 +1058,7 @@ model RecoveryCase {
   @@index([donationId])
   @@index([distributionId])
   @@index([campaignId])
+  @@index([pledgeId])
   @@index([nextRetryAt])
   @@index([createdAt])
 }
@@ -1066,6 +1151,50 @@ model WebhookEvent {
   @@index([eventType])
   @@index([status])
   @@index([nextRetryAt])
+  @@index([createdAt])
+}
+
+// ============================================
+// BATCH JOBS
+// ============================================
+
+enum BatchJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  PARTIAL
+  ROLLED_BACK
+}
+
+enum BatchJobType {
+  BENEFICIARY_IMPORT
+  BENEFICIARY_STATUS_UPDATE
+  KYC_BULK_SUBMIT
+  DISTRIBUTION_BATCH_CREATE
+  BULK_NOTIFICATION
+}
+
+model BatchJob {
+  id             String         @id @default(cuid())
+  type           BatchJobType
+  status         BatchJobStatus @default(PENDING)
+  createdBy      String
+  totalItems     Int            @default(0)
+  processedItems Int            @default(0)
+  successCount   Int            @default(0)
+  failureCount   Int            @default(0)
+  errors         Json?          // Array of {index, message, data}
+  metadata       Json?          // Input params, filters, etc.
+  rollbackData   Json?          // Saved state for rollback capability
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([createdBy])
+  @@index([type])
+  @@index([status])
   @@index([createdAt])
 }
 
@@ -1270,6 +1399,12 @@ model PledgeAttempt {
   attemptAt        DateTime            @default(now())
   status           PledgeAttemptStatus @default(PENDING)
   providerReference String?
+  // The billing-cycle window (captured from Pledge.nextRunAt at the start of
+  // the processing tick, before any attempt is recorded) this attempt
+  // belongs to. Used to scope retry counts to the current cycle instead of
+  // counting all-time attempts, and to audit which cycle a SUCCESS row
+  // completed. Nullable so existing rows are unaffected.
+  billingCycleAt   DateTime?
   failureReason    String?
   retryCount       Int                 @default(0)
   metadata         Json?
@@ -1279,6 +1414,10 @@ model PledgeAttempt {
 
   @@index([pledgeId])
   @@index([status])
+  // A SUCCESS attempt with providerReference = idempotencyKey for a given
+  // (pledgeId, billingCycleAt) marks that cycle as completed — this partial
+  // covering index makes the restart-safety lookup in the worker cheap.
+  @@index([pledgeId, providerReference, status])
   @@map("pledge_attempts")
 }
 
@@ -1377,6 +1516,7 @@ model EmailVerificationToken {
 }
 
 // ============================================
+
 // ANALYTICS ROLLUPS & TRENDING
 // ============================================
 
@@ -1452,3 +1592,54 @@ model RollupTracker {
   lastHour               DateTime?
   lastMonth              DateTime?
 }
+
+// FRAUD DETECTION MODEL VERSIONING & LABELING
+// ============================================
+
+// Versioned Platt scaling parameters for fraud score calibration.
+// Each row represents a deployed model version with its A and B parameters
+// for the sigmoid transformation: p = 1 / (1 + exp(A * rawScore + B))
+model FraudModelVersion {
+  id              String   @id @default(cuid())
+  version         String   @unique // e.g., "v1.0.0"
+  plattA          Float    // A parameter for Platt scaling
+  plattB          Float    // B parameter for Platt scaling
+  isActive        Boolean  @default(true)
+  calibratedAt    DateTime @default(now())
+  calibratedBy    String?  // User who calibrated this version
+  ece             Float?   // Expected Calibration Error (from evaluation)
+  auc             Float?   // AUC-ROC score (from evaluation)
+  metadata        Json?    // Additional version metadata
+  createdAt       DateTime @default(now())
+
+  fraudLabels     FraudLabel[]
+
+  @@index([isActive])
+  @@index([version])
+  @@index([calibratedAt])
+}
+
+// Ground truth labels for KYC submissions, used for model recalibration.
+// Written when a KYC submission transitions to APPROVED or REJECTED status.
+model FraudLabel {
+  id              String   @id @default(cuid())
+  submissionId    String   @unique
+  modelVersionId  String
+  outcome         String   // "APPROVED" or "REJECTED"
+  reviewedBy      String
+  reviewedAt      DateTime @default(now())
+  // Snapshot of features at scoring time for reproducibility
+  featureSnapshot Json     // { rawScore, signals: [...], interactionFeatures: {...} }
+  fraudScore      Int      // The fraud score at time of labeling
+  fraudScoreFloat Float?   // Full-precision calibrated probability
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  modelVersion    FraudModelVersion @relation(fields: [modelVersionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@index([modelVersionId])
+  @@index([outcome])
+  @@index([reviewedAt])
+}
+

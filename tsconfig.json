@@ -2,7 +2,7 @@
   "compilerOptions": {
     // Compilation target and standard library
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM"],
 
     // Module system.
     // "node16" / "node16": the modern Node-compatible pair introduced in TypeScript 4.7.

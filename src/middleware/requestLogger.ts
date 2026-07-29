@@ -4,25 +4,23 @@ import logger from '../config/logger';
 export const requestLogger = (req: Request, res: Response, next: NextFunction): void => {
   const startTime = Date.now();
 
-  // Log request details
-  logger.info({
-    method: req.method,
-    url: req.url,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    timestamp: new Date().toISOString(),
-  });
-
-  // Log response details when response is sent
   res.on('finish', () => {
     const duration = Date.now() - startTime;
-    
+    const encoding = res.getHeader('Content-Encoding') as string | undefined;
+    const contentLength = res.getHeader('Content-Length');
+
+    // Build a compact compression note shown only when compression fired
+    const compressionNote = encoding && encoding !== 'identity'
+      ? { encoding, compressedBytes: contentLength ?? 'chunked' }
+      : undefined;
+
     logger.info({
       method: req.method,
       url: req.url,
       statusCode: res.statusCode,
       duration: `${duration}ms`,
       ip: req.ip,
+      ...(compressionNote ? { compression: compressionNote } : {}),
       timestamp: new Date().toISOString(),
     });
   });

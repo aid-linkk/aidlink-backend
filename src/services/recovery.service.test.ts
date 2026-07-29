@@ -54,6 +54,53 @@ describe('createFailedRefundCase', () => {
   });
 });
 
+// ─── createFailedPledgeCase ────────────────────────────────────────
+
+describe('createFailedPledgeCase', () => {
+  it('creates a new recovery case and notifies the donor', async () => {
+    (prisma.recoveryCase.findFirst as jest.Mock).mockResolvedValue(null);
+    const created = {
+      id: 'rc-pledge-1',
+      type: RecoveryCaseType.FAILED_PLEDGE,
+      pledgeId: 'pledge-1',
+      status: RecoveryStatus.PENDING,
+      retryCount: 0,
+      maxRetries: 3,
+    };
+    (prisma.recoveryCase.create as jest.Mock).mockResolvedValue(created);
+
+    const result = await RecoveryService.createFailedPledgeCase(
+      'pledge-1',
+      'donor-1',
+      'card declined',
+      { cycleStartAt: new Date('2026-07-01'), retryCount: 3 },
+    );
+
+    expect(prisma.recoveryCase.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: RecoveryCaseType.FAILED_PLEDGE, pledgeId: 'pledge-1' }),
+      }),
+    );
+    expect(prisma.notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ userId: 'donor-1', type: NotificationType.PLEDGE_PAYMENT_FAILED }),
+      }),
+    );
+    expect(prisma.auditLog.create).toHaveBeenCalled();
+    expect(result.type).toBe(RecoveryCaseType.FAILED_PLEDGE);
+  });
+
+  it('returns the existing open case without creating a duplicate', async () => {
+    const existing = { id: 'rc-pledge-1', type: RecoveryCaseType.FAILED_PLEDGE, status: RecoveryStatus.PENDING };
+    (prisma.recoveryCase.findFirst as jest.Mock).mockResolvedValue(existing);
+
+    const result = await RecoveryService.createFailedPledgeCase('pledge-1', 'donor-1', 'card declined');
+
+    expect(prisma.recoveryCase.create).not.toHaveBeenCalled();
+    expect(result).toBe(existing);
+  });
+});
+
 // ─── retryRefund ─────────────────────────────────────────────────
 
 describe('retryRefund', () => {

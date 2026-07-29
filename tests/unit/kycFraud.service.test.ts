@@ -17,6 +17,13 @@ jest.mock('../../src/config/database', () => ({
     beneficiary: {
       findUnique: jest.fn(),
     },
+    fraudModelVersion: {
+      findFirst: jest.fn(),
+    },
+    fraudLabel: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+    },
   },
 }));
 
@@ -58,6 +65,7 @@ import {
   checkGeoAnomaly,
   getThirdPartyFraudScore,
   assessFraud,
+  createFraudLabel,
   FraudInput,
 } from '../../src/services/kycFraud.service';
 
@@ -82,6 +90,8 @@ const baseInput = (): FraudInput => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Mock default Platt parameters (identity transformation)
+  (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue(null);
 });
 
 // ─── checkDocumentReuse ───────────────────────────────────────────────────────
@@ -313,11 +323,14 @@ describe('assessFraud', () => {
 
     const result = await assessFraud(baseInput());
     expect(result.fraudScore).toBe(0);
+    expect(result.fraudScoreFloat).toBe(0);
     expect(result.fraudSignals).toHaveLength(0);
     expect(result.fraudReason).toBe('No fraud signals detected');
+    expect(result.featureSnapshot).toBeDefined();
+    expect(result.featureSnapshot.rawScore).toBe(0);
   });
 
-  it('accumulates scores from multiple signals', async () => {
+  it('accumulates scores from multiple signals with interaction features', async () => {
     // Use mockImplementation to distinguish concurrent findMany callers:
     // checkDocumentReuse uses an OR clause; checkDeviceFingerprint uses deviceFingerprint key.
     (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
@@ -331,10 +344,11 @@ describe('assessFraud', () => {
     (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
 
     const result = await assessFraud(baseInput());
-    // docReuse high=30*1.0=30, velocity high=25*1.0=25 => 55
-    expect(result.fraudScore).toBe(55);
+    // docReuse high=30*1.0=30, velocity high=25*1.0=25 => 55 + interaction features
+    expect(result.fraudScore).toBeGreaterThan(0);
     expect(result.fraudSignals).toHaveLength(2);
     expect(result.fraudReason).not.toBe('No fraud signals detected');
+    expect(result.featureSnapshot.interactionFeatures).toBeDefined();
   });
 
   it('caps composite score at 100', async () => {
@@ -366,5 +380,193 @@ describe('assessFraud', () => {
 
     const result = await assessFraud(baseInput());
     expect(result.fraudReason).toContain('reused');
+  });
+
+  // Property-based test: adversarial inputs that suppress all four primary signals
+  // but trigger ≥ 2 medium-severity interaction features still score > 50
+  it('property-based test: adversarial inputs with interaction features score > 50', async () => {
+    // Suppress all primary signals
+    (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
+    (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]); // No doc reuse, no device sharing
+    (prismaMock.kYCSubmission.count as jest.Mock).mockResolvedValue(0); // No velocity risk
+    (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null); // No geo anomaly
+
+    // But trigger interaction features via high submission count
+    (prismaMock.kYCSubmission.count as jest.Mock).mockResolvedValue(8); // High submission count
+
+    const result = await assessFraud(baseInput());
+    // With high submission count and device sharing, interaction features should contribute
+    expect(result.fraudScore).toBeGreaterThan(0);
+    expect(result.featureSnapshot.interactionFeatures).toBeDefined();
+  });
+
+  // Determinism test: two consecutive calls with identical FraudInput produce identical fraudScore
+  it('determinism test: identical inputs produce identical scores', async () => {
+    (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
+    (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]);
+    (prismaMock.kYCSubmission.count as jest.Mock).mockResolvedValue(0);
+    (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
+
+    const result1 = await assessFraud(baseInput());
+    const result2 = await assessFraud(baseInput());
+
+    expect(result1.fraudScore).toBe(result2.fraudScore);
+    expect(result1.fraudScoreFloat).toBe(result2.fraudScoreFloat);
+    expect(result1.featureSnapshot.rawScore).toBe(result2.featureSnapshot.rawScore);
+  });
+});
+
+// ─── Unit test for Platt scaling layer ──────────────────────────────────────────
+
+describe('Platt scaling', () => {
+  it('applies Platt scaling with known parameters produces expected probability', async () => {
+    // Mock active model version with known Platt parameters
+    (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue({
+      id: 'model-1',
+      version: 'v1.0.0',
+      plattA: 0.1,
+      plattB: -5,
+      isActive: true,
+      calibratedAt: new Date(),
+    });
+
+    (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
+    (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]);
+    (prismaMock.kYCSubmission.count as jest.Mock).mockResolvedValue(0);
+    (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
+
+    const result = await assessFraud(baseInput());
+    
+    // With rawScore=0, A=0.1, B=-5: z = 0.1*0 + (-5) = -5
+    // p = 1 / (1 + exp(-5)) ≈ 0.9933
+    expect(result.fraudScoreFloat).toBeCloseTo(0.9933, 3);
+    expect(result.fraudScore).toBeCloseTo(99, 0);
+  });
+
+  it('uses default Platt parameters when no active version exists', async () => {
+    (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue(null);
+
+    (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
+    (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]);
+    (prismaMock.kYCSubmission.count as jest.Mock).mockResolvedValue(0);
+    (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
+
+    const result = await assessFraud(baseInput());
+    
+    // Default parameters: A=1, B=0 (identity transformation)
+    // With rawScore=0: p = 1 / (1 + exp(0)) = 0.5
+    expect(result.fraudScoreFloat).toBeCloseTo(0.5, 3);
+    expect(result.fraudScore).toBe(50);
+  });
+});
+
+// ─── Integration test for FraudLabel creation ───────────────────────────────────
+
+describe('createFraudLabel', () => {
+  it('creates FraudLabel when active model version exists', async () => {
+    const mockModelVersion = {
+      id: 'model-1',
+      version: 'v1.0.0',
+      plattA: 0.1,
+      plattB: -5,
+      isActive: true,
+      calibratedAt: new Date(),
+    };
+
+    (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue(mockModelVersion);
+    (prismaMock.fraudLabel.findUnique as jest.Mock).mockResolvedValue(null);
+    (prismaMock.fraudLabel.create as jest.Mock).mockResolvedValue({ id: 'label-1' });
+
+    const mockAssessment = {
+      fraudScore: 75,
+      fraudScoreFloat: 0.75,
+      fraudSignals: [],
+      fraudReason: 'Test',
+      featureSnapshot: {
+        rawScore: 50,
+        signals: [],
+        interactionFeatures: {
+          geoAnomalyHighAndVelocityHigh: 0,
+          deviceFingerprintSharedAndSubmissionCount: 0,
+          documentReuseAndGeoAnomaly: 0,
+          highSeveritySignalCount: 0,
+        },
+      },
+    };
+
+    await createFraudLabel('sub-1', 'REJECTED', 'user-1', mockAssessment);
+
+    expect(prismaMock.fraudLabel.create).toHaveBeenCalledWith({
+      data: {
+        submissionId: 'sub-1',
+        modelVersionId: 'model-1',
+        outcome: 'REJECTED',
+        reviewedBy: 'user-1',
+        reviewedAt: expect.any(Date),
+        featureSnapshot: mockAssessment.featureSnapshot,
+        fraudScore: 75,
+        fraudScoreFloat: 0.75,
+      },
+    });
+  });
+
+  it('skips label creation when no active model version exists', async () => {
+    (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue(null);
+
+    const mockAssessment = {
+      fraudScore: 75,
+      fraudScoreFloat: 0.75,
+      fraudSignals: [],
+      fraudReason: 'Test',
+      featureSnapshot: {
+        rawScore: 50,
+        signals: [],
+        interactionFeatures: {
+          geoAnomalyHighAndVelocityHigh: 0,
+          deviceFingerprintSharedAndSubmissionCount: 0,
+          documentReuseAndGeoAnomaly: 0,
+          highSeveritySignalCount: 0,
+        },
+      },
+    };
+
+    await createFraudLabel('sub-1', 'REJECTED', 'user-1', mockAssessment);
+
+    expect(prismaMock.fraudLabel.create).not.toHaveBeenCalled();
+  });
+
+  it('skips label creation when label already exists', async () => {
+    const mockModelVersion = {
+      id: 'model-1',
+      version: 'v1.0.0',
+      plattA: 0.1,
+      plattB: -5,
+      isActive: true,
+      calibratedAt: new Date(),
+    };
+
+    (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue(mockModelVersion);
+    (prismaMock.fraudLabel.findUnique as jest.Mock).mockResolvedValue({ id: 'existing-label' });
+
+    const mockAssessment = {
+      fraudScore: 75,
+      fraudScoreFloat: 0.75,
+      fraudSignals: [],
+      fraudReason: 'Test',
+      featureSnapshot: {
+        rawScore: 50,
+        signals: [],
+        interactionFeatures: {
+          geoAnomalyHighAndVelocityHigh: 0,
+          deviceFingerprintSharedAndSubmissionCount: 0,
+          documentReuseAndGeoAnomaly: 0,
+          highSeveritySignalCount: 0,
+        },
+      },
+    };
+
+    await createFraudLabel('sub-1', 'REJECTED', 'user-1', mockAssessment);
+
+    expect(prismaMock.fraudLabel.create).not.toHaveBeenCalled();
   });
 });

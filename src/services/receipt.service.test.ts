@@ -314,11 +314,16 @@ describe('ReceiptService', () => {
     it('generates receipts for each donation and completes with counts', async () => {
       (prisma.receiptBatchJob.findUnique as jest.Mock).mockResolvedValue({
         id: 'job1',
+        generatedCount: 0,
+        failedCount: 0,
         jobMetadata: { filter: {} },
         totalCount: 2,
       });
       (prisma.receiptBatchJob.update as jest.Mock).mockResolvedValue({});
-      (prisma.donation.findMany as jest.Mock).mockResolvedValue([{ id: 'd1' }, { id: 'd2' }]);
+      // First call returns donations, second call returns empty to break the loop
+      (prisma.donation.findMany as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'd1' }, { id: 'd2' }])
+        .mockResolvedValueOnce([]);
 
       const genSpy = jest
         .spyOn(ReceiptService, 'generateReceipt')
@@ -336,6 +341,161 @@ describe('ReceiptService', () => {
       expect(finalUpdate.data.status).toBe('COMPLETED');
       expect(finalUpdate.data.generatedCount).toBe(1);
       expect(finalUpdate.data.failedCount).toBe(1);
+
+      genSpy.mockRestore();
+      emailSpy.mockRestore();
+    });
+
+    it('persists lastProcessedId checkpoint after each donation', async () => {
+      (prisma.receiptBatchJob.findUnique as jest.Mock).mockResolvedValue({
+        id: 'job1',
+        generatedCount: 0,
+        failedCount: 0,
+        jobMetadata: { filter: {} },
+        totalCount: 2,
+      });
+      (prisma.receiptBatchJob.update as jest.Mock).mockResolvedValue({});
+      (prisma.donation.findMany as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'd1' }, { id: 'd2' }])
+        .mockResolvedValueOnce([]);
+
+      const genSpy = jest
+        .spyOn(ReceiptService, 'generateReceipt')
+        .mockResolvedValue({ id: 'r1' });
+      const emailSpy = jest
+        .spyOn(ReceiptService, 'sendReceiptEmail')
+        .mockResolvedValue({} as any);
+
+      await ReceiptService.processBatchJob('job1');
+
+      // After processing d1, the checkpoint update should include lastProcessedId = 'd1'
+      const progressUpdates = (prisma.receiptBatchJob.update as jest.Mock).mock.calls
+        .map((c: any) => c[0].data)
+        .filter((d: any) => d.jobMetadata);
+
+      expect(progressUpdates.length).toBeGreaterThanOrEqual(2);
+      expect(progressUpdates[0].jobMetadata.lastProcessedId).toBe('d1');
+      expect(progressUpdates[1].jobMetadata.lastProcessedId).toBe('d2');
+
+      genSpy.mockRestore();
+      emailSpy.mockRestore();
+    });
+
+    it('resumes from lastProcessedId checkpoint with existing counts', async () => {
+      // Simulate a previously interrupted job that already processed 3 items
+      (prisma.receiptBatchJob.findUnique as jest.Mock).mockResolvedValue({
+        id: 'job1',
+        generatedCount: 2,
+        failedCount: 1,
+        jobMetadata: { filter: {}, lastProcessedId: 'd3' },
+        totalCount: 5,
+      });
+      (prisma.receiptBatchJob.update as jest.Mock).mockResolvedValue({});
+      (prisma.donation.findMany as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'd4' }, { id: 'd5' }])
+        .mockResolvedValueOnce([]);
+
+      const genSpy = jest
+        .spyOn(ReceiptService, 'generateReceipt')
+        .mockResolvedValue({ id: 'r-new' });
+      const emailSpy = jest
+        .spyOn(ReceiptService, 'sendReceiptEmail')
+        .mockResolvedValue({} as any);
+
+      await ReceiptService.processBatchJob('job1');
+
+      // Should have used cursor-based pagination starting after d3
+      const findManyCall = (prisma.donation.findMany as jest.Mock).mock.calls[0][0];
+      expect(findManyCall.cursor).toEqual({ id: 'd3' });
+      expect(findManyCall.skip).toBe(1);
+
+      // Counts should be cumulative (resumed from 2 generated, 1 failed)
+      expect(genSpy).toHaveBeenCalledTimes(2); // only d4, d5
+      const finalUpdate = (prisma.receiptBatchJob.update as jest.Mock).mock.calls.pop()![0];
+      expect(finalUpdate.data.status).toBe('COMPLETED');
+      expect(finalUpdate.data.generatedCount).toBe(4); // 2 prior + 2 new
+      expect(finalUpdate.data.failedCount).toBe(1);   // no new failures
+
+      genSpy.mockRestore();
+      emailSpy.mockRestore();
+    });
+
+    it('does not duplicate receipts when generateReceipt is idempotent', async () => {
+      (prisma.receiptBatchJob.findUnique as jest.Mock).mockResolvedValue({
+        id: 'job1',
+        generatedCount: 0,
+        failedCount: 0,
+        jobMetadata: { filter: {} },
+        totalCount: 1,
+      });
+      (prisma.receiptBatchJob.update as jest.Mock).mockResolvedValue({});
+      (prisma.donation.findMany as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'd1' }])
+        .mockResolvedValueOnce([]);
+
+      // generateReceipt returns the existing receipt (idempotent — already created)
+      const existingReceipt = { id: 'r-existing', receiptNumber: 'RCPT-2026-EXISTING' };
+      const genSpy = jest
+        .spyOn(ReceiptService, 'generateReceipt')
+        .mockResolvedValue(existingReceipt);
+      const emailSpy = jest
+        .spyOn(ReceiptService, 'sendReceiptEmail')
+        .mockResolvedValue({} as any);
+
+      await ReceiptService.processBatchJob('job1');
+
+      // generateReceipt was called once and returned the existing receipt
+      expect(genSpy).toHaveBeenCalledTimes(1);
+      // Email was still sent for the (already existing) receipt
+      expect(emailSpy).toHaveBeenCalledWith('r-existing');
+      const finalUpdate = (prisma.receiptBatchJob.update as jest.Mock).mock.calls.pop()![0];
+      expect(finalUpdate.data.status).toBe('COMPLETED');
+      expect(finalUpdate.data.generatedCount).toBe(1);
+
+      genSpy.mockRestore();
+      emailSpy.mockRestore();
+    });
+
+    it('paginates through multiple pages without loading all at once', async () => {
+      (prisma.receiptBatchJob.findUnique as jest.Mock).mockResolvedValue({
+        id: 'job1',
+        generatedCount: 0,
+        failedCount: 0,
+        jobMetadata: { filter: {} },
+        totalCount: 4,
+      });
+      (prisma.receiptBatchJob.update as jest.Mock).mockResolvedValue({});
+      // Simulate two pages of results, then empty
+      (prisma.donation.findMany as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'd1' }, { id: 'd2' }])  // page 1
+        .mockResolvedValueOnce([{ id: 'd3' }, { id: 'd4' }])  // page 2
+        .mockResolvedValueOnce([]);                             // done
+
+      const genSpy = jest
+        .spyOn(ReceiptService, 'generateReceipt')
+        .mockResolvedValue({ id: 'r-gen' });
+      const emailSpy = jest
+        .spyOn(ReceiptService, 'sendReceiptEmail')
+        .mockResolvedValue({} as any);
+
+      await ReceiptService.processBatchJob('job1');
+
+      expect(genSpy).toHaveBeenCalledTimes(4);
+      expect(prisma.donation.findMany).toHaveBeenCalledTimes(3);
+
+      // Second call should use cursor from last item of page 1
+      const secondCall = (prisma.donation.findMany as jest.Mock).mock.calls[1][0];
+      expect(secondCall.cursor).toEqual({ id: 'd2' });
+      expect(secondCall.skip).toBe(1);
+
+      // Third call should use cursor from last item of page 2
+      const thirdCall = (prisma.donation.findMany as jest.Mock).mock.calls[2][0];
+      expect(thirdCall.cursor).toEqual({ id: 'd4' });
+      expect(thirdCall.skip).toBe(1);
+
+      const finalUpdate = (prisma.receiptBatchJob.update as jest.Mock).mock.calls.pop()![0];
+      expect(finalUpdate.data.status).toBe('COMPLETED');
+      expect(finalUpdate.data.generatedCount).toBe(4);
 
       genSpy.mockRestore();
       emailSpy.mockRestore();

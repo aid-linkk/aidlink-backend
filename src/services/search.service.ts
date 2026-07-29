@@ -6,8 +6,8 @@ const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
 const DEFAULT_SORT_ORDER = 'desc' as const;
 
-type CampaignSortField = 'createdAt' | 'updatedAt' | 'title' | 'targetAmount' | 'status';
-type DonationSortField = 'createdAt' | 'amount' | 'status';
+type CampaignSortField = 'createdAt' | 'updatedAt' | 'title' | 'targetAmount' | 'status' | 'relevance';
+type DonationSortField = 'createdAt' | 'amount' | 'status' | 'relevance';
 
 export interface SearchFilters {
   query?: string;
@@ -22,6 +22,7 @@ export interface SearchFilters {
   sortOrder?: 'asc' | 'desc';
   page?: number;
   limit?: number;
+  cursor?: string;
 }
 
 interface PaginationParams {
@@ -35,6 +36,26 @@ interface PaginationMetadata {
   limit: number;
   total: number;
   totalPages: number;
+  nextCursor?: string;
+  prevCursor?: string;
+}
+
+interface CursorData {
+  score: number;
+  id: string;
+}
+
+function encodeCursor(score: number, id: string): string {
+  return Buffer.from(JSON.stringify({ score, id })).toString('base64');
+}
+
+function decodeCursor(cursor: string): CursorData {
+  try {
+    const decoded = Buffer.from(cursor, 'base64').toString('utf-8');
+    return JSON.parse(decoded) as CursorData;
+  } catch {
+    throw new Error('Invalid cursor format');
+  }
 }
 
 function normalizePagination(page?: number, limit?: number): PaginationParams {
@@ -99,6 +120,7 @@ export interface BeneficiarySearchFilters {
   sortOrder?: 'asc' | 'desc';
   page?: number;
   limit?: number;
+  cursor?: string;
 }
 
 interface NumericBucket {
@@ -256,7 +278,15 @@ function relevanceFilterConditions(filters: SearchFilters, amountColumn: string)
 
 export class SearchService {
   static async searchCampaigns(filters: SearchFilters) {
-    const { query, dateFrom, dateTo, status, minAmount, maxAmount, sortBy, sortOrder, page, limit } = filters;
+    const { query, dateFrom, dateTo, status, minAmount, maxAmount, sortBy, sortOrder, page, limit, cursor } = filters;
+
+    // Use trigram similarity search when query is provided and sortBy is relevance or not specified
+    if (query && (!sortBy || sortBy === 'relevance')) {
+      const cacheKey = buildKey('search', `campaigns:${JSON.stringify({ ...filters, sortBy: 'relevance' })}`);
+      return getOrSet(cacheKey, 120, async () => {
+        return this.searchCampaignsByRelevance(filters, query);
+      });
+    }
 
     const cacheKey = buildKey('search', `campaigns:${JSON.stringify(filters)}`);
 
@@ -264,7 +294,7 @@ export class SearchService {
       const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(page, limit);
       const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
         sortBy,
-        ['createdAt', 'updatedAt', 'title', 'targetAmount', 'status'],
+        ['createdAt', 'updatedAt', 'title', 'targetAmount', 'status', 'relevance'],
         'createdAt',
         sortOrder
       );
@@ -326,115 +356,135 @@ export class SearchService {
   }
 
   static async searchDonations(filters: SearchFilters) {
-    const { query, dateFrom, dateTo, status, minAmount, maxAmount, sortBy, sortOrder, page, limit } = filters;
+    const { query, dateFrom, dateTo, status, minAmount, maxAmount, sortBy, sortOrder, page, limit, cursor } = filters;
 
-    const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(page, limit);
-    const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
-      sortBy,
-      ['createdAt', 'amount', 'status'],
-      'createdAt',
-      sortOrder
-    );
-    const orderBy = buildDonationOrderBy(validSortBy, validSortOrder);
-
-    const where: any = {};
-
-    if (query) {
-      where.OR = [
-        { memo: { contains: query, mode: 'insensitive' } },
-        { donorMessage: { contains: query, mode: 'insensitive' } },
-        { fromWallet: { contains: query, mode: 'insensitive' } },
-      ];
+    // Use trigram similarity search when query is provided and sortBy is relevance or not specified
+    if (query && (!sortBy || sortBy === 'relevance')) {
+      const cacheKey = buildKey('search', `donations:${JSON.stringify({ ...filters, sortBy: 'relevance' })}`);
+      return getOrSet(cacheKey, 120, async () => {
+        return this.searchDonationsByRelevance(filters, query);
+      });
     }
 
-    if (status) {
-      where.status = status;
-    }
+    const cacheKey = buildKey('search', `donations:${JSON.stringify(filters)}`);
 
-    if (dateFrom || dateTo) {
-      where.createdAt = {};
-      if (dateFrom) where.createdAt.gte = dateFrom;
-      if (dateTo) where.createdAt.lte = dateTo;
-    }
+    return getOrSet(cacheKey, 120, async () => {
+      const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(page, limit);
+      const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
+        sortBy,
+        ['createdAt', 'amount', 'status', 'relevance'],
+        'createdAt',
+        sortOrder
+      );
+      const orderBy = buildDonationOrderBy(validSortBy, validSortOrder);
 
-    if (minAmount || maxAmount) {
-      where.amount = {};
-      if (minAmount) where.amount.gte = minAmount;
-      if (maxAmount) where.amount.lte = maxAmount;
-    }
+      const where: any = {};
 
-    const [donations, total] = await Promise.all([
-      prisma.donation.findMany({
-        where,
-        skip,
-        take: normalizedLimit,
-        orderBy,
-        include: {
-          campaign: {
-            select: {
-              id: true,
-              title: true,
+      if (query) {
+        where.OR = [
+          { memo: { contains: query, mode: 'insensitive' } },
+          { donorMessage: { contains: query, mode: 'insensitive' } },
+          { fromWallet: { contains: query, mode: 'insensitive' } },
+        ];
+      }
+
+      if (status) {
+        where.status = status;
+      }
+
+      if (dateFrom || dateTo) {
+        where.createdAt = {};
+        if (dateFrom) where.createdAt.gte = dateFrom;
+        if (dateTo) where.createdAt.lte = dateTo;
+      }
+
+      if (minAmount || maxAmount) {
+        where.amount = {};
+        if (minAmount) where.amount.gte = minAmount;
+        if (maxAmount) where.amount.lte = maxAmount;
+      }
+
+      const [donations, total] = await Promise.all([
+        prisma.donation.findMany({
+          where,
+          skip,
+          take: normalizedLimit,
+          orderBy,
+          include: {
+            campaign: {
+              select: {
+                id: true,
+                title: true,
+              },
             },
+            user: query
+              ? {
+                  select: {
+                    id: true,
+                    username: true,
+                    email: true,
+                  },
+                }
+              : undefined,
           },
-          user: query
-            ? {
-                select: {
-                  id: true,
-                  username: true,
-                  email: true,
-                },
-              }
-            : undefined,
-        },
-      }),
-      prisma.donation.count({ where }),
-    ]);
+        }),
+        prisma.donation.count({ where }),
+      ]);
 
-    return {
-      data: donations,
-      pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, total),
-    };
+      return {
+        data: donations,
+        pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, total),
+      };
+    });
   }
 
   private static async searchCampaignsByRelevance(filters: SearchFilters, query: string) {
-    const { page = 1, limit = 20 } = filters;
-    const skip = (page - 1) * limit;
-    const patterns = buildLikePatterns(query);
-
-    const conditions = relevanceFilterConditions(filters, '"targetAmount"');
+    const { page = 1, limit = 20, cursor } = filters;
+    const normalizedLimit = Math.max(1, Math.min(100, limit));
+    
+    // Build filter conditions
+    const conditions: Prisma.Sql[] = [];
     if (filters.status) conditions.push(Prisma.sql`status = ${filters.status}::"CampaignStatus"`);
+    if (filters.dateFrom) conditions.push(Prisma.sql`"createdAt" >= ${filters.dateFrom}`);
+    if (filters.dateTo) conditions.push(Prisma.sql`"createdAt" <= ${filters.dateTo}`);
+    if (filters.minAmount) conditions.push(Prisma.sql`"targetAmount" >= ${filters.minAmount}`);
+    if (filters.maxAmount) conditions.push(Prisma.sql`"targetAmount" <= ${filters.maxAmount}`);
+    
     const whereSql = conditions.length ? Prisma.join(conditions, ' AND ') : Prisma.sql`TRUE`;
-
-    const scoreExpr = Prisma.sql`(
-      ${likeScoreCase('title', CAMPAIGN_FIELD_WEIGHTS.title, patterns)}
-      + ${likeScoreCase('description', CAMPAIGN_FIELD_WEIGHTS.description, patterns)}
+    
+    // Build cursor condition if provided
+    let cursorCondition = Prisma.sql``;
+    if (cursor) {
+      const { score: lastScore, id: lastId } = decodeCursor(cursor);
+      cursorCondition = Prisma.sql` AND (score, id) < (${lastScore}, ${lastId})`;
+    }
+    
+    // Use word_similarity for trigram-based relevance scoring
+    const scoreExpr = Prisma.sql`GREATEST(
+      word_similarity(${query}, title),
+      word_similarity(${query}, description)
     )`;
-
-    const cte = Prisma.sql`
-      WITH scored AS (
+    
+    const [rankedRows, countRows] = await Promise.all([
+      prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
         SELECT id, ${scoreExpr} AS score
         FROM "Campaign"
         WHERE ${whereSql}
-      )
-    `;
-
-    const [rankedRows, countRows] = await Promise.all([
-      prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
-        ${cte}
-        SELECT id, score FROM scored
-        WHERE score > 0
-        ORDER BY score DESC, id ASC
-        LIMIT ${limit} OFFSET ${skip}
+          AND (${scoreExpr} > 0.2${cursorCondition})
+        ORDER BY score DESC, id DESC
+        LIMIT ${normalizedLimit}
       `),
       prisma.$queryRaw<Array<{ count: number }>>(Prisma.sql`
-        ${cte}
-        SELECT COUNT(*)::int AS count FROM scored WHERE score > 0
+        SELECT COUNT(*)::int AS count
+        FROM "Campaign"
+        WHERE ${whereSql} AND ${scoreExpr} > 0.2
       `),
     ]);
-
+    
     const total = countRows[0]?.count ?? 0;
-    const ids = rankedRows.map((r) => r.id);
-
+    const ids = rankedRows.map((r: { id: string; score: number }) => r.id);
+    const scoreMap = new Map(rankedRows.map((r: { id: string; score: number }) => [r.id, r.score]));
+    
     const campaigns = ids.length
       ? await prisma.campaign.findMany({
           where: { id: { in: ids } },
@@ -444,56 +494,83 @@ export class SearchService {
           },
         })
       : [];
-
-    const rank = new Map(ids.map((id, i) => [id, i]));
-    const data = campaigns.sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
-
+    
+    // Sort by score descending, then by id descending for stability
+    const data = campaigns.sort((a: any, b: any) => {
+      const scoreA = (scoreMap.get(a.id) ?? 0) as number;
+      const scoreB = (scoreMap.get(b.id) ?? 0) as number;
+      if (scoreB !== scoreA) return scoreB - scoreA;
+      return b.id.localeCompare(a.id);
+    });
+    
+    // Generate next cursor if there are more results
+    let nextCursor: string | undefined;
+    if (data.length === normalizedLimit && ids.length > 0) {
+      const lastResult = data[data.length - 1];
+      const lastScore = (scoreMap.get(lastResult.id) ?? 0) as number;
+      nextCursor = encodeCursor(lastScore, lastResult.id);
+    }
+    
     return {
-      data,
-      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      data: data.map((c: any) => ({ ...c, relevanceScore: scoreMap.get(c.id) ?? 0 })),
+      pagination: {
+        page,
+        limit: normalizedLimit,
+        total,
+        totalPages: Math.ceil(total / normalizedLimit),
+        nextCursor,
+      },
     };
   }
 
   private static async searchDonationsByRelevance(filters: SearchFilters, query: string) {
-    const { page = 1, limit = 20 } = filters;
-    const skip = (page - 1) * limit;
-    const patterns = buildLikePatterns(query);
-
-    const conditions = relevanceFilterConditions(filters, 'amount');
+    const { page = 1, limit = 20, cursor } = filters;
+    const normalizedLimit = Math.max(1, Math.min(100, limit));
+    
+    // Build filter conditions
+    const conditions: Prisma.Sql[] = [];
     if (filters.status) conditions.push(Prisma.sql`status = ${filters.status}::"DonationStatus"`);
+    if (filters.dateFrom) conditions.push(Prisma.sql`"createdAt" >= ${filters.dateFrom}`);
+    if (filters.dateTo) conditions.push(Prisma.sql`"createdAt" <= ${filters.dateTo}`);
+    if (filters.minAmount) conditions.push(Prisma.sql`amount >= ${filters.minAmount}`);
+    if (filters.maxAmount) conditions.push(Prisma.sql`amount <= ${filters.maxAmount}`);
+    
     const whereSql = conditions.length ? Prisma.join(conditions, ' AND ') : Prisma.sql`TRUE`;
-
-    const scoreExpr = Prisma.sql`(
-      ${likeScoreCase('memo', DONATION_FIELD_WEIGHTS.memo, patterns)}
-      + ${likeScoreCase('fromWallet', DONATION_FIELD_WEIGHTS.fromWallet, patterns)}
-      + ${likeScoreCase('donorMessage', DONATION_FIELD_WEIGHTS.donorMessage, patterns)}
+    
+    // Build cursor condition if provided
+    let cursorCondition = Prisma.sql``;
+    if (cursor) {
+      const { score: lastScore, id: lastId } = decodeCursor(cursor);
+      cursorCondition = Prisma.sql` AND (score, id) < (${lastScore}, ${lastId})`;
+    }
+    
+    // Use word_similarity for trigram-based relevance scoring
+    const scoreExpr = Prisma.sql`GREATEST(
+      COALESCE(word_similarity(${query}, memo), 0),
+      COALESCE(word_similarity(${query}, "fromWallet"), 0),
+      COALESCE(word_similarity(${query}, "donorMessage"), 0)
     )`;
-
-    const cte = Prisma.sql`
-      WITH scored AS (
+    
+    const [rankedRows, countRows] = await Promise.all([
+      prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
         SELECT id, ${scoreExpr} AS score
         FROM "Donation"
         WHERE ${whereSql}
-      )
-    `;
-
-    const [rankedRows, countRows] = await Promise.all([
-      prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
-        ${cte}
-        SELECT id, score FROM scored
-        WHERE score > 0
-        ORDER BY score DESC, id ASC
-        LIMIT ${limit} OFFSET ${skip}
+          AND (${scoreExpr} > 0.2${cursorCondition})
+        ORDER BY score DESC, id DESC
+        LIMIT ${normalizedLimit}
       `),
       prisma.$queryRaw<Array<{ count: number }>>(Prisma.sql`
-        ${cte}
-        SELECT COUNT(*)::int AS count FROM scored WHERE score > 0
+        SELECT COUNT(*)::int AS count
+        FROM "Donation"
+        WHERE ${whereSql} AND ${scoreExpr} > 0.2
       `),
     ]);
-
+    
     const total = countRows[0]?.count ?? 0;
-    const ids = rankedRows.map((r) => r.id);
-
+    const ids = rankedRows.map((r: { id: string; score: number }) => r.id);
+    const scoreMap = new Map(rankedRows.map((r: { id: string; score: number }) => [r.id, r.score]));
+    
     const donations = ids.length
       ? await prisma.donation.findMany({
           where: { id: { in: ids } },
@@ -503,13 +580,32 @@ export class SearchService {
           },
         })
       : [];
-
-    const rank = new Map(ids.map((id, i) => [id, i]));
-    const data = donations.sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
-
+    
+    // Sort by score descending, then by id descending for stability
+    const data = donations.sort((a: any, b: any) => {
+      const scoreA = (scoreMap.get(a.id) ?? 0) as number;
+      const scoreB = (scoreMap.get(b.id) ?? 0) as number;
+      if (scoreB !== scoreA) return scoreB - scoreA;
+      return b.id.localeCompare(a.id);
+    });
+    
+    // Generate next cursor if there are more results
+    let nextCursor: string | undefined;
+    if (data.length === normalizedLimit && ids.length > 0) {
+      const lastResult = data[data.length - 1];
+      const lastScore = (scoreMap.get(lastResult.id) ?? 0) as number;
+      nextCursor = encodeCursor(lastScore, lastResult.id);
+    }
+    
     return {
-      data,
-      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      data: data.map((d: any) => ({ ...d, relevanceScore: scoreMap.get(d.id) ?? 0 })),
+      pagination: {
+        page,
+        limit: normalizedLimit,
+        total,
+        totalPages: Math.ceil(total / normalizedLimit),
+        nextCursor,
+      },
     };
   }
 
@@ -571,7 +667,8 @@ export class SearchService {
 
   static buildBeneficiaryOrderBy(
     sortBy: BeneficiarySortField,
-    sortOrder: 'asc' | 'desc'
+    sortOrder: 'asc' | 'desc',
+    hasRelevanceScore: boolean = false
   ): any[] {
     const tiebreaker = { id: 'asc' as const };
     switch (sortBy) {
@@ -579,7 +676,10 @@ export class SearchService {
         // Older age => earlier dateOfBirth, so invert the requested order.
         return [{ dateOfBirth: sortOrder === 'desc' ? 'asc' : 'desc' }, tiebreaker];
       case 'relevance':
-        // No full-text relevance scoring available; fall back to recency.
+        // Use relevanceScore if available (from trigram similarity), otherwise fall back to recency.
+        if (hasRelevanceScore) {
+          return [{ relevanceScore: sortOrder }, tiebreaker];
+        }
         return [{ createdAt: sortOrder }, tiebreaker];
       case 'createdAt':
       case 'updatedAt':
@@ -635,54 +735,166 @@ export class SearchService {
     };
   }
 
-  static async searchBeneficiaries(filters: BeneficiarySearchFilters) {
-    const { sortBy, sortOrder, page, limit } = filters;
-
+  private static async searchBeneficiariesByRelevance(filters: BeneficiarySearchFilters, query: string) {
+    const { page = 1, limit = 20, cursor } = filters;
+    const normalizedLimit = Math.max(1, Math.min(100, limit));
+    
     const now = new Date();
-    const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(page, limit);
-    const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
-      sortBy,
-      ['relevance', 'createdAt', 'updatedAt', 'riskScore', 'age', 'familySize'],
-      'createdAt',
-      sortOrder
-    );
     const where = this.buildBeneficiaryWhere(filters, now);
-    const orderBy = this.buildBeneficiaryOrderBy(validSortBy, validSortOrder);
-    const facetQueries = this.beneficiaryFacetQueries(filters, now);
-
-    const [beneficiaries, total, ...facetResults] = await prisma.$transaction([
-      prisma.beneficiary.findMany({
-        where,
-        skip,
-        take: normalizedLimit,
-        orderBy,
-        include: {
-          user: {
-            select: {
-              id: true,
-              email: true,
-            },
-          },
-          _count: {
-            select: {
-              distributions: true,
-            },
-          },
-        },
-      }),
-      prisma.beneficiary.count({ where }),
-      ...facetQueries,
+    
+    // Build filter conditions for SQL
+    const conditions: Prisma.Sql[] = [];
+    if (filters.verificationStatus) conditions.push(Prisma.sql`status = ${filters.verificationStatus}::"BeneficiaryStatus"`);
+    if (filters.country) conditions.push(Prisma.sql`country = ${filters.country}`);
+    if (filters.city) conditions.push(Prisma.sql`city = ${filters.city}`);
+    if (filters.needsCategory) conditions.push(Prisma.sql`"needsCategory" = ${filters.needsCategory}`);
+    
+    const whereSql = conditions.length ? Prisma.join(conditions, ' AND ') : Prisma.sql`TRUE`;
+    
+    // Build cursor condition if provided
+    let cursorCondition = Prisma.sql``;
+    if (cursor) {
+      const { score: lastScore, id: lastId } = decodeCursor(cursor);
+      cursorCondition = Prisma.sql` AND (score, id) < (${lastScore}, ${lastId})`;
+    }
+    
+    // Use word_similarity for trigram-based relevance scoring
+    const scoreExpr = Prisma.sql`GREATEST(
+      word_similarity(${query}, "firstName"),
+      word_similarity(${query}, "lastName"),
+      word_similarity(${query}, "idDocumentNumber"),
+      word_similarity(${query}, "phoneNumber"),
+      COALESCE(word_similarity(${query}, "needsAssessment"), 0)
+    )`;
+    
+    const [rankedRows, countRows] = await Promise.all([
+      prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
+        SELECT id, ${scoreExpr} AS score
+        FROM "Beneficiary"
+        WHERE ${whereSql}
+          AND (${scoreExpr} > 0.2${cursorCondition})
+        ORDER BY score DESC, id DESC
+        LIMIT ${normalizedLimit}
+      `),
+      prisma.$queryRaw<Array<{ count: number }>>(Prisma.sql`
+        SELECT COUNT(*)::int AS count
+        FROM "Beneficiary"
+        WHERE ${whereSql} AND ${scoreExpr} > 0.2
+      `),
     ]);
-
+    
+    const total = countRows[0]?.count ?? 0;
+    const ids = rankedRows.map((r: { id: string; score: number }) => r.id);
+    const scoreMap = new Map(rankedRows.map((r: { id: string; score: number }) => [r.id, r.score]));
+    
+    const beneficiaries = ids.length
+      ? await prisma.beneficiary.findMany({
+          where: { id: { in: ids } },
+          include: {
+            user: {
+              select: {
+                id: true,
+                email: true,
+              },
+            },
+            _count: {
+              select: {
+                distributions: true,
+              },
+            },
+          },
+        })
+      : [];
+    
+    // Sort by score descending, then by id descending for stability
+    const data = beneficiaries.sort((a: any, b: any) => {
+      const scoreA = (scoreMap.get(a.id) ?? 0) as number;
+      const scoreB = (scoreMap.get(b.id) ?? 0) as number;
+      if (scoreB !== scoreA) return scoreB - scoreA;
+      return b.id.localeCompare(a.id);
+    });
+    
+    // Generate next cursor if there are more results
+    let nextCursor: string | undefined;
+    if (data.length === normalizedLimit && ids.length > 0) {
+      const lastResult = data[data.length - 1];
+      const lastScore = (scoreMap.get(lastResult.id) ?? 0) as number;
+      nextCursor = encodeCursor(lastScore, lastResult.id);
+    }
+    
     return {
-      data: beneficiaries,
-      pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, total),
-      facets: this.assembleBeneficiaryFacets(facetResults),
+      data: data.map((b: any) => ({ ...b, relevanceScore: scoreMap.get(b.id) ?? 0 })),
+      pagination: {
+        page,
+        limit: normalizedLimit,
+        total,
+        totalPages: Math.ceil(total / normalizedLimit),
+        nextCursor,
+      },
     };
   }
 
+  static async searchBeneficiaries(filters: BeneficiarySearchFilters) {
+    const { sortBy, sortOrder, page, limit, query, cursor } = filters;
+
+    const now = new Date();
+
+    // Use trigram similarity search when query is provided and sortBy is relevance or not specified
+    if (query && (!sortBy || sortBy === 'relevance')) {
+      const cacheKey = buildKey('search', `beneficiaries:${JSON.stringify({ ...filters, sortBy: 'relevance' })}`);
+      return getOrSet(cacheKey, 120, async () => {
+        return this.searchBeneficiariesByRelevance(filters, query);
+      });
+    }
+
+    const cacheKey = buildKey('search', `beneficiaries:${JSON.stringify(filters)}`);
+
+    return getOrSet(cacheKey, 120, async () => {
+      const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(page, limit);
+      const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
+        sortBy,
+        ['relevance', 'createdAt', 'updatedAt', 'riskScore', 'age', 'familySize'],
+        'createdAt',
+        sortOrder
+      );
+      const where = this.buildBeneficiaryWhere(filters, now);
+      const orderBy = this.buildBeneficiaryOrderBy(validSortBy, validSortOrder, false);
+      const facetQueries = this.beneficiaryFacetQueries(filters, now);
+
+      const [beneficiaries, total, ...facetResults] = await prisma.$transaction([
+        prisma.beneficiary.findMany({
+          where,
+          skip,
+          take: normalizedLimit,
+          orderBy,
+          include: {
+            user: {
+              select: {
+                id: true,
+                email: true,
+              },
+            },
+            _count: {
+              select: {
+                distributions: true,
+              },
+            },
+          },
+        }),
+        prisma.beneficiary.count({ where }),
+        ...facetQueries,
+      ]);
+
+      return {
+        data: beneficiaries,
+        pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, total),
+        facets: this.assembleBeneficiaryFacets(facetResults),
+      };
+    });
+  }
+
   static async globalSearch(filters: SearchFilters) {
-    const { query, page, limit } = filters;
+    const { query, page, limit, cursor } = filters;
 
     if (!query) {
       throw new Error('Query is required for global search');
@@ -690,63 +902,138 @@ export class SearchService {
 
     const { page: normalizedPage, limit: normalizedLimit } = normalizePagination(page, limit);
 
-    // Search across multiple entities
-    const [campaigns, donations, beneficiaries] = await Promise.all([
-      prisma.campaign.findMany({
-        where: {
-          OR: [
-            { title: { contains: query, mode: 'insensitive' } },
-            { description: { contains: query, mode: 'insensitive' } },
-          ],
-        },
-        take: normalizedLimit,
-        select: {
-          id: true,
-          title: true,
-          status: true,
-        },
-      }),
-      prisma.donation.findMany({
-        where: {
-          OR: [
-            { memo: { contains: query, mode: 'insensitive' } },
-            { donorMessage: { contains: query, mode: 'insensitive' } },
-          ],
-        },
-        take: normalizedLimit,
-        select: {
-          id: true,
-          amount: true,
-          status: true,
-        },
-      }),
-      prisma.beneficiary.findMany({
-        where: {
-          OR: [
-            { firstName: { contains: query, mode: 'insensitive' } },
-            { lastName: { contains: query, mode: 'insensitive' } },
-          ],
-        },
-        take: normalizedLimit,
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          status: true,
-        },
-      }),
-    ]);
+    // Use trigram similarity search with BM25-inspired scoring
+    const cacheKey = buildKey('search', `global:${JSON.stringify(filters)}`);
+    return getOrSet(cacheKey, 120, async () => {
+      // Fetch candidates from each entity type with trigram similarity scores
+      const [campaignRows, donationRows, beneficiaryRows] = await Promise.all([
+        prisma.$queryRaw<Array<{ id: string; title: string; status: string; score: number }>>(Prisma.sql`
+          SELECT id, title, status, 
+            GREATEST(word_similarity(${query}, title), word_similarity(${query}, description)) AS score
+          FROM "Campaign"
+          WHERE GREATEST(word_similarity(${query}, title), word_similarity(${query}, description)) > 0.2
+          ORDER BY score DESC, id DESC
+          LIMIT ${normalizedLimit * 3}
+        `),
+        prisma.$queryRaw<Array<{ id: string; amount: number; status: string; score: number }>>(Prisma.sql`
+          SELECT id, amount, status,
+            GREATEST(
+              COALESCE(word_similarity(${query}, memo), 0),
+              COALESCE(word_similarity(${query}, "fromWallet"), 0),
+              COALESCE(word_similarity(${query}, "donorMessage"), 0)
+            ) AS score
+          FROM "Donation"
+          WHERE GREATEST(
+            COALESCE(word_similarity(${query}, memo), 0),
+            COALESCE(word_similarity(${query}, "fromWallet"), 0),
+            COALESCE(word_similarity(${query}, "donorMessage"), 0)
+          ) > 0.2
+          ORDER BY score DESC, id DESC
+          LIMIT ${normalizedLimit * 3}
+        `),
+        prisma.$queryRaw<Array<{ id: string; firstName: string; lastName: string; status: string; score: number }>>(Prisma.sql`
+          SELECT id, "firstName", "lastName", status,
+            GREATEST(
+              word_similarity(${query}, "firstName"),
+              word_similarity(${query}, "lastName"),
+              word_similarity(${query}, "idDocumentNumber"),
+              word_similarity(${query}, "phoneNumber"),
+              COALESCE(word_similarity(${query}, "needsAssessment"), 0)
+            ) AS score
+          FROM "Beneficiary"
+          WHERE GREATEST(
+            word_similarity(${query}, "firstName"),
+            word_similarity(${query}, "lastName"),
+            word_similarity(${query}, "idDocumentNumber"),
+            word_similarity(${query}, "phoneNumber"),
+            COALESCE(word_similarity(${query}, "needsAssessment"), 0)
+          ) > 0.2
+          ORDER BY score DESC, id DESC
+          LIMIT ${normalizedLimit * 3}
+        `),
+      ]);
 
-    const results = [
-      ...campaigns.map(c => ({ ...c, entityType: 'campaign' })),
-      ...donations.map(d => ({ ...d, entityType: 'donation' })),
-      ...beneficiaries.map(b => ({ ...b, entityType: 'beneficiary' })),
-    ];
+      // Normalize scores per entity type to [0,1] range
+      const normalizeScores = (rows: Array<{ score: number; id: string }>) => {
+        const maxScore = Math.max(...rows.map(r => r.score), 1);
+        return rows.map(r => ({ ...r, normalizedScore: r.score / maxScore }));
+      };
 
-    return {
-      data: results,
-      pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, results.length),
-    };
+      const normalizedCampaigns = normalizeScores(campaignRows);
+      const normalizedDonations = normalizeScores(donationRows);
+      const normalizedBeneficiaries = normalizeScores(beneficiaryRows);
+
+      // Combine all candidates with entity type
+      const allCandidates = [
+        ...normalizedCampaigns.map(c => ({ ...c, entityType: 'campaign' as const })),
+        ...normalizedDonations.map(d => ({ ...d, entityType: 'donation' as const })),
+        ...normalizedBeneficiaries.map(b => ({ ...b, entityType: 'beneficiary' as const })),
+      ] as Array<{
+        id: string;
+        normalizedScore: number;
+        score: number;
+        entityType: 'campaign' | 'donation' | 'beneficiary';
+        title?: string;
+        amount?: number;
+        firstName?: string;
+        lastName?: string;
+        status: string;
+      }>;
+
+      // Sort by normalized score descending, then by id descending for stability
+      allCandidates.sort((a, b) => {
+        if (b.normalizedScore !== a.normalizedScore) {
+          return b.normalizedScore - a.normalizedScore;
+        }
+        return b.id.localeCompare(a.id);
+      });
+
+      // De-duplicate by (entityType, id)
+      const seen = new Set<string>();
+      const deduplicated = allCandidates.filter(item => {
+        const key = `${item.entityType}:${item.id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      // Apply cursor-based pagination
+      let startIndex = 0;
+      if (cursor) {
+        const { score: lastScore, id: lastId } = decodeCursor(cursor);
+        startIndex = deduplicated.findIndex(item => 
+          item.normalizedScore < lastScore || 
+          (item.normalizedScore === lastScore && item.id.localeCompare(lastId) < 0)
+        ) + 1;
+      }
+
+      const endIndex = startIndex + normalizedLimit;
+      const paginatedResults = deduplicated.slice(startIndex, endIndex);
+
+      // Generate next cursor
+      let nextCursor: string | undefined;
+      if (paginatedResults.length === normalizedLimit && endIndex < deduplicated.length) {
+        const lastResult = paginatedResults[paginatedResults.length - 1];
+        nextCursor = encodeCursor(lastResult.normalizedScore, lastResult.id);
+      }
+
+      // Format results
+      const data = paginatedResults.map(item => {
+        const { normalizedScore, ...rest } = item;
+        return { ...rest, relevanceScore: normalizedScore };
+      });
+
+      return {
+        data,
+        pagination: {
+          page: normalizedPage,
+          limit: normalizedLimit,
+          total: deduplicated.length,
+          totalPages: Math.ceil(deduplicated.length / normalizedLimit),
+          nextCursor,
+        },
+      };
+    });
   }
 
   static async advancedSearch(filters: SearchFilters) {

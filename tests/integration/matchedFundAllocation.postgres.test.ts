@@ -9,7 +9,18 @@
  *
  * Skips automatically when no database is reachable so `npm test` stays
  * green on machines without Postgres running.
+ *
+ * ─── Acceptance-Criteria Tests ────────────────────────────────────────────
+ *
+ * AC-1 (50-parallel, round cap):
+ *   50 parallel confirmDonation calls targeting the same multiplier with
+ *   matchCap=1000 and per-donation amount=100. After all settle,
+ *   SUM(matchedAmount) = exactly 1000, never > 1000.
+ *
+ * AC-2 (50-parallel, non-round cap):
+ *   Same test with matchCap=333.33333333 to verify Decimal precision.
  */
+
 import { PrismaClient, MultiplierType, DonationStatus, Prisma } from '@prisma/client';
 import { MultiplierService } from '../../src/services/multiplier.service';
 import { MatchedFundAllocationService } from '../../src/services/matchedFundAllocation.service';
@@ -41,6 +52,36 @@ const skippable = (name: string, fn: () => Promise<void>, timeout?: number) => {
     await fn();
   }, timeout);
 };
+
+/**
+ * Helper: confirms a single donation and allocates matched funds within
+ * a single atomic transaction. Returns { confirmed, matchedFund } so callers
+ * can verify idempotency guards.
+ */
+const confirmAndAllocate = async (
+  donationId: string,
+  donorAmount: Prisma.Decimal,
+  campaignId: string,
+) =>
+  prisma.$transaction(async (tx) => {
+    const confirmResult = await tx.donation.updateMany({
+      where: { id: donationId, status: { not: DonationStatus.CONFIRMED } },
+      data: { status: DonationStatus.CONFIRMED },
+    });
+    if (confirmResult.count === 0) return { confirmed: false, matchedFund: null };
+
+    const multiplier = await MultiplierService.evaluateMultiplierAtDonation(
+      { campaignId, donationTime: new Date() },
+      tx,
+    );
+    const matchedFund = await MatchedFundAllocationService.allocate(tx, {
+      donationId,
+      campaignId,
+      donorAmount,
+      multiplier,
+    });
+    return { confirmed: true, matchedFund };
+  });
 
 describe('Matched-fund allocation under real Postgres concurrency', () => {
   let campaignId: string;
@@ -80,26 +121,134 @@ describe('Matched-fund allocation under real Postgres concurrency', () => {
     donorId = donor.id;
   });
 
-  const confirmAndAllocate = async (donationId: string, donorAmount: Prisma.Decimal) =>
-    prisma.$transaction(async (tx) => {
-      const confirmResult = await tx.donation.updateMany({
-        where: { id: donationId, status: { not: DonationStatus.CONFIRMED } },
-        data: { status: DonationStatus.CONFIRMED },
-      });
-      if (confirmResult.count === 0) return { confirmed: false, matchedFund: null };
+  // ─── Acceptance Criterion 1: 50-parallel, round matchCap ────────────────
 
-      const multiplier = await MultiplierService.evaluateMultiplierAtDonation(
-        { campaignId, donationTime: new Date() },
-        tx,
-      );
-      const matchedFund = await MatchedFundAllocationService.allocate(tx, {
-        donationId,
-        campaignId,
-        donorAmount,
-        multiplier,
+  skippable(
+    '[AC-1] 50 parallel confirmations never exceed matchCap=1000 (per-donation match=100)',
+    async () => {
+      const matchCap = new Prisma.Decimal(1000);
+      const donorAmount = new Prisma.Decimal(100); // multiplier=2 → desired match=100 each
+      const concurrency = 50;
+
+      const multiplier = await prisma.multiplier.create({
+        data: {
+          campaignId,
+          type: MultiplierType.CAMPAIGN_WIDE,
+          multiplier: new Prisma.Decimal(2),
+          matchCap,
+          createdBy: 'admin',
+          active: true,
+        },
       });
-      return { confirmed: true, matchedFund };
-    });
+
+      const donations = await Promise.all(
+        Array.from({ length: concurrency }).map(() =>
+          prisma.donation.create({
+            data: {
+              campaignId,
+              userId: donorId,
+              amount: donorAmount,
+              currency: 'USD',
+            },
+          }),
+        ),
+      );
+
+      // Fire all 50 confirmations concurrently — the core race condition.
+      await Promise.all(
+        donations.map((d) => confirmAndAllocate(d.id, donorAmount, campaignId)),
+      );
+
+      const rows = await prisma.matchedFund.findMany({ where: { multiplierId: multiplier.id } });
+      const totalMatched = rows.reduce(
+        (sum, r) => sum.plus(r.matchedAmount),
+        new Prisma.Decimal(0),
+      );
+
+      // Invariant: total MUST NOT exceed matchCap.
+      expect(totalMatched.greaterThan(matchCap)).toBe(false);
+
+      // Invariant: total MUST equal matchCap exactly (10 of 50 are funded, exactly).
+      expect(totalMatched.toString()).toBe('1000');
+
+      // Verify the authoritative counter on the Multiplier row agrees.
+      const finalMultiplier = await prisma.multiplier.findUniqueOrThrow({
+        where: { id: multiplier.id },
+      });
+      expect(new Prisma.Decimal(finalMultiplier.matchedTotal).toString()).toBe('1000');
+
+      // All 50 donations must be CONFIRMED regardless of whether they got a match.
+      const finalDonations = await prisma.donation.findMany({ where: { campaignId } });
+      expect(finalDonations.every((d) => d.status === DonationStatus.CONFIRMED)).toBe(true);
+    },
+    60_000,
+  );
+
+  // ─── Acceptance Criterion 2: 50-parallel, non-round matchCap ────────────
+
+  skippable(
+    '[AC-2] 50 parallel confirmations with matchCap=333.33333333 preserve Decimal precision',
+    async () => {
+      // matchCap is not an even multiple of per-donation-match (100).
+      // Exactly 3 donations get a full 100 match (total=300),
+      // one donation gets a partial 33.33333333 match,
+      // the remainder get nothing.
+      const matchCap = new Prisma.Decimal('333.33333333');
+      const donorAmount = new Prisma.Decimal(100);
+      const concurrency = 50;
+
+      const multiplier = await prisma.multiplier.create({
+        data: {
+          campaignId,
+          type: MultiplierType.CAMPAIGN_WIDE,
+          multiplier: new Prisma.Decimal(2),
+          matchCap,
+          createdBy: 'admin',
+          active: true,
+        },
+      });
+
+      const donations = await Promise.all(
+        Array.from({ length: concurrency }).map(() =>
+          prisma.donation.create({
+            data: {
+              campaignId,
+              userId: donorId,
+              amount: donorAmount,
+              currency: 'USD',
+            },
+          }),
+        ),
+      );
+
+      await Promise.all(
+        donations.map((d) => confirmAndAllocate(d.id, donorAmount, campaignId)),
+      );
+
+      const rows = await prisma.matchedFund.findMany({ where: { multiplierId: multiplier.id } });
+      const totalMatched = rows.reduce(
+        (sum, r) => sum.plus(r.matchedAmount),
+        new Prisma.Decimal(0),
+      );
+
+      // The sum must equal matchCap exactly — verifies no float drift.
+      expect(totalMatched.toString()).toBe('333.33333333');
+
+      // The authoritative counter must agree.
+      const finalMultiplier = await prisma.multiplier.findUniqueOrThrow({
+        where: { id: multiplier.id },
+      });
+      expect(new Prisma.Decimal(finalMultiplier.matchedTotal).toString()).toBe('333.33333333');
+
+      // The partial-match row must appear: exactly one row with amount < 100
+      const partials = rows.filter((r) => new Prisma.Decimal(r.matchedAmount).lessThan(100));
+      expect(partials).toHaveLength(1);
+      expect(partials[0].matchedAmount.toString()).toBe('33.33333333');
+    },
+    60_000,
+  );
+
+  // ─── Regression tests retained from the original 20-concurrent suite ────
 
   skippable(
     'never exceeds matchCap across 20 concurrent confirmations racing the same multiplier',
@@ -124,7 +273,7 @@ describe('Matched-fund allocation under real Postgres concurrency', () => {
         ),
       );
 
-      await Promise.all(donations.map((d) => confirmAndAllocate(d.id, new Prisma.Decimal(50))));
+      await Promise.all(donations.map((d) => confirmAndAllocate(d.id, new Prisma.Decimal(50), campaignId)));
 
       const rows = await prisma.matchedFund.findMany({ where: { multiplierId: multiplier.id } });
       const total = rows.reduce((sum, r) => sum.plus(r.matchedAmount), new Prisma.Decimal(0));
@@ -163,7 +312,7 @@ describe('Matched-fund allocation under real Postgres concurrency', () => {
         ),
       );
 
-      await Promise.all(donations.map((d) => confirmAndAllocate(d.id, new Prisma.Decimal(50))));
+      await Promise.all(donations.map((d) => confirmAndAllocate(d.id, new Prisma.Decimal(50), campaignId)));
 
       const rows = await prisma.matchedFund.findMany({ where: { multiplierId: multiplier.id } });
       const total = rows.reduce((sum, r) => sum.plus(r.matchedAmount), new Prisma.Decimal(0));
@@ -196,7 +345,7 @@ describe('Matched-fund allocation under real Postgres concurrency', () => {
       });
 
       // desired match = 100 * (3-1) = 200, but perDonationCap clamps to 20
-      await confirmAndAllocate(donation.id, new Prisma.Decimal(100));
+      await confirmAndAllocate(donation.id, new Prisma.Decimal(100), campaignId);
 
       const row = await prisma.matchedFund.findUnique({ where: { donationId: donation.id } });
       expect(row?.matchedAmount.toString()).toBe('20');
@@ -223,8 +372,8 @@ describe('Matched-fund allocation under real Postgres concurrency', () => {
       });
 
       const [first, second] = await Promise.all([
-        confirmAndAllocate(donation.id, new Prisma.Decimal(50)),
-        confirmAndAllocate(donation.id, new Prisma.Decimal(50)),
+        confirmAndAllocate(donation.id, new Prisma.Decimal(50), campaignId),
+        confirmAndAllocate(donation.id, new Prisma.Decimal(50), campaignId),
       ]);
 
       const confirmedCount = [first, second].filter((r) => r.confirmed).length;
@@ -256,8 +405,8 @@ describe('Matched-fund allocation under real Postgres concurrency', () => {
 
       // Simulates a caller retrying confirmDonation (e.g. after a dropped
       // response) once the first attempt has already committed.
-      const first = await confirmAndAllocate(donation.id, new Prisma.Decimal(50));
-      const retry = await confirmAndAllocate(donation.id, new Prisma.Decimal(50));
+      const first = await confirmAndAllocate(donation.id, new Prisma.Decimal(50), campaignId);
+      const retry = await confirmAndAllocate(donation.id, new Prisma.Decimal(50), campaignId);
 
       expect(first.confirmed).toBe(true);
       expect(retry.confirmed).toBe(false);
