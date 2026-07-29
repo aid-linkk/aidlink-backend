@@ -5,6 +5,13 @@ import { config } from '../config';
 import logger from '../config/logger';
 import prisma from '../config/database';
 import { JWTUtils } from '../utils/jwt';
+import {
+  authorizeCampaignJoin,
+  authorizeOrganizationJoin,
+  authorizeBeneficiaryJoin,
+  invalidateCampaignAuthorizationCache,
+  AuthorizationContext,
+} from './authorization';
 
 let io: SocketIOServer;
 
@@ -73,7 +80,25 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
     socket.join(`user:${userId}`);
 
     // Handle campaign subscriptions
-    socket.on('join_campaign', (campaignId: string) => {
+    socket.on('join_campaign', async (campaignId: string) => {
+      const authContext: AuthorizationContext = {
+        userId,
+        userRole: socket.data.userRole,
+      };
+
+      const authResult = await authorizeCampaignJoin(authContext, campaignId);
+
+      if (!authResult.authorized) {
+        socket.emit('room:join_error', {
+          room: `campaign:${campaignId}`,
+          reason: authResult.reason || 'forbidden',
+        });
+        logger.warn(
+          `User ${userId} denied access to campaign ${campaignId}: ${authResult.reason}`
+        );
+        return;
+      }
+
       socket.join(`campaign:${campaignId}`);
       logger.info(`User ${userId} joined campaign ${campaignId}`);
 
@@ -87,7 +112,25 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
     });
 
     // Handle organization subscriptions
-    socket.on('join_organization', (organizationId: string) => {
+    socket.on('join_organization', async (organizationId: string) => {
+      const authContext: AuthorizationContext = {
+        userId,
+        userRole: socket.data.userRole,
+      };
+
+      const authResult = await authorizeOrganizationJoin(authContext, organizationId);
+
+      if (!authResult.authorized) {
+        socket.emit('room:join_error', {
+          room: `organization:${organizationId}`,
+          reason: authResult.reason || 'forbidden',
+        });
+        logger.warn(
+          `User ${userId} denied access to organization ${organizationId}: ${authResult.reason}`
+        );
+        return;
+      }
+
       socket.join(`organization:${organizationId}`);
       logger.info(`User ${userId} joined organization ${organizationId}`);
     });
@@ -98,7 +141,25 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
     });
 
     // Handle beneficiary subscriptions
-    socket.on('join_beneficiary', (beneficiaryId: string) => {
+    socket.on('join_beneficiary', async (beneficiaryId: string) => {
+      const authContext: AuthorizationContext = {
+        userId,
+        userRole: socket.data.userRole,
+      };
+
+      const authResult = await authorizeBeneficiaryJoin(authContext, beneficiaryId);
+
+      if (!authResult.authorized) {
+        socket.emit('room:join_error', {
+          room: `beneficiary:${beneficiaryId}`,
+          reason: authResult.reason || 'forbidden',
+        });
+        logger.warn(
+          `User ${userId} denied access to beneficiary ${beneficiaryId}: ${authResult.reason}`
+        );
+        return;
+      }
+
       socket.join(`beneficiary:${beneficiaryId}`);
       logger.info(`User ${userId} joined beneficiary ${beneficiaryId}`);
     });
@@ -284,12 +345,23 @@ export const sendUnreadCount = (userId: string, unreadCount: number): void => {
 
 // ─── Moderation events ─────────────────────────────────────────
 
-export const sendCampaignSuspended = (campaignId: string, ownerId: string, payload: any): void => {
+export const sendCampaignSuspended = async (
+  campaignId: string,
+  ownerId: string,
+  payload: any
+): Promise<void> => {
+  // Invalidate authorization cache for this campaign
+  await invalidateCampaignAuthorizationCache(campaignId);
+  
   broadcastToCampaign(campaignId, 'campaign:suspended', payload);
   broadcastToUser(ownerId, 'campaign:suspended', payload);
 };
 
-export const sendCampaignReinstated = (campaignId: string, ownerId: string, payload: any): void => {
+export const sendCampaignReinstated = async (
+  campaignId: string,
+  ownerId: string,
+  payload: any
+): Promise<void> => {
   broadcastToCampaign(campaignId, 'campaign:reinstated', payload);
   broadcastToUser(ownerId, 'campaign:reinstated', payload);
 };

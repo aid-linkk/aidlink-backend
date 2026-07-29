@@ -185,7 +185,7 @@ export class ModerationService {
 
     await this.notifySuspension(updatedCampaign, opts);
 
-    sendCampaignSuspended(campaignId, updatedCampaign.userId, {
+    await sendCampaignSuspended(campaignId, updatedCampaign.userId, {
       campaignId,
       status: CampaignStatus.SUSPENDED,
       reasonCode: opts.reasonCode,
@@ -306,7 +306,7 @@ export class ModerationService {
       logger.error(`Failed to notify owner of reinstatement for campaign ${campaignId}:`, error);
     }
 
-    sendCampaignReinstated(campaignId, updated.userId, {
+    await sendCampaignReinstated(campaignId, updated.userId, {
       campaignId,
       status: CampaignStatus.ACTIVE,
     });
