@@ -126,8 +126,8 @@ jest.mock('../../src/services/notification.service', () => ({
   },
 }));
 jest.mock('../../src/websocket/socket.server', () => ({
-  sendCampaignSuspended: jest.fn(),
-  sendCampaignReinstated: jest.fn(),
+  sendCampaignSuspended: jest.fn().mockResolvedValue(undefined),
+  sendCampaignReinstated: jest.fn().mockResolvedValue(undefined),
   sendAppealUpdate: jest.fn(),
 }));
 jest.mock('../../src/config', () => ({
