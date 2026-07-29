@@ -499,4 +499,400 @@ describe('SearchService', () => {
       expect(result.data.length).toBeGreaterThan(0);
     });
   });
+
+  describe('trigram similarity relevance ranking', () => {
+    it('searchCampaigns returns relevanceScore field when query is provided', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'camp-1', score: 0.85 }])
+        .mockResolvedValueOnce([{ count: 1 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'camp-1',
+          title: 'Syria Relief Fund',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+      ]);
+
+      const result = await SearchService.searchCampaigns({
+        query: 'syria relief',
+        sortBy: 'relevance',
+        page: 1,
+        limit: 20,
+      });
+
+      expect(result.data[0]).toHaveProperty('relevanceScore');
+      expect(result.data[0].relevanceScore).toBeGreaterThan(0);
+    });
+
+    it('searchCampaigns ranks exact title match higher than description match', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-1', score: 0.95 }, // exact title match
+          { id: 'camp-2', score: 0.45 }, // description match only
+        ])
+        .mockResolvedValueOnce([{ count: 2 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'camp-1',
+          title: 'Syria Relief Fund',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+        {
+          id: 'camp-2',
+          title: 'Other Campaign',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+      ]);
+
+      const result = await SearchService.searchCampaigns({
+        query: 'syria relief',
+        sortBy: 'relevance',
+        page: 1,
+        limit: 20,
+      });
+
+      expect(result.data[0].id).toBe('camp-1');
+      expect(result.data[0].relevanceScore).toBeGreaterThan(result.data[1].relevanceScore);
+    });
+
+    it('sortBy relevance returns results in descending word_similarity order', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-1', score: 0.9 },
+          { id: 'camp-2', score: 0.7 },
+          { id: 'camp-3', score: 0.5 },
+        ])
+        .mockResolvedValueOnce([{ count: 3 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'camp-1',
+          title: 'High Match',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+        {
+          id: 'camp-2',
+          title: 'Medium Match',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+        {
+          id: 'camp-3',
+          title: 'Low Match',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+      ]);
+
+      const result = await SearchService.searchCampaigns({
+        query: 'match',
+        sortBy: 'relevance',
+        page: 1,
+        limit: 20,
+      });
+
+      expect(result.data[0].relevanceScore).toBeGreaterThanOrEqual(result.data[1].relevanceScore);
+      expect(result.data[1].relevanceScore).toBeGreaterThanOrEqual(result.data[2].relevanceScore);
+    });
+
+    it('searchDonations returns relevanceScore field when query is provided', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'don-1', score: 0.75 }])
+        .mockResolvedValueOnce([{ count: 1 }]);
+      (prisma.donation.findMany as jest.Mock).mockResolvedValue([
+        { id: 'don-1', amount: 100, campaign: { id: 'c1', title: 'Test' }, user: { id: 'u1', username: 'user', email: 'test@test.com' } },
+      ]);
+
+      const result = await SearchService.searchDonations({
+        query: 'thanks',
+        sortBy: 'relevance',
+        page: 1,
+        limit: 20,
+      });
+
+      expect(result.data[0]).toHaveProperty('relevanceScore');
+      expect(result.data[0].relevanceScore).toBeGreaterThan(0);
+    });
+
+    it('searchBeneficiaries returns relevanceScore field when query is provided', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'ben-1', score: 0.9 }])
+        .mockResolvedValueOnce([{ count: 1 }]);
+      (prisma.beneficiary.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'ben-1',
+          firstName: 'Ahmed',
+          lastName: 'Khalil',
+          user: { id: 'u1', email: 'test@test.com' },
+          _count: { distributions: 0 },
+        },
+      ]);
+
+      const result = await SearchService.searchBeneficiaries({
+        query: 'Ahmed',
+        sortBy: 'relevance',
+        page: 1,
+        limit: 20,
+      });
+
+      expect(result.data[0]).toHaveProperty('relevanceScore');
+      expect(result.data[0].relevanceScore).toBeGreaterThan(0);
+    });
+  });
+
+  describe('globalSearch BM25-inspired cross-entity scoring', () => {
+    it('interleaves results by normalized score across entity types', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-1', title: 'Test', status: 'ACTIVE', score: 0.8 },
+          { id: 'camp-2', title: 'Test2', status: 'ACTIVE', score: 0.4 },
+        ])
+        .mockResolvedValueOnce([
+          { id: 'don-1', amount: 100, status: 'CONFIRMED', score: 0.9 },
+          { id: 'don-2', amount: 50, status: 'CONFIRMED', score: 0.3 },
+        ])
+        .mockResolvedValueOnce([
+          { id: 'ben-1', firstName: 'Test', lastName: 'User', status: 'VERIFIED', score: 0.7 },
+          { id: 'ben-2', firstName: 'Test2', lastName: 'User2', status: 'VERIFIED', score: 0.5 },
+        ]);
+
+      const result = await SearchService.globalSearch({
+        query: 'test',
+        page: 1,
+        limit: 10,
+      });
+
+      expect(result.data).toHaveLength(6);
+      expect(result.data[0]).toHaveProperty('relevanceScore');
+      expect(result.data[0]).toHaveProperty('entityType');
+    });
+
+    it('prioritizes highly relevant beneficiaries over weakly relevant campaigns', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-1', title: 'Weak Match', status: 'ACTIVE', score: 0.3 },
+          { id: 'camp-2', title: 'Weak Match2', status: 'ACTIVE', score: 0.25 },
+        ])
+        .mockResolvedValueOnce([
+          { id: 'don-1', amount: 100, status: 'CONFIRMED', score: 0.2 },
+        ])
+        .mockResolvedValueOnce([
+          { id: 'ben-1', firstName: 'Ahmed', lastName: 'Khalil', status: 'VERIFIED', score: 0.9 },
+          { id: 'ben-2', firstName: 'Ahmed', lastName: 'Mohamed', status: 'VERIFIED', score: 0.85 },
+          { id: 'ben-3', firstName: 'Ahmed', lastName: 'Ali', status: 'VERIFIED', score: 0.8 },
+          { id: 'ben-4', firstName: 'Ahmed', lastName: 'Hassan', status: 'VERIFIED', score: 0.75 },
+          { id: 'ben-5', firstName: 'Ahmed', lastName: 'Omar', status: 'VERIFIED', score: 0.7 },
+        ]);
+
+      const result = await SearchService.globalSearch({
+        query: 'Ahmed',
+        page: 1,
+        limit: 10,
+      });
+
+      // Top 5 results should all be beneficiaries (higher relevance)
+      const top5 = result.data.slice(0, 5);
+      top5.forEach(item => {
+        expect(item.entityType).toBe('beneficiary');
+      });
+    });
+
+    it('de-duplicates results by (entityType, id)', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-1', title: 'Test', status: 'ACTIVE', score: 0.8 },
+          { id: 'camp-1', title: 'Test', status: 'ACTIVE', score: 0.8 }, // duplicate
+        ])
+        .mockResolvedValueOnce([{ id: 'don-1', amount: 100, status: 'CONFIRMED', score: 0.9 }])
+        .mockResolvedValueOnce([{ id: 'ben-1', firstName: 'Test', lastName: 'User', status: 'VERIFIED', score: 0.7 }]);
+
+      const result = await SearchService.globalSearch({
+        query: 'test',
+        page: 1,
+        limit: 10,
+      });
+
+      const campaignResults = result.data.filter((item: any) => item.entityType === 'campaign');
+      expect(campaignResults).toHaveLength(1); // duplicate removed
+    });
+
+    it('includes relevanceScore in globalSearch results', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'camp-1', title: 'Test', status: 'ACTIVE', score: 0.8 }])
+        .mockResolvedValueOnce([{ id: 'don-1', amount: 100, status: 'CONFIRMED', score: 0.9 }])
+        .mockResolvedValueOnce([{ id: 'ben-1', firstName: 'Test', lastName: 'User', status: 'VERIFIED', score: 0.7 }]);
+
+      const result = await SearchService.globalSearch({
+        query: 'test',
+        page: 1,
+        limit: 10,
+      });
+
+      result.data.forEach((item: any) => {
+        expect(item).toHaveProperty('relevanceScore');
+        expect(item.relevanceScore).toBeGreaterThan(0);
+      });
+    });
+  });
+
+  describe('cursor-based pagination', () => {
+    it('generates nextCursor when there are more results', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-1', score: 0.9 },
+          { id: 'camp-2', score: 0.8 },
+        ])
+        .mockResolvedValueOnce([{ count: 5 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'camp-1',
+          title: 'Test',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+        {
+          id: 'camp-2',
+          title: 'Test2',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+      ]);
+
+      const result = await SearchService.searchCampaigns({
+        query: 'test',
+        sortBy: 'relevance',
+        page: 1,
+        limit: 2,
+      });
+
+      expect(result.pagination).toHaveProperty('nextCursor');
+      expect(result.pagination.nextCursor).toBeTruthy();
+    });
+
+    it('uses cursor to fetch next page', async () => {
+      const cursor = Buffer.from(JSON.stringify({ score: 0.8, id: 'camp-2' })).toString('base64');
+
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-3', score: 0.7 },
+          { id: 'camp-4', score: 0.6 },
+        ])
+        .mockResolvedValueOnce([{ count: 5 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'camp-3',
+          title: 'Test3',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+        {
+          id: 'camp-4',
+          title: 'Test4',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+      ]);
+
+      const result = await SearchService.searchCampaigns({
+        query: 'test',
+        sortBy: 'relevance',
+        page: 2,
+        limit: 2,
+        cursor,
+      });
+
+      expect(result.data).toHaveLength(2);
+      expect(result.data[0].id).toBe('camp-3');
+    });
+
+    it('cursor pagination is stable across inserts', async () => {
+      // First page
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-1', score: 0.9 },
+          { id: 'camp-2', score: 0.8 },
+        ])
+        .mockResolvedValueOnce([{ count: 4 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'camp-1',
+          title: 'Test',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+        {
+          id: 'camp-2',
+          title: 'Test2',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+      ]);
+
+      const page1 = await SearchService.searchCampaigns({
+        query: 'test',
+        sortBy: 'relevance',
+        page: 1,
+        limit: 2,
+      });
+
+      const cursor = page1.pagination.nextCursor;
+
+      // Second page with cursor (simulating new row inserted between page 1 and 2)
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-3', score: 0.7 },
+          { id: 'camp-4', score: 0.6 },
+        ])
+        .mockResolvedValueOnce([{ count: 4 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'camp-3',
+          title: 'Test3',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+        {
+          id: 'camp-4',
+          title: 'Test4',
+          organization: { name: 'Org' },
+          _count: { donations: 0, beneficiaries: 0 },
+        },
+      ]);
+
+      const page2 = await SearchService.searchCampaigns({
+        query: 'test',
+        sortBy: 'relevance',
+        page: 2,
+        limit: 2,
+        cursor,
+      });
+
+      expect(page2.data).toHaveLength(2);
+      expect(page2.data[0].id).toBe('camp-3');
+      expect(page2.data[1].id).toBe('camp-4');
+      // No duplicates from page 1
+      expect(page2.data.every((item: any) => item.id !== 'camp-1' && item.id !== 'camp-2')).toBe(true);
+    });
+
+    it('globalSearch supports cursor pagination', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([
+          { id: 'camp-1', title: 'Test', status: 'ACTIVE', score: 0.9 },
+          { id: 'camp-2', title: 'Test2', status: 'ACTIVE', score: 0.8 },
+        ])
+        .mockResolvedValueOnce([{ id: 'don-1', amount: 100, status: 'CONFIRMED', score: 0.7 }])
+        .mockResolvedValueOnce([{ id: 'ben-1', firstName: 'Test', lastName: 'User', status: 'VERIFIED', score: 0.6 }]);
+
+      const result = await SearchService.globalSearch({
+        query: 'test',
+        page: 1,
+        limit: 2,
+      });
+
+      expect(result.pagination).toHaveProperty('nextCursor');
+    });
+  });
 });
