@@ -81,6 +81,7 @@ app.use('/health', healthRoutes);
 
 // API routes
 app.use(`/api/${config.apiVersion}/auth`, authRoutes);
+app.use(`/api/${config.apiVersion}/users`, userRoutes);
 app.use(`/api/${config.apiVersion}/campaigns`, campaignRoutes);
 app.use(`/api/${config.apiVersion}/beneficiaries`, beneficiaryRoutes);
 app.use(`/api/${config.apiVersion}/donations`, donationRoutes);
