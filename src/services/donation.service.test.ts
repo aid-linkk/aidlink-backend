@@ -477,10 +477,12 @@ describe('DonationService', () => {
     it('should refund a confirmed donation and decrement campaign currentAmount', async () => {
       const txMock = {
         donation: {
-          update: jest.fn().mockResolvedValue({
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          findUniqueOrThrow: jest.fn().mockResolvedValue({
             id: 'donation-1',
             status: 'REFUNDED',
           }),
+          update: jest.fn(),
         },
         campaign: {
           findUnique: jest.fn().mockResolvedValue({ currentAmount: 500 }),
@@ -497,6 +499,10 @@ describe('DonationService', () => {
       const result = await DonationService.refundDonation('donation-1', 'user-1', 'DONOR' as any);
 
       expect(result.status).toBe('REFUNDED');
+      expect(txMock.donation.updateMany).toHaveBeenCalledWith({
+        where: { id: 'donation-1', status: 'CONFIRMED' },
+        data: { status: 'REFUNDED' },
+      });
       expect(txMock.campaign.findUnique).toHaveBeenCalledWith({
         where: { id: 'campaign-1' },
         select: { currentAmount: true },
@@ -511,7 +517,10 @@ describe('DonationService', () => {
       // Outer snapshot shows sufficient balance, but inside tx the balance is insufficient
       const txMock = {
         donation: {
+          // updateMany succeeds (donation was CONFIRMED), but campaign balance check fails
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
           update: jest.fn(),
+          findUniqueOrThrow: jest.fn(),
         },
         campaign: {
           findUnique: jest.fn().mockResolvedValue({ currentAmount: 30 }), // INSIDE: 30 < 100 = REJECT
@@ -531,7 +540,9 @@ describe('DonationService', () => {
         where: { id: 'campaign-1' },
         select: { currentAmount: true },
       });
-      // donation.update should NOT be called (guard threw)
+      // campaign.update must NOT be called (the error was thrown before it)
+      expect(txMock.campaign.update).not.toHaveBeenCalled();
+      // donation.update must NOT be called (no explicit rollback needed, tx handles it)
       expect(txMock.donation.update).not.toHaveBeenCalled();
     });
 
@@ -561,10 +572,12 @@ describe('DonationService', () => {
     it('should allow admin to refund any donation', async () => {
       const txMock = {
         donation: {
-          update: jest.fn().mockResolvedValue({
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          findUniqueOrThrow: jest.fn().mockResolvedValue({
             id: 'donation-1',
             status: 'REFUNDED',
           }),
+          update: jest.fn(),
         },
         campaign: {
           findUnique: jest.fn().mockResolvedValue({ currentAmount: 500 }),
@@ -589,10 +602,12 @@ describe('DonationService', () => {
     it('should allow donor to refund their own donation', async () => {
       const txMock = {
         donation: {
-          update: jest.fn().mockResolvedValue({
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          findUniqueOrThrow: jest.fn().mockResolvedValue({
             id: 'donation-1',
             status: 'REFUNDED',
           }),
+          update: jest.fn(),
         },
         campaign: {
           findUnique: jest.fn().mockResolvedValue({ currentAmount: 500 }),
@@ -609,6 +624,62 @@ describe('DonationService', () => {
       const result = await DonationService.refundDonation('donation-1', 'user-1', 'DONOR' as any);
 
       expect(result.status).toBe('REFUNDED');
+    });
+
+    // ─── Idempotency ─────────────────────────────────────────────────────────
+
+    it('rejects a duplicate refund when the donation is already REFUNDED', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue({
+        ...mockDonation,
+        status: 'REFUNDED',
+      });
+
+      await expect(
+        DonationService.refundDonation('donation-1', 'user-1', 'DONOR' as any)
+      ).rejects.toThrow('Only confirmed donations can be refunded');
+
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.campaign.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a concurrent duplicate refund inside the transaction via atomic guard', async () => {
+      const txMock = {
+        donation: {
+          // updateMany returns count: 0 — the donation was already refunded
+          // by a concurrent transaction that committed first
+          updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+          findUniqueOrThrow: jest.fn(),
+          update: jest.fn(),
+        },
+        campaign: {
+          findUnique: jest.fn(),
+          update: jest.fn(),
+        },
+      };
+
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue(mockDonation);
+      (prisma.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(txMock));
+
+      await expect(
+        DonationService.refundDonation('donation-1', 'user-1', 'DONOR' as any)
+      ).rejects.toThrow('Donation has already been refunded');
+
+      // Campaign balance must NOT be decremented
+      expect(txMock.campaign.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects an admin duplicate refund on an already-REFUNDED donation', async () => {
+      (prisma.donation.findUnique as jest.Mock).mockResolvedValue({
+        ...mockDonation,
+        userId: 'other-user',
+        status: 'REFUNDED',
+      });
+
+      await expect(
+        DonationService.refundDonation('donation-1', 'admin-1', 'ADMIN' as any)
+      ).rejects.toThrow('Only confirmed donations can be refunded');
+
+      expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });
 

@@ -225,13 +225,38 @@ export class OrganizationService {
   static async deleteOrganization(id: string, actor: Actor): Promise<any> {
     await this.assertOrganizationAccess(id, actor);
 
-    const organization = await prisma.organization.update({
-      where: { id },
-      data: {
-        deletedAt: new Date(),
-        status: OrganizationStatus.SUSPENDED,
-        verificationStatus: OrganizationVerificationStatus.SUSPENDED,
-      },
+    const organization = await prisma.$transaction(async (tx) => {
+      const org = await tx.organization.findFirst({
+        where: { id, deletedAt: null },
+      });
+      if (!org) {
+        throw AppError.from('ORG_001');
+      }
+
+      this.assertValidVerificationTransition(
+        org.verificationStatus,
+        OrganizationVerificationStatus.SUSPENDED,
+      );
+
+      const updated = await tx.organization.update({
+        where: { id },
+        data: {
+          deletedAt: new Date(),
+          status: OrganizationStatus.SUSPENDED,
+          verificationStatus: OrganizationVerificationStatus.SUSPENDED,
+        },
+      });
+
+      await tx.organizationVerificationEvent.create({
+        data: {
+          organizationId: id,
+          actorId: actor.id,
+          status: OrganizationVerificationStatus.SUSPENDED,
+          reason: 'Organization deleted',
+        },
+      });
+
+      return updated;
     });
 
     await this.writeAudit(AuditAction.ORGANIZATION_DELETED, 'Organization', id, actor.id);
@@ -386,7 +411,12 @@ export class OrganizationService {
     actor: Actor,
     payload: { registrationDocs: string[]; taxId: string; representativeId: string; bankVerificationInfo: any; notes?: string }
   ): Promise<any> {
-    await this.assertOrganizationAccess(organizationId, actor);
+    const organization = await this.assertOrganizationAccess(organizationId, actor);
+
+    this.assertValidVerificationTransition(
+      organization.verificationStatus,
+      OrganizationVerificationStatus.PENDING_VERIFICATION,
+    );
 
     const updated = await prisma.$transaction(async (tx) => {
       const organization = await tx.organization.update({
@@ -503,6 +533,56 @@ export class OrganizationService {
     }
   }
 
+  /**
+   * Defines the set of valid transitions for an organization's verification
+   * status. Map key is the current status; values are the allowed next
+   * statuses. Transitions not listed here are rejected.
+   */
+  private static readonly validVerificationTransitions: Record<
+    OrganizationVerificationStatus,
+    OrganizationVerificationStatus[]
+  > = {
+    [OrganizationVerificationStatus.UNVERIFIED]: [
+      OrganizationVerificationStatus.PENDING_VERIFICATION,
+      OrganizationVerificationStatus.SUSPENDED,
+    ],
+    [OrganizationVerificationStatus.PENDING_VERIFICATION]: [
+      OrganizationVerificationStatus.VERIFIED,
+      OrganizationVerificationStatus.REJECTED,
+      OrganizationVerificationStatus.MORE_INFO_REQUESTED,
+      OrganizationVerificationStatus.SUSPENDED,
+    ],
+    [OrganizationVerificationStatus.VERIFIED]: [
+      OrganizationVerificationStatus.SUSPENDED,
+      OrganizationVerificationStatus.PENDING_VERIFICATION,
+    ],
+    [OrganizationVerificationStatus.REJECTED]: [
+      OrganizationVerificationStatus.PENDING_VERIFICATION,
+    ],
+    [OrganizationVerificationStatus.SUSPENDED]: [
+      OrganizationVerificationStatus.PENDING_VERIFICATION,
+    ],
+    [OrganizationVerificationStatus.MORE_INFO_REQUESTED]: [
+      OrganizationVerificationStatus.PENDING_VERIFICATION,
+      OrganizationVerificationStatus.VERIFIED,
+      OrganizationVerificationStatus.REJECTED,
+      OrganizationVerificationStatus.SUSPENDED,
+    ],
+  };
+
+  private static assertValidVerificationTransition(
+    current: OrganizationVerificationStatus,
+    next: OrganizationVerificationStatus,
+  ): void {
+    const allowed = this.validVerificationTransitions[current];
+    if (!allowed || !allowed.includes(next)) {
+      throw AppError.from(
+        'ORG_004',
+        `Invalid verification status transition: ${current} -> ${next}`,
+      );
+    }
+  }
+
   private static async reviewVerification(
     organizationId: string,
     admin: Actor,
@@ -519,6 +599,11 @@ export class OrganizationService {
     if (!organization) {
       throw AppError.from('ORG_001');
     }
+
+    this.assertValidVerificationTransition(
+      organization.verificationStatus,
+      verificationStatus,
+    );
 
     const updated = await prisma.$transaction(async (tx) => {
       const reviewed = await tx.organization.update({
