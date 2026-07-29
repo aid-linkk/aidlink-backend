@@ -108,9 +108,14 @@ const prismaMock: any = {
   session: {
     create: jest.fn(),
     findUnique: jest.fn(),
+    findMany: jest.fn(),
     update: jest.fn(),
     delete: jest.fn(),
     deleteMany: jest.fn(),
+  },
+  privacySettings: {
+    findUnique: jest.fn(),
+    upsert: jest.fn(),
   },
   auditLog: {
     create: jest.fn().mockResolvedValue({}),

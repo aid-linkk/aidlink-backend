@@ -442,6 +442,32 @@ export const ErrorCodes = {
     cause: 'No receipt batch job exists for the given ID.',
     solution: 'Verify the batch job ID.',
   },
+
+  // ── USER (dashboard: profile, privacy, security) ──────────────────────
+  USER_001: {
+    httpStatus: 409,
+    message: 'That username is already taken',
+    cause: 'A profile update requested a username that another account already holds.',
+    solution: 'Choose a different username.',
+  },
+  USER_002: {
+    httpStatus: 401,
+    message: 'Current password is incorrect',
+    cause: 'A password-change request supplied a currentPassword that does not match the account.',
+    solution: 'Re-enter the current password correctly, or use the password-reset flow if it is forgotten.',
+  },
+  USER_003: {
+    httpStatus: 400,
+    message: 'This account does not have a password set',
+    cause: 'A password-change request was made for an account created via wallet auth that has never set a password.',
+    solution: 'Use the "set password" flow instead of "change password" for accounts without an existing password.',
+  },
+  USER_004: {
+    httpStatus: 404,
+    message: 'Session not found',
+    cause: 'No active session exists with the given ID for this account.',
+    solution: 'Verify the session ID from the sessions list; it may have already expired or been revoked.',
+  },
 } as const satisfies Record<string, ErrorCodeDefinition>;
 
 export type ErrorCodeKey = keyof typeof ErrorCodes;

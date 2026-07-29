@@ -68,6 +68,7 @@ model User {
   emailVerificationTokens EmailVerificationToken[]
   verificationLogs        VerificationLog[]
   adminNotificationPref   AdminNotificationPreference?
+  privacySettings         PrivacySettings?
 
   @@index([email])
   @@index([walletAddress])
@@ -775,6 +776,35 @@ model EmailPreference {
   allEmailsDisabled Boolean  @default(false)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ── User privacy settings (issue #13: user dashboard endpoints) ─────────────
+
+enum ProfileVisibility {
+  /// Profile (display name, campaigns/donations marked shareable) is visible to anyone.
+  PUBLIC
+  /// Profile is visible only to organizations the user has donated to or is affiliated with.
+  DONORS_ONLY
+  /// Profile is visible only to the account owner and platform admins.
+  PRIVATE
+}
+
+model PrivacySettings {
+  id                       String            @id @default(cuid())
+  userId                   String            @unique
+  profileVisibility        ProfileVisibility @default(PRIVATE)
+  /// Whether this user's donation history can be shown on their public profile.
+  showDonationHistory      Boolean           @default(false)
+  /// Whether this user's real name (vs. username) is shown publicly.
+  showRealName             Boolean           @default(false)
+  /// Default value for `isAnonymous` pre-filled on new donations for this user.
+  defaultDonationAnonymous Boolean           @default(false)
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
