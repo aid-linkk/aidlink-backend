@@ -194,6 +194,68 @@ export const beneficiarySearchSchema = z
     { message: 'familySizeMin must be less than or equal to familySizeMax', path: ['familySizeMin'] }
   );
 
+export const distributionSearchSchema = z
+  .object({
+    q: z.string().trim().min(1).optional(),
+    distributionId: z.string().trim().min(1).optional(),
+    campaignId: z.string().trim().min(1).optional(),
+    campaignName: z.string().trim().min(1).optional(),
+    beneficiaryId: z.string().trim().min(1).optional(),
+    beneficiaryName: z.string().trim().min(1).optional(),
+    status: z.enum(['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'CANCELLED']).optional(),
+    method: z.enum(['CASH', 'BANK_TRANSFER', 'MOBILE_MONEY', 'CRYPTO', 'VOUCHER', 'IN_KIND']).optional(),
+    location: z.string().trim().min(1).optional(),
+    distributedBy: z.string().trim().min(1).optional(),
+    dateFrom: z.coerce.date().optional(),
+    dateTo: z.coerce.date().optional(),
+    minAmount: z.coerce.number().min(0).optional(),
+    maxAmount: z.coerce.number().min(0).optional(),
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+    sortBy: z
+      .enum(['distributedAt', 'createdAt', 'amount', 'status', 'campaignName', 'beneficiaryName'])
+      .default('createdAt'),
+    sortOrder: z.enum(['asc', 'desc']).default('desc'),
+  })
+  .refine((d) => d.dateFrom === undefined || d.dateTo === undefined || d.dateFrom <= d.dateTo, {
+    message: 'dateFrom must be on or before dateTo',
+    path: ['dateFrom'],
+  })
+  .refine((d) => d.minAmount === undefined || d.maxAmount === undefined || d.minAmount <= d.maxAmount, {
+    message: 'minAmount must be less than or equal to maxAmount',
+    path: ['minAmount'],
+  });
+
+export const assignmentSearchSchema = z
+  .object({
+    q: z.string().trim().min(1).optional(),
+    assignmentId: z.string().trim().min(1).optional(),
+    campaignId: z.string().trim().min(1).optional(),
+    campaignName: z.string().trim().min(1).optional(),
+    beneficiaryId: z.string().trim().min(1).optional(),
+    beneficiaryName: z.string().trim().min(1).optional(),
+    needsCategory: z.string().trim().min(1).optional(),
+    location: z.string().trim().min(1).optional(),
+    priorityMin: z.coerce.number().int().optional(),
+    priorityMax: z.coerce.number().int().optional(),
+    dateFrom: z.coerce.date().optional(),
+    dateTo: z.coerce.date().optional(),
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+    sortBy: z
+      .enum(['assignedAt', 'priority', 'campaignName', 'beneficiaryName'])
+      .default('assignedAt'),
+    sortOrder: z.enum(['asc', 'desc']).default('desc'),
+  })
+  .refine((d) => d.dateFrom === undefined || d.dateTo === undefined || d.dateFrom <= d.dateTo, {
+    message: 'dateFrom must be on or before dateTo',
+    path: ['dateFrom'],
+  })
+  .refine(
+    (d) => d.priorityMin === undefined || d.priorityMax === undefined || d.priorityMin <= d.priorityMax,
+    { message: 'priorityMin must be less than or equal to priorityMax', path: ['priorityMin'] }
+  );
+
   export const milestoneSubmissionSchema = z.object({
   description: z.string().min(10, 'Description must be at least 10 characters').max(5000),
   evidenceUrls: z

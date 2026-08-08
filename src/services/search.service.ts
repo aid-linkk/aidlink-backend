@@ -18,6 +18,8 @@ export interface SearchFilters {
   country?: string;
   minAmount?: number;
   maxAmount?: number;
+  campaignId?: string;
+  beneficiaryId?: string;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
   page?: number;
@@ -121,6 +123,56 @@ export interface BeneficiarySearchFilters {
   page?: number;
   limit?: number;
   cursor?: string;
+}
+
+export type DistributionSortField =
+  | 'distributedAt'
+  | 'createdAt'
+  | 'amount'
+  | 'status'
+  | 'campaignName'
+  | 'beneficiaryName';
+
+export interface DistributionSearchFilters {
+  query?: string;
+  distributionId?: string;
+  campaignId?: string;
+  campaignName?: string;
+  beneficiaryId?: string;
+  beneficiaryName?: string;
+  status?: string;
+  method?: string;
+  location?: string;
+  distributedBy?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
+  minAmount?: number;
+  maxAmount?: number;
+  sortBy?: DistributionSortField;
+  sortOrder?: 'asc' | 'desc';
+  page?: number;
+  limit?: number;
+}
+
+export type AssignmentSortField = 'assignedAt' | 'priority' | 'campaignName' | 'beneficiaryName';
+
+export interface AssignmentSearchFilters {
+  query?: string;
+  assignmentId?: string;
+  campaignId?: string;
+  campaignName?: string;
+  beneficiaryId?: string;
+  beneficiaryName?: string;
+  needsCategory?: string;
+  location?: string;
+  priorityMin?: number;
+  priorityMax?: number;
+  dateFrom?: Date;
+  dateTo?: Date;
+  sortBy?: AssignmentSortField;
+  sortOrder?: 'asc' | 'desc';
+  page?: number;
+  limit?: number;
 }
 
 interface NumericBucket {
@@ -893,6 +945,275 @@ export class SearchService {
     });
   }
 
+  // ── Distribution Search ─────────────────────────────────────────────
+
+  static async searchDistributions(filters: DistributionSearchFilters) {
+    const cacheKey = buildKey('search', `distributions:${JSON.stringify(filters)}`);
+
+    return getOrSet(cacheKey, 120, async () => {
+      const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(
+        filters.page,
+        filters.limit
+      );
+      const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
+        filters.sortBy,
+        ['distributedAt', 'createdAt', 'amount', 'status', 'campaignName', 'beneficiaryName'],
+        'createdAt',
+        filters.sortOrder
+      );
+
+      const where = this.buildDistributionWhere(filters);
+      const orderBy = this.buildDistributionOrderBy(validSortBy, validSortOrder);
+
+      const [distributions, total] = await Promise.all([
+        prisma.distribution.findMany({
+          where,
+          skip,
+          take: normalizedLimit,
+          orderBy,
+          include: {
+            campaign: { select: { id: true, title: true } },
+            beneficiary: {
+              select: { id: true, firstName: true, lastName: true, country: true, city: true },
+            },
+          },
+        }),
+        prisma.distribution.count({ where }),
+      ]);
+
+      return {
+        data: distributions,
+        pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, total),
+      };
+    });
+  }
+
+  static buildDistributionWhere(filters: DistributionSearchFilters): any {
+    const {
+      query,
+      distributionId,
+      campaignId,
+      campaignName,
+      beneficiaryId,
+      beneficiaryName,
+      status,
+      method,
+      location,
+      distributedBy,
+      dateFrom,
+      dateTo,
+      minAmount,
+      maxAmount,
+    } = filters;
+
+    const where: any = {};
+
+    if (distributionId) {
+      // Distribution IDs/batch references can be the row id itself or the
+      // on-chain tx hash / external transaction reference.
+      where.OR = [
+        { id: distributionId },
+        { blockchainTxHash: distributionId },
+        { transactionRef: distributionId },
+      ];
+    }
+
+    if (query) {
+      where.OR = [
+        ...(where.OR ?? []),
+        { transactionRef: { contains: query, mode: 'insensitive' } },
+        { notes: { contains: query, mode: 'insensitive' } },
+        { proofDocumentUrl: { contains: query, mode: 'insensitive' } },
+      ];
+    }
+
+    if (campaignId) where.campaignId = campaignId;
+    if (campaignName) where.campaign = { title: { contains: campaignName, mode: 'insensitive' } };
+
+    if (beneficiaryId) where.beneficiaryId = beneficiaryId;
+    if (beneficiaryName) {
+      where.beneficiary = {
+        ...(where.beneficiary ?? {}),
+        OR: [
+          { firstName: { contains: beneficiaryName, mode: 'insensitive' } },
+          { lastName: { contains: beneficiaryName, mode: 'insensitive' } },
+        ],
+      };
+    }
+
+    if (location) {
+      where.beneficiary = {
+        ...(where.beneficiary ?? {}),
+        OR: [
+          ...(where.beneficiary?.OR ?? []),
+          { country: { contains: location, mode: 'insensitive' } },
+          { city: { contains: location, mode: 'insensitive' } },
+        ],
+      };
+    }
+
+    if (status) where.status = status;
+    if (method) where.method = method;
+    if (distributedBy) where.distributedBy = distributedBy;
+
+    if (dateFrom || dateTo) {
+      where.distributedAt = {};
+      if (dateFrom) where.distributedAt.gte = dateFrom;
+      if (dateTo) where.distributedAt.lte = dateTo;
+    }
+
+    if (minAmount !== undefined || maxAmount !== undefined) {
+      where.amount = {};
+      if (minAmount !== undefined) where.amount.gte = minAmount;
+      if (maxAmount !== undefined) where.amount.lte = maxAmount;
+    }
+
+    return where;
+  }
+
+  static buildDistributionOrderBy(sortBy: DistributionSortField, sortOrder: 'asc' | 'desc'): any[] {
+    const tiebreaker = { id: 'asc' as const };
+    switch (sortBy) {
+      case 'campaignName':
+        return [{ campaign: { title: sortOrder } }, tiebreaker];
+      case 'beneficiaryName':
+        return [{ beneficiary: { firstName: sortOrder } }, tiebreaker];
+      case 'distributedAt':
+      case 'createdAt':
+      case 'amount':
+      case 'status':
+        return [{ [sortBy]: sortOrder }, tiebreaker];
+      default:
+        return [{ createdAt: 'desc' }, tiebreaker];
+    }
+  }
+
+  // ── Beneficiary Assignment Search ───────────────────────────────────
+
+  static async searchAssignments(filters: AssignmentSearchFilters) {
+    const cacheKey = buildKey('search', `assignments:${JSON.stringify(filters)}`);
+
+    return getOrSet(cacheKey, 120, async () => {
+      const { page: normalizedPage, limit: normalizedLimit, skip } = normalizePagination(
+        filters.page,
+        filters.limit
+      );
+      const { sortBy: validSortBy, sortOrder: validSortOrder } = validateAndNormalizeSort(
+        filters.sortBy,
+        ['assignedAt', 'priority', 'campaignName', 'beneficiaryName'],
+        'assignedAt',
+        filters.sortOrder
+      );
+
+      const where = this.buildAssignmentWhere(filters);
+      const orderBy = this.buildAssignmentOrderBy(validSortBy, validSortOrder);
+
+      const [assignments, total] = await Promise.all([
+        prisma.beneficiaryAssignment.findMany({
+          where,
+          skip,
+          take: normalizedLimit,
+          orderBy,
+          include: {
+            campaign: { select: { id: true, title: true } },
+            beneficiary: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                country: true,
+                city: true,
+                needsCategory: true,
+              },
+            },
+          },
+        }),
+        prisma.beneficiaryAssignment.count({ where }),
+      ]);
+
+      return {
+        data: assignments,
+        pagination: buildPaginationMetadata(normalizedPage, normalizedLimit, total),
+      };
+    });
+  }
+
+  static buildAssignmentWhere(filters: AssignmentSearchFilters): any {
+    const {
+      query,
+      assignmentId,
+      campaignId,
+      campaignName,
+      beneficiaryId,
+      beneficiaryName,
+      needsCategory,
+      location,
+      priorityMin,
+      priorityMax,
+      dateFrom,
+      dateTo,
+    } = filters;
+
+    const where: any = {};
+
+    if (assignmentId) where.id = assignmentId;
+
+    if (query) {
+      where.notes = { contains: query, mode: 'insensitive' };
+    }
+
+    if (campaignId) where.campaignId = campaignId;
+    if (campaignName) where.campaign = { title: { contains: campaignName, mode: 'insensitive' } };
+
+    if (beneficiaryId) where.beneficiaryId = beneficiaryId;
+
+    const beneficiaryFilter: any = {};
+    if (beneficiaryName) {
+      beneficiaryFilter.OR = [
+        { firstName: { contains: beneficiaryName, mode: 'insensitive' } },
+        { lastName: { contains: beneficiaryName, mode: 'insensitive' } },
+      ];
+    }
+    if (needsCategory) beneficiaryFilter.needsCategory = needsCategory;
+    if (location) {
+      beneficiaryFilter.OR = [
+        ...(beneficiaryFilter.OR ?? []),
+        { country: { contains: location, mode: 'insensitive' } },
+        { city: { contains: location, mode: 'insensitive' } },
+      ];
+    }
+    if (Object.keys(beneficiaryFilter).length) where.beneficiary = beneficiaryFilter;
+
+    if (priorityMin !== undefined || priorityMax !== undefined) {
+      where.priority = {};
+      if (priorityMin !== undefined) where.priority.gte = priorityMin;
+      if (priorityMax !== undefined) where.priority.lte = priorityMax;
+    }
+
+    if (dateFrom || dateTo) {
+      where.assignedAt = {};
+      if (dateFrom) where.assignedAt.gte = dateFrom;
+      if (dateTo) where.assignedAt.lte = dateTo;
+    }
+
+    return where;
+  }
+
+  static buildAssignmentOrderBy(sortBy: AssignmentSortField, sortOrder: 'asc' | 'desc'): any[] {
+    const tiebreaker = { id: 'asc' as const };
+    switch (sortBy) {
+      case 'campaignName':
+        return [{ campaign: { title: sortOrder } }, tiebreaker];
+      case 'beneficiaryName':
+        return [{ beneficiary: { firstName: sortOrder } }, tiebreaker];
+      case 'assignedAt':
+      case 'priority':
+        return [{ [sortBy]: sortOrder }, tiebreaker];
+      default:
+        return [{ assignedAt: 'desc' }, tiebreaker];
+    }
+  }
+
   static async globalSearch(filters: SearchFilters) {
     const { query, page, limit, cursor } = filters;
 
@@ -1050,6 +1371,37 @@ export class SearchService {
           country: filters.country,
           verificationStatus: filters.status,
           sortBy: filters.sortBy as BeneficiarySortField,
+          sortOrder: filters.sortOrder,
+          page: filters.page,
+          limit: filters.limit,
+        });
+      case 'distribution':
+      case 'distributions':
+        return this.searchDistributions({
+          query: filters.query,
+          campaignId: filters.campaignId,
+          beneficiaryId: filters.beneficiaryId,
+          status: filters.status,
+          location: filters.country,
+          dateFrom: filters.dateFrom,
+          dateTo: filters.dateTo,
+          minAmount: filters.minAmount,
+          maxAmount: filters.maxAmount,
+          sortBy: filters.sortBy as DistributionSortField,
+          sortOrder: filters.sortOrder,
+          page: filters.page,
+          limit: filters.limit,
+        });
+      case 'assignment':
+      case 'assignments':
+        return this.searchAssignments({
+          query: filters.query,
+          campaignId: filters.campaignId,
+          beneficiaryId: filters.beneficiaryId,
+          location: filters.country,
+          dateFrom: filters.dateFrom,
+          dateTo: filters.dateTo,
+          sortBy: filters.sortBy as AssignmentSortField,
           sortOrder: filters.sortOrder,
           page: filters.page,
           limit: filters.limit,

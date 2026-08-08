@@ -47,6 +47,42 @@ router.get(
 );
 
 /**
+ * @route   GET /api/v1/search/distributions
+ * @desc    Search distribution history with advanced filtering, pagination and sorting
+ * @query   q, distributionId, campaignId, campaignName, beneficiaryId, beneficiaryName,
+ *          status (PENDING|IN_PROGRESS|COMPLETED|FAILED|CANCELLED),
+ *          method (CASH|BANK_TRANSFER|MOBILE_MONEY|CRYPTO|VOUCHER|IN_KIND),
+ *          location, distributedBy, dateFrom, dateTo, minAmount, maxAmount,
+ *          page, limit, sortBy (distributedAt|createdAt|amount|status|campaignName|beneficiaryName),
+ *          sortOrder (asc|desc)
+ * @access  Private (Admin, Verifier) — exposes beneficiary-linked delivery records
+ */
+router.get(
+  '/distributions',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER'),
+  searchLimiter,
+  SearchController.searchDistributions
+);
+
+/**
+ * @route   GET /api/v1/search/assignments
+ * @desc    Search beneficiary assignment records with advanced filtering, pagination and sorting
+ * @query   q, assignmentId, campaignId, campaignName, beneficiaryId, beneficiaryName,
+ *          needsCategory, location, priorityMin, priorityMax, dateFrom, dateTo,
+ *          page, limit, sortBy (assignedAt|priority|campaignName|beneficiaryName),
+ *          sortOrder (asc|desc)
+ * @access  Private (Admin, Verifier) — exposes beneficiary PII
+ */
+router.get(
+  '/assignments',
+  authenticate,
+  authorize('ADMIN', 'VERIFIER'),
+  searchLimiter,
+  SearchController.searchAssignments
+);
+
+/**
  * @route   GET /api/v1/search/global
  * @desc    Global search across all entities
  * @access  Private
@@ -61,6 +97,10 @@ router.get(
 /**
  * @route   GET /api/v1/search/advanced
  * @desc    Advanced search with entity type filtering
+ * @query   entityType (campaign|donation|beneficiary|distribution|assignment|global), plus the
+ *          shared filters (query, dateFrom, dateTo, status, country, minAmount, maxAmount,
+ *          campaignId, beneficiaryId, sortBy, sortOrder, page, limit). For entity-specific
+ *          filters not covered here, use the dedicated /distributions or /assignments endpoints.
  * @access  Private
  */
 router.get(
