@@ -1,13 +1,53 @@
-import { Worker, Job } from 'bullmq';
+import { Worker, Queue, Job } from 'bullmq';
 import { config } from '../config';
 import { BeneficiaryService } from '../services/beneficiary.service';
 import { assessFraud, getThirdPartyFraudScore } from '../services/kycFraud.service';
-import { KYCStatus } from '@prisma/client';
+import { NotificationService } from '../services/notification.service';
+import { KYCStatus, Role } from '@prisma/client';
 import prisma from '../config/database';
 import logger from '../config/logger';
 
+const QUEUE_NAME = 'kyc-queue';
+
+const connection = {
+  host: config.bullmq.redisHost,
+  port: config.bullmq.redisPort,
+  password: config.bullmq.redisPassword,
+};
+
+// Producer — used to register the repeatable KYC expiration scan.
+// (Event-driven jobs like CALCULATE_RISK_SCORE/AUTO_REVIEW_KYC/FRAUD_DETECTION
+// are enqueued from BeneficiaryService against the same 'kyc-queue' name.)
+export const kycQueue = new Queue(QUEUE_NAME, { connection });
+
+/**
+ * Register the periodic KYC expiration scan. No-op when
+ * config.kycExpiration.enabled is false, so the feature flag fully gates
+ * the automation. The check interval is configurable via
+ * KYC_EXPIRATION_CRON (defaults to hourly).
+ */
+export const scheduleKYCExpirationJob = async (): Promise<void> => {
+  if (!config.kycExpiration.enabled) {
+    logger.info('KYC expiration automation disabled; skipping schedule');
+    return;
+  }
+
+  await kycQueue.add(
+    'EXPIRE_KYC_SUBMISSIONS',
+    { type: 'EXPIRE_KYC_SUBMISSIONS', data: {} },
+    {
+      repeat: { pattern: config.kycExpiration.checkIntervalCron },
+      jobId: 'kyc-expiration-scan',
+      removeOnComplete: true,
+      removeOnFail: 100,
+    }
+  );
+
+  logger.info(`Scheduled KYC expiration scan: ${config.kycExpiration.checkIntervalCron}`);
+};
+
 const kycWorker = new Worker(
-  'kyc-queue',
+  QUEUE_NAME,
   async (job: Job) => {
     const { type, data } = job.data;
 
@@ -109,6 +149,75 @@ const kycWorker = new Worker(
           return { status: 'fraud_detection_completed', fraudScore: assessment.fraudScore, signalCount: assessment.fraudSignals.length };
         }
 
+        case 'EXPIRE_KYC_SUBMISSIONS': {
+          // Periodic scan (see scheduleKYCExpirationJob): marks APPROVED
+          // submissions past their expiresAt as EXPIRED. Safe to run
+          // repeatedly/concurrently — see BeneficiaryService.expireKYCSubmissions.
+          const result = await BeneficiaryService.expireKYCSubmissions(
+            (data && data.batchSize) || config.kycExpiration.batchSize
+          );
+
+          // Notify each newly-expired beneficiary, plus reviewers/admins for
+          // high-risk cases. Each notification is dispatched independently
+          // so one failure doesn't block the others or fail the job.
+          let notified = 0;
+          let adminAlerts = 0;
+
+          let reviewerIds: string[] = [];
+          const needsReviewerLookup =
+            config.kycExpiration.notifyAdminsOnHighRisk &&
+            result.expiredSubmissions.some(
+              (s) => s.fraudScore >= config.kycExpiration.highRiskFraudScoreThreshold
+            );
+          if (needsReviewerLookup) {
+            const reviewers = await prisma.user.findMany({
+              where: { role: { in: [Role.VERIFIER, Role.ADMIN] }, status: 'ACTIVE' as any },
+              select: { id: true },
+            });
+            reviewerIds = reviewers.map((r) => r.id);
+          }
+
+          for (const submission of result.expiredSubmissions) {
+            try {
+              await NotificationService.sendKYCExpiredNotification(
+                submission.userId,
+                submission.id,
+                submission.expiresAt
+              );
+              notified += 1;
+            } catch (err) {
+              logger.error(
+                `Failed to send KYC expiration notification for submission ${submission.id}:`,
+                err
+              );
+            }
+
+            if (
+              config.kycExpiration.notifyAdminsOnHighRisk &&
+              submission.fraudScore >= config.kycExpiration.highRiskFraudScoreThreshold &&
+              reviewerIds.length > 0
+            ) {
+              const alerts = await Promise.allSettled(
+                reviewerIds.map((reviewerId) =>
+                  NotificationService.sendKYCExpirationAdminAlert(
+                    reviewerId,
+                    submission.id,
+                    submission.userId,
+                    submission.fraudScore
+                  )
+                )
+              );
+              if (alerts.some((a) => a.status === 'fulfilled')) adminAlerts += 1;
+            }
+          }
+
+          logger.info(
+            `KYC expiration scan complete: ${result.scanned} scanned, ${result.expired} expired, ` +
+            `${notified} notified, ${adminAlerts} admin alerts, ${result.errors} errors`
+          );
+          return { status: 'expiration_scan_completed', ...result, notified, adminAlerts };
+        }
+
         default:
           throw new Error(`Unknown KYC job type: ${type}`);
       }
@@ -121,11 +230,7 @@ const kycWorker = new Worker(
     }
   },
   {
-    connection: {
-      host: config.bullmq.redisHost,
-      port: config.bullmq.redisPort,
-      password: config.bullmq.redisPassword,
-    },
+    connection,
     concurrency: 5,
   }
 );

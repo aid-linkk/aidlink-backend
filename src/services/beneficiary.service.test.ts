@@ -29,6 +29,9 @@ jest.mock('../config/database', () => {
         update: jest.fn(),
         count: jest.fn(),
       },
+      auditLog: {
+        create: jest.fn(),
+      },
       $transaction: jest.fn(),
     },
   };
@@ -44,6 +47,7 @@ jest.mock('../config/logger', () => ({
 const prismaMock = require('../config/database').default;
 
 import { BeneficiaryService } from './beneficiary.service';
+import { config } from '../config';
 
 const mockBeneficiary = (overrides: any = {}) => ({
   id: 'ben-1',
@@ -437,6 +441,162 @@ describe('BeneficiaryService', () => {
       await expect(
         BeneficiaryService.reviewKYC('nonexistent', KYCStatus.APPROVED, 'Looks good', 'admin-1', Role.ADMIN)
       ).rejects.toThrow('KYC submission not found');
+    });
+  });
+
+  describe('expireKYCSubmissions', () => {
+    const eligibleRow = (overrides: any = {}) => ({
+      id: 'kyc-1',
+      userId: 'user-1',
+      beneficiaryId: 'ben-1',
+      expiresAt: new Date('2026-01-01'),
+      fraudScore: 10,
+      ...overrides,
+    });
+
+    afterEach(() => {
+      config.kycExpiration.enabled = true;
+    });
+
+    it('is a no-op when the automation is disabled via config', async () => {
+      config.kycExpiration.enabled = false;
+
+      const result = await BeneficiaryService.expireKYCSubmissions();
+
+      expect(result).toEqual({ scanned: 0, expired: 0, errors: 0, expiredSubmissions: [] });
+      expect(prismaMock.kYCSubmission.findMany).not.toHaveBeenCalled();
+    });
+
+    it('only scans APPROVED submissions with a past expiresAt', async () => {
+      prismaMock.kYCSubmission.findMany.mockResolvedValueOnce([]);
+
+      await BeneficiaryService.expireKYCSubmissions(50);
+
+      expect(prismaMock.kYCSubmission.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { status: KYCStatus.APPROVED, expiresAt: { lte: expect.any(Date) } },
+          take: 50,
+        })
+      );
+    });
+
+    it('transitions an eligible submission to EXPIRED, resets the beneficiary, and writes an audit log', async () => {
+      const row = eligibleRow();
+      prismaMock.kYCSubmission.findMany.mockResolvedValueOnce([row]).mockResolvedValueOnce([]);
+      prismaMock.kYCSubmission.findUnique.mockResolvedValueOnce({
+        status: KYCStatus.APPROVED,
+        expiresAt: row.expiresAt,
+      });
+      prismaMock.kYCSubmission.update.mockResolvedValueOnce({
+        ...mockKYCSubmission(),
+        status: KYCStatus.EXPIRED,
+        expiresAt: row.expiresAt,
+      });
+      prismaMock.beneficiary.update.mockResolvedValueOnce(mockBeneficiary({ status: BeneficiaryStatus.PENDING }));
+
+      const result = await BeneficiaryService.expireKYCSubmissions(100);
+
+      expect(result.scanned).toBe(1);
+      expect(result.expired).toBe(1);
+      expect(result.errors).toBe(0);
+      expect(result.expiredSubmissions).toEqual([
+        expect.objectContaining({ id: 'kyc-1', userId: 'user-1', beneficiaryId: 'ben-1' }),
+      ]);
+
+      expect(prismaMock.kYCSubmission.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'kyc-1' },
+          data: expect.objectContaining({ status: KYCStatus.EXPIRED }),
+        })
+      );
+      expect(prismaMock.beneficiary.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'ben-1' },
+          data: { status: BeneficiaryStatus.PENDING },
+        })
+      );
+      expect(prismaMock.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: 'KYC_EXPIRED', entityType: 'KYCSubmission', entityId: 'kyc-1' }),
+        })
+      );
+    });
+
+    it('skips a submission that was already reviewed/expired concurrently (idempotency)', async () => {
+      const row = eligibleRow();
+      prismaMock.kYCSubmission.findMany.mockResolvedValueOnce([row]).mockResolvedValueOnce([]);
+      // Re-check inside the transaction finds it's no longer APPROVED (e.g. a
+      // manual review or a prior run already flipped it) — must be skipped.
+      prismaMock.kYCSubmission.findUnique.mockResolvedValueOnce({
+        status: KYCStatus.EXPIRED,
+        expiresAt: row.expiresAt,
+      });
+
+      const result = await BeneficiaryService.expireKYCSubmissions(100);
+
+      expect(result.expired).toBe(0);
+      expect(result.expiredSubmissions).toEqual([]);
+      expect(prismaMock.kYCSubmission.update).not.toHaveBeenCalled();
+      expect(prismaMock.beneficiary.update).not.toHaveBeenCalled();
+    });
+
+    it('does not re-expire or re-notify on a second run once a submission is already EXPIRED', async () => {
+      // Second scan: the row is no longer returned by the eligibility query
+      // at all (status is now EXPIRED), simulating a repeated/rerun scan.
+      prismaMock.kYCSubmission.findMany.mockResolvedValueOnce([]);
+
+      const result = await BeneficiaryService.expireKYCSubmissions(100);
+
+      expect(result.scanned).toBe(0);
+      expect(result.expiredSubmissions).toEqual([]);
+    });
+
+    it('counts a per-record failure as an error without aborting the batch', async () => {
+      const rowA = eligibleRow({ id: 'kyc-a' });
+      const rowB = eligibleRow({ id: 'kyc-b', userId: 'user-2', beneficiaryId: 'ben-2' });
+      prismaMock.kYCSubmission.findMany.mockResolvedValueOnce([rowA, rowB]).mockResolvedValueOnce([]);
+      prismaMock.kYCSubmission.findUnique
+        .mockRejectedValueOnce(new Error('transient db error'))
+        .mockResolvedValueOnce({ status: KYCStatus.APPROVED, expiresAt: rowB.expiresAt });
+      prismaMock.kYCSubmission.update.mockResolvedValueOnce({
+        ...mockKYCSubmission(),
+        status: KYCStatus.EXPIRED,
+        expiresAt: rowB.expiresAt,
+      });
+      prismaMock.beneficiary.update.mockResolvedValueOnce(mockBeneficiary({ status: BeneficiaryStatus.PENDING }));
+
+      const result = await BeneficiaryService.expireKYCSubmissions(100);
+
+      expect(result.scanned).toBe(2);
+      expect(result.errors).toBe(1);
+      expect(result.expired).toBe(1);
+      expect(result.expiredSubmissions[0].id).toBe('kyc-b');
+    });
+
+    it('paginates via keyset cursor across multiple batches', async () => {
+      const rowA = eligibleRow({ id: 'kyc-a' });
+      const rowB = eligibleRow({ id: 'kyc-b', userId: 'user-2', beneficiaryId: 'ben-2' });
+      prismaMock.kYCSubmission.findMany
+        .mockResolvedValueOnce([rowA]) // full page (batchSize=1) -> loop continues
+        .mockResolvedValueOnce([rowB]) // full page again -> loop continues
+        .mockResolvedValueOnce([]); // empty page -> stop
+      prismaMock.kYCSubmission.findUnique
+        .mockResolvedValueOnce({ status: KYCStatus.APPROVED, expiresAt: rowA.expiresAt })
+        .mockResolvedValueOnce({ status: KYCStatus.APPROVED, expiresAt: rowB.expiresAt });
+      prismaMock.kYCSubmission.update
+        .mockResolvedValueOnce({ ...mockKYCSubmission(), status: KYCStatus.EXPIRED, expiresAt: rowA.expiresAt })
+        .mockResolvedValueOnce({ ...mockKYCSubmission(), status: KYCStatus.EXPIRED, expiresAt: rowB.expiresAt });
+      prismaMock.beneficiary.update.mockResolvedValue(mockBeneficiary({ status: BeneficiaryStatus.PENDING }));
+
+      const result = await BeneficiaryService.expireKYCSubmissions(1);
+
+      expect(result.scanned).toBe(2);
+      expect(result.expired).toBe(2);
+      expect(prismaMock.kYCSubmission.findMany).toHaveBeenCalledTimes(3);
+      expect(prismaMock.kYCSubmission.findMany).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ skip: 1, cursor: { id: 'kyc-a' } })
+      );
     });
   });
 

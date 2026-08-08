@@ -166,6 +166,24 @@ export const config = {
     thirdPartyTimeoutMs: parseInt(process.env.KYC_FRAUD_THIRD_PARTY_TIMEOUT_MS || '5000', 10),
   },
 
+  kycExpiration: {
+    // Feature flag: when false, no scheduled job is registered and manual
+    // job dispatch is a no-op guard in the service layer.
+    enabled: process.env.KYC_EXPIRATION_ENABLED !== 'false',
+    // Cron pattern controlling how often the worker scans for submissions
+    // whose expiresAt has passed. Defaults to hourly.
+    checkIntervalCron: process.env.KYC_EXPIRATION_CRON || '0 * * * *',
+    // Number of submissions processed per keyset-pagination batch.
+    batchSize: parseInt(process.env.KYC_EXPIRATION_BATCH_SIZE || '100', 10),
+    // Notify admins/reviewers when a high-risk (fraudScore above this
+    // threshold) submission expires, in addition to the beneficiary email.
+    notifyAdminsOnHighRisk: process.env.KYC_EXPIRATION_NOTIFY_ADMINS !== 'false',
+    highRiskFraudScoreThreshold: parseInt(
+      process.env.KYC_EXPIRATION_HIGH_RISK_THRESHOLD || '50',
+      10
+    ),
+  },
+
   analytics: {
     // Cron patterns for rollup jobs (configurable via env vars)
     hourlyRollupCron: process.env.ANALYTICS_HOURLY_CRON || '5 * * * *',

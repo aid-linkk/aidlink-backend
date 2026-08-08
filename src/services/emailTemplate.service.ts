@@ -15,6 +15,7 @@ export class EmailTemplateService {
     'distribution-sent': '1.0.0',
     'kyc-approval': '1.0.0',
     'kyc-rejection': '1.0.0',
+    'kyc-expiration': '1.0.0',
     'security-alert': '1.0.0',
     receipt: '1.0.0',
     generic: '1.0.0',

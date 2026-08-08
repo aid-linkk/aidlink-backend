@@ -101,11 +101,49 @@ Organization → Create Campaign → Assign Beneficiaries → Receive Donations 
 - Fraud detection algorithms
 - Verification queue with BullMQ
 - Risk scoring system
+- Automated KYC expiration (see below)
 
 **Flow:**
 ```
 Beneficiary → Submit KYC → Queue for Review → Risk Assessment → Manual/Auto Review → Approve/Reject
 ```
+
+**KYC expiration automation:**
+
+`KYCSubmission.expiresAt` is enforced by a repeatable BullMQ job registered
+via `scheduleKYCExpirationJob()` in `src/workers/kyc.worker.ts` (started at
+app boot in `src/index.ts`, alongside the other background workers). On the
+configured interval it:
+
+1. Scans `KYCSubmission` rows with `status = APPROVED` and `expiresAt <= now`
+   (`BeneficiaryService.expireKYCSubmissions`, keyset-paginated).
+2. Transitions each eligible row to `EXPIRED` inside a transaction that
+   re-checks status/expiresAt immediately before writing (closes the race
+   window between the scan and the write, so concurrent/repeated runs never
+   double-process the same submission or send duplicate notifications), sets
+   `reviewedAt` + `reviewNotes`, resets the linked `Beneficiary` to `PENDING`,
+   and writes a `KYC_EXPIRED` audit log entry.
+3. Dispatches a `KYC_STATUS_CHANGED` webhook event.
+4. Sends a `KYC_EXPIRED` notification (in-app + email, subject to the
+   beneficiary's notification/email preferences) telling the beneficiary
+   their verification expired and linking to the resubmission flow.
+5. Optionally alerts active `VERIFIER`/`ADMIN` users when a high-risk
+   submission (`fraudScore` at or above a configurable threshold) expires.
+
+Only `APPROVED` submissions with a defined `expiresAt` are ever matched —
+`PENDING`, `UNDER_REVIEW`, `REJECTED`, and already-`EXPIRED` rows are left
+untouched, so the scan is safe to run on any interval without reprocessing.
+
+Configurable via environment variables (see `src/config/index.ts`,
+`kycExpiration`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `KYC_EXPIRATION_ENABLED` | `true` | Feature flag; `false` disables the scheduled scan entirely |
+| `KYC_EXPIRATION_CRON` | `0 * * * *` (hourly) | Cron pattern for the scan interval |
+| `KYC_EXPIRATION_BATCH_SIZE` | `100` | Rows processed per keyset-pagination batch |
+| `KYC_EXPIRATION_NOTIFY_ADMINS` | `true` | Whether high-risk expirations alert reviewers/admins |
+| `KYC_EXPIRATION_HIGH_RISK_THRESHOLD` | `50` | Minimum `fraudScore` that triggers the admin alert |
 
 ### 4. Blockchain Indexer
 

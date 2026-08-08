@@ -251,6 +251,14 @@ describe('EmailPreferenceService', () => {
       expect(result).toBe(false);
     });
 
+    it('maps KYC_EXPIRED to the kycNotifications category', async () => {
+      mockUser(true);
+      mockPrefs({ kycNotifications: false });
+
+      const result = await EmailPreferenceService.shouldSendEmail('user-1', 'KYC_EXPIRED');
+      expect(result).toBe(false);
+    });
+
     it('allows sending for opted-in category', async () => {
       mockUser(true);
       mockPrefs({ donationReceived: true, campaignUpdates: false });

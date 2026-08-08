@@ -195,6 +195,14 @@ const startServer = async (): Promise<void> => {
       .then(() => logger.info('Webhook delivery worker started'))
       .catch((error) => logger.error('Failed to start webhook worker:', error));
 
+    // Start KYC worker (risk scoring, auto-review, fraud detection, and the
+    // periodic expiration scan). The repeatable expiration scan is only
+    // registered when KYC_EXPIRATION_ENABLED is not 'false'.
+    import('./workers/kyc.worker.js')
+      .then(({ scheduleKYCExpirationJob }) => scheduleKYCExpirationJob())
+      .then(() => logger.info('KYC worker started'))
+      .catch((error) => logger.error('Failed to start KYC worker:', error));
+
     // Start recovery worker (auto-retry scheduled cases)
     import('./workers/recovery.worker.js')
       .then(({ startRecoveryWorker }) => startRecoveryWorker())

@@ -67,6 +67,17 @@ jest.mock('fs', () => {
           {{/if}}
         `;
       }
+      if (filename.includes('kyc-expiration')) {
+        return `
+          {{> greeting name=userName fallback="there"}}
+          <h1>KYC Expired</h1>
+          {{#if submissionId}}<p>{{submissionId}}</p>{{/if}}
+          {{#if requiredNextSteps}}<p>{{requiredNextSteps}}</p>{{/if}}
+          {{#if resubmitLink}}
+            {{> button link=resubmitLink label="Resubmit"}}
+          {{/if}}
+        `;
+      }
       if (filename.includes('security-alert')) {
         return `
           {{> greeting name=userName fallback="there"}}
@@ -158,6 +169,7 @@ describe('EmailTemplateService', () => {
     it('returns version for known templates', () => {
       expect(EmailTemplateService.getVersion('donation-received')).toBe('1.0.0');
       expect(EmailTemplateService.getVersion('kyc-approval')).toBe('1.0.0');
+      expect(EmailTemplateService.getVersion('kyc-expiration')).toBe('1.0.0');
     });
 
     it('returns fallback version for unknown templates', () => {
@@ -226,6 +238,20 @@ describe('EmailTemplateService', () => {
       expect(html).toContain('Document unclear');
       expect(html).toContain('Upload a clearer photo');
       expect(html).toContain('Resubmit');
+      expect(html).toContain('https://aidlink.org/kyc/resubmit');
+    });
+
+    it('renders kyc-expiration with resubmit link', () => {
+      const { html } = EmailTemplateService.render('kyc-expiration', {
+        userName: 'Erin',
+        submissionId: 'kyc-1',
+        requiredNextSteps: 'Please resubmit your verification.',
+        resubmitLink: 'https://aidlink.org/kyc/resubmit',
+      });
+
+      expect(html).toContain('Erin');
+      expect(html).toContain('kyc-1');
+      expect(html).toContain('Please resubmit your verification');
       expect(html).toContain('https://aidlink.org/kyc/resubmit');
     });
 

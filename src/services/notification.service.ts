@@ -38,6 +38,7 @@ export class NotificationService {
       DISTRIBUTION_SENT: 'distribution-sent',
       KYC_APPROVED: 'kyc-approval',
       KYC_REJECTED: 'kyc-rejection',
+      KYC_EXPIRED: 'kyc-expiration',
       SECURITY_ALERT: 'security-alert',
     };
     return map[type] || EmailTemplateService.DEFAULT_TEMPLATE;
@@ -548,6 +549,62 @@ export class NotificationService {
     );
 
     await this.sendNotificationEmail(userId, notification);
+  }
+
+  /**
+   * Notify a beneficiary that their previously-approved KYC has expired and
+   * they must resubmit. Sent by the automated expiration scan in
+   * BeneficiaryService.expireKYCSubmissions() (see kyc.worker.ts).
+   */
+  static async sendKYCExpiredNotification(
+    userId: string,
+    submissionId: string,
+    expiresAt: Date
+  ): Promise<void> {
+    const expiredDate = expiresAt.toISOString();
+
+    const notification = await this.createNotification(
+      userId,
+      NotificationType.KYC_EXPIRED,
+      'KYC Verification Expired',
+      `Your KYC verification (submission ${submissionId}) expired on ${expiredDate}. ` +
+      `Please resubmit your verification to continue receiving distributions.`,
+      {
+        submissionId,
+        expiredDate,
+        requiredNextSteps:
+          'Your identity verification must be renewed. Please resubmit a valid government-issued ID, proof of address, and a clear self-portrait.',
+        resubmitLink: `${config.email.appUrl}/kyc/resubmit`,
+      }
+    );
+
+    await this.sendNotificationEmail(userId, notification);
+  }
+
+  /**
+   * Alert an admin/reviewer that a high-risk KYC submission (fraudScore at
+   * or above config.kycExpiration.highRiskFraudScoreThreshold) has expired,
+   * so it can be prioritized during re-review.
+   */
+  static async sendKYCExpirationAdminAlert(
+    adminUserId: string,
+    submissionId: string,
+    beneficiaryUserId: string,
+    fraudScore: number
+  ): Promise<void> {
+    const notification = await this.createNotification(
+      adminUserId,
+      NotificationType.KYC_EXPIRED,
+      'High-Risk KYC Submission Expired',
+      `KYC submission ${submissionId} (user ${beneficiaryUserId}, fraud score ${fraudScore}) has expired and requires attention on resubmission.`,
+      {
+        submissionId,
+        beneficiaryUserId,
+        fraudScore,
+      }
+    );
+
+    await this.sendNotificationEmail(adminUserId, notification);
   }
 
   // ─── Organization templates ────────────────────────────────────────
