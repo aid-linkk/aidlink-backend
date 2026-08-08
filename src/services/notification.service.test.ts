@@ -490,6 +490,44 @@ describe('NotificationService', () => {
       expect(prismaMock.notification.create).toHaveBeenCalled();
     });
 
+    it('sendKYCExpiredNotification creates a KYC_EXPIRED notification referencing the submission and expiry date', async () => {
+      const expiresAt = new Date('2026-08-01T00:00:00.000Z');
+
+      await NotificationService.sendKYCExpiredNotification('user-1', 'kyc-1', expiresAt);
+
+      expect(prismaMock.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            userId: 'user-1',
+            type: NotificationType.KYC_EXPIRED,
+            metadata: expect.objectContaining({
+              submissionId: 'kyc-1',
+              expiredDate: expiresAt.toISOString(),
+              resubmitLink: expect.stringContaining('/kyc/resubmit'),
+            }),
+          }),
+        })
+      );
+    });
+
+    it('sendKYCExpirationAdminAlert creates a KYC_EXPIRED alert referencing the fraud score', async () => {
+      await NotificationService.sendKYCExpirationAdminAlert('admin-1', 'kyc-1', 'user-1', 75);
+
+      expect(prismaMock.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            userId: 'admin-1',
+            type: NotificationType.KYC_EXPIRED,
+            metadata: expect.objectContaining({
+              submissionId: 'kyc-1',
+              beneficiaryUserId: 'user-1',
+              fraudScore: 75,
+            }),
+          }),
+        })
+      );
+    });
+
     it('sendOrganizationProfileUpdatedNotification', async () => {
       await NotificationService.sendOrganizationProfileUpdatedNotification('user-1', 'Org Name');
       expect(prismaMock.notification.create).toHaveBeenCalled();

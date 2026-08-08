@@ -1,6 +1,6 @@
 import prisma from '../config/database';
 import { BeneficiaryInput, BeneficiaryFilters, PaginatedResponse } from '../types';
-import { BeneficiaryStatus, Role, KYCStatus } from '@prisma/client';
+import { BeneficiaryStatus, Role, KYCStatus, AuditAction } from '@prisma/client';
 import { AppError } from '../middleware/error';
 import logger from '../config/logger';
 import { Queue } from 'bullmq';
@@ -8,6 +8,7 @@ import { config } from '../config';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 import { getOrSet, invalidateBeneficiaryCache, buildKey } from '../utils/cache';
 import { assessFraud, getThirdPartyFraudScore, createFraudLabel } from './kycFraud.service';
+import { writeAuditLog } from './audit.service';
 
 // KYC queue instance
 const kycQueue = new Queue('kyc-queue', {
@@ -386,6 +387,174 @@ export class BeneficiaryService {
     }
 
     return updated;
+  }
+
+  // ── KYC Expiration Automation ────────────────────────────────────────
+  //
+  // Called periodically by kyc.worker.ts (see EXPIRE_KYC_SUBMISSIONS job /
+  // scheduleKYCExpirationJob). Scans for approved KYC submissions whose
+  // validity window has ended and transitions them to EXPIRED. Returns the
+  // list of newly-expired submissions so the caller can dispatch beneficiary
+  // (and, for high-risk cases, admin/reviewer) notifications — kept out of
+  // this service to avoid pulling the notification/email/websocket stack
+  // into beneficiary.service's dependency graph.
+  //
+  // Idempotency: the scan query only ever matches status === APPROVED, so a
+  // submission that was already transitioned to EXPIRED (by this job or a
+  // concurrent run) is never picked up again. The per-record transaction
+  // re-checks status/expiresAt immediately before writing, closing the race
+  // window between the scan query and the update — safe to run repeatedly
+  // or concurrently without double-processing or duplicate notifications.
+  static async expireKYCSubmissions(
+    batchSize: number = config.kycExpiration.batchSize
+  ): Promise<{
+    scanned: number;
+    expired: number;
+    errors: number;
+    expiredSubmissions: Array<{
+      id: string;
+      userId: string;
+      beneficiaryId: string | null;
+      expiresAt: Date;
+      fraudScore: number;
+    }>;
+  }> {
+    if (!config.kycExpiration.enabled) {
+      logger.info('KYC expiration automation disabled; skipping scan');
+      return { scanned: 0, expired: 0, errors: 0, expiredSubmissions: [] };
+    }
+
+    const now = new Date();
+    let scanned = 0;
+    let errors = 0;
+    let cursor: string | undefined;
+    const expiredSubmissions: Array<{
+      id: string;
+      userId: string;
+      beneficiaryId: string | null;
+      expiresAt: Date;
+      fraudScore: number;
+    }> = [];
+
+    // Keyset pagination so a large backlog doesn't require one giant query.
+    for (;;) {
+      // Eligible = currently APPROVED with a defined, past expiresAt.
+      // PENDING/UNDER_REVIEW/REJECTED/already-EXPIRED rows never match.
+      const submissions = await prisma.kYCSubmission.findMany({
+        where: {
+          status: KYCStatus.APPROVED,
+          expiresAt: { lte: now },
+        },
+        take: batchSize,
+        ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+        orderBy: { id: 'asc' },
+        select: {
+          id: true,
+          userId: true,
+          beneficiaryId: true,
+          expiresAt: true,
+          fraudScore: true,
+        },
+      });
+
+      if (submissions.length === 0) break;
+
+      for (const submission of submissions) {
+        scanned += 1;
+        try {
+          const expiredAt = await this.expireSingleKYCSubmission(submission, now);
+          if (expiredAt) {
+            expiredSubmissions.push({ ...submission, expiresAt: expiredAt });
+          }
+        } catch (error) {
+          errors += 1;
+          logger.error(`KYC expiration failed for submission ${submission.id}:`, error);
+        }
+      }
+
+      if (submissions.length < batchSize) break;
+      cursor = submissions[submissions.length - 1].id;
+    }
+
+    logger.info(
+      `KYC expiration scan complete: ${scanned} scanned, ${expiredSubmissions.length} expired, ${errors} errors`
+    );
+
+    return { scanned, expired: expiredSubmissions.length, errors, expiredSubmissions };
+  }
+
+  /**
+   * Transitions a single eligible submission to EXPIRED inside a
+   * transaction, writes the audit trail entry, and dispatches the
+   * KYC_STATUS_CHANGED webhook. Returns the submission's expiresAt on
+   * success, or null if it was no longer eligible by the time the
+   * transaction ran (already reviewed/expired concurrently) — keeping
+   * concurrent/repeated invocations safe and non-duplicating.
+   */
+  private static async expireSingleKYCSubmission(
+    submission: { id: string; userId: string; beneficiaryId: string | null },
+    now: Date
+  ): Promise<Date | null> {
+    const updated = await prisma.$transaction(async (tx: any) => {
+      // Re-check immediately before writing to close the race window
+      // between the scan query and this transaction.
+      const current = await tx.kYCSubmission.findUnique({
+        where: { id: submission.id },
+        select: { status: true, expiresAt: true },
+      });
+
+      if (!current || current.status !== KYCStatus.APPROVED || !current.expiresAt || current.expiresAt > now) {
+        return null;
+      }
+
+      const expiredSubmission = await tx.kYCSubmission.update({
+        where: { id: submission.id },
+        data: {
+          status: KYCStatus.EXPIRED,
+          reviewedAt: now,
+          reviewNotes: `Automatically expired: KYC validity window ended on ${current.expiresAt.toISOString()}.`,
+        },
+      });
+
+      if (submission.beneficiaryId) {
+        // Reset to PENDING so the beneficiary can re-submit, mirroring the
+        // manual EXPIRED transition in reviewKYC().
+        await tx.beneficiary.update({
+          where: { id: submission.beneficiaryId },
+          data: { status: BeneficiaryStatus.PENDING },
+        });
+      }
+
+      return expiredSubmission;
+    });
+
+    if (!updated) {
+      return null;
+    }
+
+    await writeAuditLog(
+      AuditAction.KYC_EXPIRED,
+      'KYCSubmission',
+      submission.id,
+      undefined,
+      {
+        previousStatus: KYCStatus.APPROVED,
+        newStatus: KYCStatus.EXPIRED,
+        expiresAt: updated.expiresAt,
+        reason: 'expiresAt <= now (automated scan)',
+      }
+    );
+
+    dispatchWebhookEvent('KYC_STATUS_CHANGED', {
+      submissionId: submission.id,
+      beneficiaryId: submission.beneficiaryId,
+      userId: submission.userId,
+      status: KYCStatus.EXPIRED,
+    }).catch((err) => logger.error('Webhook dispatch error (kyc.status_changed / expired):', err));
+
+    logger.info(`KYC submission expired: ${submission.id} (beneficiary ${submission.beneficiaryId ?? 'n/a'})`);
+
+    return updated.expiresAt as Date;
   }
 
   private static async computeFraudScore(submission: any): Promise<any> {

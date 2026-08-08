@@ -54,6 +54,7 @@ export class EmailPreferenceService {
     DISTRIBUTION_SENT: 'distributionNotices',
     KYC_APPROVED: 'kycNotifications',
     KYC_REJECTED: 'kycNotifications',
+    KYC_EXPIRED: 'kycNotifications',
     SYSTEM_ALERT: 'securityAlerts',
     SECURITY_ALERT: 'securityAlerts',
     CAMPAIGN_SUSPENDED: 'campaignUpdates',

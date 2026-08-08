@@ -1,0 +1,27 @@
+<!-- KYC Expired Email Template -->
+{{> greeting name=userName fallback="there"}}
+
+<p style="margin: 0 0 16px 0; font-size: 16px; color: #b54708; font-weight: 600;">
+  Your KYC Verification Has Expired
+</p>
+
+<p style="margin: 0 0 12px 0; color: #444; line-height: 1.6;">
+  Your identity verification{{#if submissionId}} (submission <strong>{{submissionId}}</strong>){{/if}} has expired{{#if expiredDate}} as of {{formatDate expiredDate}}{{/if}}. To keep receiving distributions, you'll need to resubmit your verification.
+</p>
+
+{{#if requiredNextSteps}}
+  <div style="background-color: #fffaeb; border: 1px solid #fedf89; border-radius: 6px; padding: 16px; margin: 16px 0;">
+    <p style="margin: 0 0 6px 0; font-weight: 600; color: #b54708; font-size: 14px;">Next Steps</p>
+    <p style="margin: 0; color: #b54708; font-size: 14px; line-height: 1.6;">
+      {{requiredNextSteps}}
+    </p>
+  </div>
+{{/if}}
+
+{{#if resubmitLink}}
+  {{> button link=resubmitLink label="Resubmit Verification"}}
+{{/if}}
+
+<p style="margin: 12px 0 0 0; color: #666; font-size: 13px; line-height: 1.6;">
+  If you have questions about this expiration, please contact our support team.
+</p>

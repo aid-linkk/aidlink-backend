@@ -58,6 +58,7 @@ const ALERT_TYPES: NotificationType[] = [
     'CAMPAIGN_SUSPENDED',
     'FRAUD_REPORTED' as NotificationType,
     'KYC_REJECTED',
+    'KYC_EXPIRED',
 ];
 
 // Notification types that are ALWAYS delivered regardless of any preference

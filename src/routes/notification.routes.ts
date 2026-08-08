@@ -9,7 +9,7 @@ const router = Router();
 
 // Validation schemas
 const createNotificationSchema = z.object({
-  type: z.enum(['DONATION_RECEIVED', 'CAMPAIGN_UPDATE', 'DISTRIBUTION_SENT', 'KYC_APPROVED', 'KYC_REJECTED', 'SYSTEM_ALERT', 'SECURITY_ALERT']),
+  type: z.enum(['DONATION_RECEIVED', 'CAMPAIGN_UPDATE', 'DISTRIBUTION_SENT', 'KYC_APPROVED', 'KYC_REJECTED', 'KYC_EXPIRED', 'SYSTEM_ALERT', 'SECURITY_ALERT']),
   title: z.string().min(1, 'Title is required'),
   message: z.string().min(1, 'Message is required'),
   metadata: z.any().optional(),
