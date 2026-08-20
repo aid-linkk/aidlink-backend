@@ -45,16 +45,59 @@ interface CursorData {
   id: string;
 }
 
+// Bumped whenever the cursor payload shape or the score's numeric domain changes.
+// Cursors encoded before this version compared a float4 relevance score against
+// a value Prisma bound as `numeric`, which silently produced wrong WHERE-clause
+// comparisons (see decodeCursor). Versioning lets us detect and reject them
+// instead of misinterpreting the score.
+const CURSOR_VERSION = 2;
+
+class InvalidCursorError extends Error {
+  constructor(message = 'Invalid or unsupported cursor') {
+    super(message);
+    this.name = 'InvalidCursorError';
+  }
+}
+
 function encodeCursor(score: number, id: string): string {
-  return Buffer.from(JSON.stringify({ score, id })).toString('base64');
+  return Buffer.from(JSON.stringify({ v: CURSOR_VERSION, score, id })).toString('base64');
 }
 
 function decodeCursor(cursor: string): CursorData {
+  let parsed: unknown;
   try {
     const decoded = Buffer.from(cursor, 'base64').toString('utf-8');
-    return JSON.parse(decoded) as CursorData;
+    parsed = JSON.parse(decoded);
   } catch {
-    throw new Error('Invalid cursor format');
+    throw new InvalidCursorError();
+  }
+
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    (parsed as { v?: unknown }).v !== CURSOR_VERSION ||
+    typeof (parsed as { score?: unknown }).score !== 'number' ||
+    !Number.isFinite((parsed as { score: number }).score) ||
+    typeof (parsed as { id?: unknown }).id !== 'string' ||
+    !(parsed as { id: string }).id
+  ) {
+    throw new InvalidCursorError();
+  }
+
+  const { score, id } = parsed as { score: number; id: string };
+  return { score, id };
+}
+
+// Cursors predating CURSOR_VERSION (or otherwise malformed) are treated as absent
+// rather than misinterpreted, so a stale cursor just resumes at the first page
+// instead of corrupting pagination.
+function safeDecodeCursor(cursor: string | undefined): CursorData | undefined {
+  if (!cursor) return undefined;
+  try {
+    return decodeCursor(cursor);
+  } catch (error) {
+    if (error instanceof InvalidCursorError) return undefined;
+    throw error;
   }
 }
 
@@ -451,20 +494,32 @@ export class SearchService {
     if (filters.maxAmount) conditions.push(Prisma.sql`"targetAmount" <= ${filters.maxAmount}`);
     
     const whereSql = conditions.length ? Prisma.join(conditions, ' AND ') : Prisma.sql`TRUE`;
-    
-    // Build cursor condition if provided
-    let cursorCondition = Prisma.sql``;
-    if (cursor) {
-      const { score: lastScore, id: lastId } = decodeCursor(cursor);
-      cursorCondition = Prisma.sql` AND (score, id) < (${lastScore}, ${lastId})`;
-    }
-    
-    // Use word_similarity for trigram-based relevance scoring
-    const scoreExpr = Prisma.sql`GREATEST(
+
+    // Use word_similarity for trigram-based relevance scoring. word_similarity() returns
+    // a float4 (real); explicitly casting to double precision makes every occurrence of
+    // this expression (SELECT, threshold filter, cursor comparison) compare in the same
+    // Postgres type, and makes the value we hand back to JS the same one we compare
+    // against on the next page — see decodeCursor/encodeCursor above.
+    const scoreExpr = Prisma.sql`CAST(GREATEST(
       word_similarity(${query}, title),
-      word_similarity(${query}, description)
-    )`;
-    
+      COALESCE(word_similarity(${query}, description), 0)
+    ) AS DOUBLE PRECISION)`;
+
+    // Build cursor condition if provided. Postgres does not allow referencing a SELECT-list
+    // alias (e.g. bare "score") from the same query's WHERE clause, so the expression is
+    // repeated rather than aliased. The (score, id) < (x, y) row-comparison form is also
+    // avoided in favor of an explicit OR, so both operands of every comparison have a
+    // known, matching type instead of relying on implicit tuple-comparison promotion.
+    let cursorCondition = Prisma.sql``;
+    const decodedCursor = safeDecodeCursor(cursor);
+    if (decodedCursor) {
+      const { score: lastScore, id: lastId } = decodedCursor;
+      cursorCondition = Prisma.sql` AND (
+        ${scoreExpr} < CAST(${lastScore} AS DOUBLE PRECISION)
+        OR (${scoreExpr} = CAST(${lastScore} AS DOUBLE PRECISION) AND id < ${lastId})
+      )`;
+    }
+
     const [rankedRows, countRows] = await Promise.all([
       prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
         SELECT id, ${scoreExpr} AS score
@@ -536,21 +591,26 @@ export class SearchService {
     if (filters.maxAmount) conditions.push(Prisma.sql`amount <= ${filters.maxAmount}`);
     
     const whereSql = conditions.length ? Prisma.join(conditions, ' AND ') : Prisma.sql`TRUE`;
-    
-    // Build cursor condition if provided
-    let cursorCondition = Prisma.sql``;
-    if (cursor) {
-      const { score: lastScore, id: lastId } = decodeCursor(cursor);
-      cursorCondition = Prisma.sql` AND (score, id) < (${lastScore}, ${lastId})`;
-    }
-    
-    // Use word_similarity for trigram-based relevance scoring
-    const scoreExpr = Prisma.sql`GREATEST(
+
+    // See searchCampaignsByRelevance for why the score is cast to double precision and
+    // why the cursor comparison repeats the expression via an explicit OR instead of
+    // referencing the "score" alias or using tuple comparison.
+    const scoreExpr = Prisma.sql`CAST(GREATEST(
       COALESCE(word_similarity(${query}, memo), 0),
       COALESCE(word_similarity(${query}, "fromWallet"), 0),
       COALESCE(word_similarity(${query}, "donorMessage"), 0)
-    )`;
-    
+    ) AS DOUBLE PRECISION)`;
+
+    let cursorCondition = Prisma.sql``;
+    const decodedCursor = safeDecodeCursor(cursor);
+    if (decodedCursor) {
+      const { score: lastScore, id: lastId } = decodedCursor;
+      cursorCondition = Prisma.sql` AND (
+        ${scoreExpr} < CAST(${lastScore} AS DOUBLE PRECISION)
+        OR (${scoreExpr} = CAST(${lastScore} AS DOUBLE PRECISION) AND id < ${lastId})
+      )`;
+    }
+
     const [rankedRows, countRows] = await Promise.all([
       prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
         SELECT id, ${scoreExpr} AS score
@@ -753,11 +813,12 @@ export class SearchService {
     
     // Build cursor condition if provided
     let cursorCondition = Prisma.sql``;
-    if (cursor) {
-      const { score: lastScore, id: lastId } = decodeCursor(cursor);
+    const decodedCursor = safeDecodeCursor(cursor);
+    if (decodedCursor) {
+      const { score: lastScore, id: lastId } = decodedCursor;
       cursorCondition = Prisma.sql` AND (score, id) < (${lastScore}, ${lastId})`;
     }
-    
+
     // Use word_similarity for trigram-based relevance scoring
     const scoreExpr = Prisma.sql`GREATEST(
       word_similarity(${query}, "firstName"),
@@ -999,10 +1060,11 @@ export class SearchService {
 
       // Apply cursor-based pagination
       let startIndex = 0;
-      if (cursor) {
-        const { score: lastScore, id: lastId } = decodeCursor(cursor);
-        startIndex = deduplicated.findIndex(item => 
-          item.normalizedScore < lastScore || 
+      const decodedCursor = safeDecodeCursor(cursor);
+      if (decodedCursor) {
+        const { score: lastScore, id: lastId } = decodedCursor;
+        startIndex = deduplicated.findIndex(item =>
+          item.normalizedScore < lastScore ||
           (item.normalizedScore === lastScore && item.id.localeCompare(lastId) < 0)
         ) + 1;
       }
