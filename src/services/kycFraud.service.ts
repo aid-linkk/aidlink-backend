@@ -1,6 +1,16 @@
 import prisma from '../config/database';
 import { config } from '../config';
 import logger from '../config/logger';
+import { getOrSet, delCache, buildKey } from '../utils/cache';
+import { applyCalibration as routeCalibration } from './fraudCalibration.service';
+
+// ─── Cache key for the active model parameters ────────────────────────────────
+/**
+ * Exported so the recalibration worker can call delCache(FRAUD_MODEL_PARAMS_CACHE_KEY)
+ * immediately after the atomic version swap, ensuring assessFraud() sees the new
+ * parameters within one cache TTL (or immediately on next request if uncached).
+ */
+export const FRAUD_MODEL_PARAMS_CACHE_KEY = buildKey('fraud', 'active-model-params');
 
 export interface FraudSignal {
   signal: string;
@@ -264,39 +274,77 @@ async function getSubmissionCount(input: FraudInput): Promise<number> {
   return count;
 }
 
-// ─── Platt Scaling Calibration ─────────────────────────────────────────────────
+// ─── Active model version cache ───────────────────────────────────────────────
 
-interface PlattParams {
-  A: number;
-  B: number;
+interface ActiveVersionCache {
+  id: string;
+  plattA: number;
+  plattB: number;
+  calibrationType: string;
+  isotonicBreakpoints: unknown | null;
 }
 
-// Default Platt parameters (identity transformation until calibrated)
-const DEFAULT_PLATT_PARAMS: PlattParams = { A: 1, B: 0 };
+/** Default: identity Platt transform — maps raw score directly through sigmoid */
+const DEFAULT_VERSION_CACHE: ActiveVersionCache = {
+  id: '',
+  plattA: 1,
+  plattB: 0,
+  calibrationType: 'platt',
+  isotonicBreakpoints: null,
+};
 
-async function getActivePlattParams(): Promise<PlattParams> {
-  try {
-    const activeVersion = await prisma.fraudModelVersion.findFirst({
-      where: { isActive: true },
-      orderBy: { calibratedAt: 'desc' },
-    });
+/**
+ * Fetch the active FraudModelVersion, backed by Redis.
+ * TTL is config.fraudRecalibration.cacheTtlSeconds (default 300 s).
+ *
+ * On cache miss the DB is queried; on Redis failure the DB is used directly.
+ * After a recalibration version swap the worker calls
+ * delCache(FRAUD_MODEL_PARAMS_CACHE_KEY) to force an immediate refresh.
+ */
+async function getActiveModelVersion(): Promise<ActiveVersionCache> {
+  const ttl = config.fraudRecalibration.cacheTtlSeconds;
 
-    if (activeVersion) {
-      return { A: activeVersion.plattA, B: activeVersion.plattB };
-    }
-  } catch (error) {
-    logger.warn('Failed to fetch Platt parameters, using defaults', { error });
-  }
+  return getOrSet<ActiveVersionCache>(
+    FRAUD_MODEL_PARAMS_CACHE_KEY,
+    ttl,
+    async () => {
+      try {
+        const v = await prisma.fraudModelVersion.findFirst({
+          where: { isActive: true },
+          orderBy: { calibratedAt: 'desc' },
+          select: {
+            id: true,
+            plattA: true,
+            plattB: true,
+            calibrationType: true,
+            isotonicBreakpoints: true,
+          },
+        });
 
-  return DEFAULT_PLATT_PARAMS;
+        if (v) {
+          return {
+            id: v.id,
+            plattA: v.plattA,
+            plattB: v.plattB,
+            calibrationType: v.calibrationType,
+            isotonicBreakpoints: v.isotonicBreakpoints,
+          };
+        }
+      } catch (error) {
+        logger.warn('Failed to fetch active model version, using defaults', { error });
+      }
+
+      return DEFAULT_VERSION_CACHE;
+    },
+  );
 }
 
-function applyPlattScaling(rawScore: number, params: PlattParams): number {
-  // p = 1 / (1 + exp(A * rawScore + B))
-  const z = params.A * rawScore + params.B;
-  // Clamp to avoid numerical overflow
-  const clampedZ = Math.max(Math.min(z, 20), -20);
-  return 1 / (1 + Math.exp(clampedZ));
+/**
+ * Invalidate the active model params cache.
+ * Called by the recalibration worker immediately after version swap.
+ */
+export async function invalidateFraudModelCache(): Promise<void> {
+  await delCache(FRAUD_MODEL_PARAMS_CACHE_KEY);
 }
 
 // ─── Third-Party Fraud Service ────────────────────────────────────────────────
@@ -402,9 +450,9 @@ export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
   // Clamp raw score to 0-100 range
   rawScore = Math.max(0, Math.min(rawScore, 100));
 
-  // Apply Platt scaling for calibrated probability
-  const plattParams = await getActivePlattParams();
-  const calibratedProbability = applyPlattScaling(rawScore, plattParams);
+  // Apply calibration — routes to Platt or isotonic based on the active version
+  const activeVersion = await getActiveModelVersion();
+  const calibratedProbability = routeCalibration(rawScore, activeVersion.id ? activeVersion : null);
 
   // Convert to integer score for UI compatibility (0-100)
   const fraudScore = Math.round(calibratedProbability * 100);
@@ -473,6 +521,33 @@ export async function createFraudLabel(
     });
 
     logger.info(`FraudLabel created for submission ${submissionId} with outcome ${outcome}`);
+
+    // ── Label-count trigger: enqueue recalibration if threshold crossed ──────
+    // Count labels since the active version was last calibrated (non-blocking)
+    const { labelTrigger } = config.fraudRecalibration;
+    try {
+      const labelCount = await prisma.fraudLabel.count({
+        where: { modelVersionId: activeVersion.id },
+      });
+
+      // Trigger on exact multiples of labelTrigger to avoid repeated enqueueing.
+      // e.g. trigger at 200, 400, 600 ... labels.
+      if (labelCount > 0 && labelCount % labelTrigger === 0) {
+        // Lazy import to avoid circular dependency at module load time.
+        // node16 moduleResolution: use .js extension (compiled output)
+        const { enqueueFraudRecalibration } = await import('../workers/fraudRecalibration.worker.js');
+        await enqueueFraudRecalibration(
+          `label-count-trigger:${labelCount}:version:${activeVersion.id}`,
+        );
+        logger.info(
+          `Fraud recalibration triggered at label count ${labelCount} ` +
+          `for version ${activeVersion.id}`,
+        );
+      }
+    } catch (triggerErr) {
+      // Never let trigger failure affect label creation
+      logger.warn('Failed to check label trigger for recalibration', { error: triggerErr });
+    }
   } catch (error) {
     logger.error('Failed to create FraudLabel', { error, submissionId });
     // Don't throw - label creation failure should not block KYC review
