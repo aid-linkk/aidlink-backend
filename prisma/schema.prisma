@@ -924,8 +924,12 @@ model BlockchainTransaction {
   contractAddress String?
   functionName    String?
   parameters      Json?
+  /// PENDING | CONFIRMED | FAILED | ORPHANED
+  /// ORPHANED rows were on a minority fork and have been superseded by the
+  /// canonical ledger version. They are retained for audit purposes.
   status          String          @default("PENDING")
   blockNumber     BigInt?
+  ledgerHash      String?         // hash of the ledger that contained this tx
   timestamp       DateTime?
   indexed         Boolean         @default(false)
   createdAt       DateTime        @default(now())
@@ -936,6 +940,23 @@ model BlockchainTransaction {
   @@index([status])
   @@index([indexed])
   @@index([blockNumber])
+  @@index([ledgerHash])
+}
+
+// ============================================
+// INDEXER
+// ============================================
+
+/// Persists the indexer's cursor so that on restart it resumes from the
+/// last successfully processed ledger instead of re-scanning from tip-1000.
+/// There is exactly one row in this table (id = "singleton").
+model IndexerCheckpoint {
+  id            String   @id @default("singleton")
+  /// Ledger sequence number of the last successfully processed ledger
+  lastSequence  Int      @default(0)
+  /// Hash of the last successfully processed ledger (for reorg detection)
+  lastHash      String   @default("")
+  updatedAt     DateTime @updatedAt
 }
 
 model ContractEvent {

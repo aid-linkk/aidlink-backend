@@ -86,6 +86,44 @@ export const config = {
     networkPassphrase: process.env.SOROBAN_NETWORK_PASSPHRASE!,
     contractAddress: process.env.CONTRACT_ADDRESS,
   },
+
+  indexer: {
+    /**
+     * Horizon REST API base URL.
+     * Defaults to the public Stellar mainnet Horizon; override for testnet or
+     * a local standalone network.
+     */
+    horizonUrl: process.env.HORIZON_URL || 'https://horizon-testnet.stellar.org',
+
+    /**
+     * Maximum number of ledgers to process per indexLoop() tick when
+     * catching up after a gap.  Smaller values reduce per-tick DB write
+     * latency; larger values close gaps faster.
+     * Default: 50
+     */
+    batchSize: parseInt(process.env.SOROBAN_INDEXER_BATCH_SIZE || '50', 10),
+
+    /**
+     * Maximum Horizon / Soroban-RPC requests per second.
+     * The token-bucket rate limiter will block until a token is available.
+     * Default: 5 (conservative; Horizon public instances allow ~20 rps but
+     * we share bandwidth with other consumers).
+     */
+    rpsLimit: parseInt(process.env.SOROBAN_INDEXER_RPS_LIMIT || '5', 10),
+
+    /**
+     * How long to wait between normal (non-catch-up) loop ticks in ms.
+     * Default: 10 000 (10 s) — Stellar closes a new ledger every ~5 s so
+     * this is a 2× safety margin with minimal overhead.
+     */
+    pollIntervalMs: parseInt(process.env.SOROBAN_INDEXER_POLL_INTERVAL_MS || '10000', 10),
+
+    /**
+     * How long to wait after a fatal error before retrying the loop in ms.
+     * Default: 30 000
+     */
+    errorBackoffMs: parseInt(process.env.SOROBAN_INDEXER_ERROR_BACKOFF_MS || '30000', 10),
+  },
   
   rateLimit: {
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
