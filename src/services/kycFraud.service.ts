@@ -1,4 +1,5 @@
 import prisma from '../config/database';
+import redis from '../config/redis';
 import { config } from '../config';
 import logger from '../config/logger';
 
@@ -18,6 +19,9 @@ export interface FraudAssessment {
     signals: FraudSignal[];
     interactionFeatures: InteractionFeatures;
   };
+  // Calibrated probability from a shadow (candidate) FraudModelVersion, present only when
+  // one exists. Never used for the decision — that's always fraudScore/fraudScoreFloat.
+  shadowScore?: number;
 }
 
 export interface InteractionFeatures {
@@ -274,21 +278,90 @@ interface PlattParams {
 // Default Platt parameters (identity transformation until calibrated)
 const DEFAULT_PLATT_PARAMS: PlattParams = { A: 1, B: 0 };
 
-async function getActivePlattParams(): Promise<PlattParams> {
-  try {
-    const activeVersion = await prisma.fraudModelVersion.findFirst({
-      where: { isActive: true },
-      orderBy: { calibratedAt: 'desc' },
-    });
+// Cache key/TTL for the combined active+shadow-candidate FraudModelVersion lookup. Shared
+// with FraudModelVersionService, which invalidates it on createCandidateVersion()/
+// promoteVersion() via invalidateFraudModelCache().
+export const FRAUD_MODEL_CACHE_KEY = 'fraud:model:active_candidate';
+const FRAUD_MODEL_CACHE_TTL_SECONDS = 60;
 
-    if (activeVersion) {
-      return { A: activeVersion.plattA, B: activeVersion.plattB };
-    }
+interface ActiveModelInfo {
+  id: string;
+  plattA: number;
+  plattB: number;
+  featureSchemaVersion: number;
+}
+
+interface CandidateModelInfo {
+  id: string;
+  plattA: number;
+  plattB: number;
+}
+
+interface ModelVersionsSnapshot {
+  active: ActiveModelInfo | null;
+  candidate: CandidateModelInfo | null;
+}
+
+const EMPTY_MODEL_SNAPSHOT: ModelVersionsSnapshot = { active: null, candidate: null };
+
+/**
+ * Fetches the active FraudModelVersion and, if one exists, the shadow candidate
+ * (shadowMode=true, isActive=false) in a single query, Redis-cached for
+ * FRAUD_MODEL_CACHE_TTL_SECONDS. This is the only DB round trip assessFraud() needs for
+ * model version data, so the shadow-scoring path never adds a query of its own.
+ */
+async function getActiveAndCandidateModels(): Promise<ModelVersionsSnapshot> {
+  try {
+    const cached = await redis.get(FRAUD_MODEL_CACHE_KEY);
+    if (cached) return JSON.parse(cached) as ModelVersionsSnapshot;
   } catch (error) {
-    logger.warn('Failed to fetch Platt parameters, using defaults', { error });
+    logger.warn('Failed to read fraud model version cache from Redis', { error });
   }
 
-  return DEFAULT_PLATT_PARAMS;
+  let snapshot: ModelVersionsSnapshot;
+  try {
+    const versions = await prisma.fraudModelVersion.findMany({
+      where: { OR: [{ isActive: true }, { shadowMode: true, isActive: false }] },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const activeRow = versions.find((v: any) => v.isActive) ?? null;
+    const candidateRow = versions.find((v: any) => !v.isActive && v.shadowMode) ?? null;
+
+    snapshot = {
+      active: activeRow
+        ? {
+            id: activeRow.id,
+            plattA: activeRow.plattA,
+            plattB: activeRow.plattB,
+            featureSchemaVersion: activeRow.featureSchemaVersion,
+          }
+        : null,
+      candidate: candidateRow
+        ? { id: candidateRow.id, plattA: candidateRow.plattA, plattB: candidateRow.plattB }
+        : null,
+    };
+  } catch (error) {
+    logger.warn('Failed to fetch fraud model versions, using defaults', { error });
+    return EMPTY_MODEL_SNAPSHOT;
+  }
+
+  try {
+    await redis.setex(FRAUD_MODEL_CACHE_KEY, FRAUD_MODEL_CACHE_TTL_SECONDS, JSON.stringify(snapshot));
+  } catch (error) {
+    logger.warn('Failed to write fraud model version cache to Redis', { error });
+  }
+
+  return snapshot;
+}
+
+/** Invalidates the active/candidate cache so the next assessFraud() call re-fetches from the DB. */
+export async function invalidateFraudModelCache(): Promise<void> {
+  try {
+    await redis.del(FRAUD_MODEL_CACHE_KEY);
+  } catch (error) {
+    logger.warn('Failed to invalidate fraud model version cache', { error });
+  }
 }
 
 function applyPlattScaling(rawScore: number, params: PlattParams): number {
@@ -402,8 +475,11 @@ export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
   // Clamp raw score to 0-100 range
   rawScore = Math.max(0, Math.min(rawScore, 100));
 
-  // Apply Platt scaling for calibrated probability
-  const plattParams = await getActivePlattParams();
+  // Apply Platt scaling for calibrated probability. A single query (or Redis cache hit)
+  // fetches both the active version and any shadow candidate, so shadow scoring below adds
+  // no additional DB round trip on the hot path.
+  const { active, candidate } = await getActiveAndCandidateModels();
+  const plattParams = active ? { A: active.plattA, B: active.plattB } : DEFAULT_PLATT_PARAMS;
   const calibratedProbability = applyPlattScaling(rawScore, plattParams);
 
   // Convert to integer score for UI compatibility (0-100)
@@ -415,6 +491,22 @@ export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
       ? signals.map((s) => s.detail).join('; ')
       : 'No fraud signals detected';
 
+  // Shadow scoring: score under the candidate's Platt parameters for A/B comparison, but
+  // never use it for the decision. Short-circuits with zero extra work when no candidate
+  // is in shadow mode.
+  let shadowScore: number | undefined;
+  if (candidate) {
+    shadowScore = applyPlattScaling(rawScore, { A: candidate.plattA, B: candidate.plattB });
+    try {
+      await prisma.kYCSubmission.update({
+        where: { id: input.submissionId },
+        data: { shadowScore },
+      });
+    } catch (error) {
+      logger.warn('Failed to persist shadow score', { error, submissionId: input.submissionId });
+    }
+  }
+
   return {
     fraudScore,
     fraudScoreFloat,
@@ -425,6 +517,7 @@ export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
       signals,
       interactionFeatures,
     },
+    ...(shadowScore !== undefined ? { shadowScore } : {}),
   };
 }
 
@@ -467,6 +560,7 @@ export async function createFraudLabel(
         reviewedBy,
         reviewedAt: new Date(),
         featureSnapshot: assessment.featureSnapshot as any,
+        featureSchemaVersion: activeVersion.featureSchemaVersion,
         fraudScore: assessment.fraudScore,
         fraudScoreFloat: assessment.fraudScoreFloat,
       },

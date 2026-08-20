@@ -159,6 +159,13 @@ services intentionally reuse the same code. For example, any lookup that fails t
 | `RECEIPT_003` | 404 | Receipt not found | No tax receipt exists for the given ID. | Verify the receipt ID. |
 | `RECEIPT_004` | 404 | Batch job not found | No receipt batch job exists for the given ID. | Verify the batch job ID. |
 
+### FRAUD — model version lifecycle
+
+| Code | HTTP | Message | Cause | Solution |
+|---|---|---|---|---|
+| `FRAUD_001` | 400 | FRAUD_MODEL_VERSION_NOT_READY: candidate version does not meet promotion thresholds | `promoteVersion()` was called for a candidate whose ECE/AUC have not been computed yet, or whose ECE >= 0.05 or AUC <= 0.75. | Run calibration evaluation on the candidate (see fraudCalibration.service) and retry promotion only once ECE < 0.05 and AUC > 0.75. |
+| `FRAUD_002` | 404 | Fraud model version not found | No FraudModelVersion exists for the given ID. | Verify the version ID, e.g. the one returned by createCandidateVersion(). |
+
 ## Adding a new code
 
 1. Add an entry to `ErrorCodes` in `src/constants/errorCodes.ts` with `httpStatus`, `message`, `cause`,

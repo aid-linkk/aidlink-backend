@@ -653,6 +653,9 @@ model KYCSubmission {
   expiresAt         DateTime?
   fraudScore        Int       @default(0)
   fraudScoreFloat   Float?    // Full-precision calibrated probability (0-1)
+  // Calibrated probability from a shadow (candidate) FraudModelVersion, scored alongside
+  // the active version for A/B comparison. Not used for any KYC decision.
+  shadowScore       Float?
   fraudSignals      Json?     // Array of { signal, severity, detail }
   fraudReason       String?   @db.Text
   ipAddress         String?
@@ -1629,47 +1632,64 @@ model RollupTracker {
 // Versioned Platt scaling parameters for fraud score calibration.
 // Each row represents a deployed model version with its A and B parameters
 // for the sigmoid transformation: p = 1 / (1 + exp(A * rawScore + B))
+// Lifecycle: a new version is created via FraudModelVersionService.createCandidateVersion()
+// as isActive=false/shadowMode=true (CANDIDATE). Once its ECE/AUC metrics clear the
+// promotion thresholds, FraudModelVersionService.promoteVersion() atomically flips it to
+// isActive=true/shadowMode=false (ACTIVE) and deactivates the previously active version
+// (DEPRECATED). A partial unique index (`WHERE "isActive" = true`, added via raw SQL in
+// the migration since Prisma's schema DSL cannot express partial indexes) guarantees at
+// most one ACTIVE version exists at the database level.
 model FraudModelVersion {
-  id              String   @id @default(cuid())
-  version         String   @unique // e.g., "v1.0.0"
-  plattA          Float    // A parameter for Platt scaling
-  plattB          Float    // B parameter for Platt scaling
-  isActive        Boolean  @default(true)
-  calibratedAt    DateTime @default(now())
-  calibratedBy    String?  // User who calibrated this version
-  ece             Float?   // Expected Calibration Error (from evaluation)
-  auc             Float?   // AUC-ROC score (from evaluation)
-  metadata        Json?    // Additional version metadata
-  createdAt       DateTime @default(now())
+  id                   String   @id @default(cuid())
+  version              String   @unique // e.g., "v1.0.0"
+  plattA               Float    // A parameter for Platt scaling
+  plattB               Float    // B parameter for Platt scaling
+  isActive             Boolean  @default(true)
+  // true for a candidate being scored on live traffic but not yet used for decisions
+  shadowMode           Boolean  @default(false)
+  // Bumped when assessFraud()'s computed feature set changes; labels are only used to fit
+  // parameters for a version sharing the same featureSchemaVersion.
+  featureSchemaVersion Int      @default(1)
+  calibratedAt         DateTime @default(now())
+  calibratedBy         String?  // User who calibrated this version
+  ece                  Float?   // Expected Calibration Error (from evaluation)
+  auc                  Float?   // AUC-ROC score (from evaluation)
+  metadata             Json?    // Additional version metadata
+  createdAt            DateTime @default(now())
 
-  fraudLabels     FraudLabel[]
+  fraudLabels          FraudLabel[]
 
   @@index([isActive])
   @@index([version])
   @@index([calibratedAt])
+  @@index([shadowMode])
 }
 
 // Ground truth labels for KYC submissions, used for model recalibration.
 // Written when a KYC submission transitions to APPROVED or REJECTED status.
 model FraudLabel {
-  id              String   @id @default(cuid())
-  submissionId    String   @unique
-  modelVersionId  String
-  outcome         String   // "APPROVED" or "REJECTED"
-  reviewedBy      String
-  reviewedAt      DateTime @default(now())
+  id                   String   @id @default(cuid())
+  submissionId         String   @unique
+  modelVersionId       String
+  outcome              String   // "APPROVED" or "REJECTED"
+  reviewedBy           String
+  reviewedAt           DateTime @default(now())
   // Snapshot of features at scoring time for reproducibility
-  featureSnapshot Json     // { rawScore, signals: [...], interactionFeatures: {...} }
-  fraudScore      Int      // The fraud score at time of labeling
-  fraudScoreFloat Float?   // Full-precision calibrated probability
-  metadata        Json?
-  createdAt       DateTime @default(now())
+  featureSnapshot      Json     // { rawScore, signals: [...], interactionFeatures: {...} }
+  // Schema version of featureSnapshot, inherited from the active model version at scoring
+  // time. Existing rows predating this column default to 1.
+  featureSchemaVersion Int      @default(1)
+  fraudScore           Int      // The fraud score at time of labeling
+  fraudScoreFloat      Float?   // Full-precision calibrated probability
+  metadata             Json?
+  createdAt            DateTime @default(now())
 
-  modelVersion    FraudModelVersion @relation(fields: [modelVersionId], references: [id], onDelete: Cascade)
+  modelVersion         FraudModelVersion @relation(fields: [modelVersionId], references: [id], onDelete: Cascade)
 
   @@index([submissionId])
   @@index([modelVersionId])
   @@index([outcome])
   @@index([reviewedAt])
+  @@index([featureSchemaVersion])
 }
 

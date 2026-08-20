@@ -13,17 +13,28 @@ jest.mock('../../src/config/database', () => ({
       findMany: jest.fn(),
       count: jest.fn(),
       findFirst: jest.fn(),
+      update: jest.fn(),
     },
     beneficiary: {
       findUnique: jest.fn(),
     },
     fraudModelVersion: {
       findFirst: jest.fn(),
+      findMany: jest.fn(),
     },
     fraudLabel: {
       findUnique: jest.fn(),
       create: jest.fn(),
     },
+  },
+}));
+
+jest.mock('../../src/config/redis', () => ({
+  __esModule: true,
+  default: {
+    get: jest.fn(),
+    setex: jest.fn(),
+    del: jest.fn(),
   },
 }));
 
@@ -58,6 +69,7 @@ jest.mock('../../src/config', () => ({
 // ─── Imports (after mocks) ────────────────────────────────────────────────────
 
 import prisma from '../../src/config/database';
+import redis from '../../src/config/redis';
 import {
   checkDocumentReuse,
   checkVelocity,
@@ -70,6 +82,7 @@ import {
 } from '../../src/services/kycFraud.service';
 
 const prismaMock = prisma as jest.Mocked<typeof prisma>;
+const redisMock = redis as jest.Mocked<typeof redis>;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -90,8 +103,11 @@ const baseInput = (): FraudInput => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
-  // Mock default Platt parameters (identity transformation)
+  // Mock default Platt parameters (identity transformation), no active/candidate version
   (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue(null);
+  (prismaMock.fraudModelVersion.findMany as jest.Mock).mockResolvedValue([]);
+  // Cache always misses by default so tests exercise the DB path deterministically
+  (redisMock.get as jest.Mock).mockResolvedValue(null);
 });
 
 // ─── checkDocumentReuse ───────────────────────────────────────────────────────
@@ -421,14 +437,18 @@ describe('assessFraud', () => {
 describe('Platt scaling', () => {
   it('applies Platt scaling with known parameters produces expected probability', async () => {
     // Mock active model version with known Platt parameters
-    (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue({
-      id: 'model-1',
-      version: 'v1.0.0',
-      plattA: 0.1,
-      plattB: -5,
-      isActive: true,
-      calibratedAt: new Date(),
-    });
+    (prismaMock.fraudModelVersion.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'model-1',
+        version: 'v1.0.0',
+        plattA: 0.1,
+        plattB: -5,
+        isActive: true,
+        shadowMode: false,
+        featureSchemaVersion: 1,
+        calibratedAt: new Date(),
+      },
+    ]);
 
     (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
     (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]);
@@ -436,7 +456,7 @@ describe('Platt scaling', () => {
     (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
 
     const result = await assessFraud(baseInput());
-    
+
     // With rawScore=0, A=0.1, B=-5: z = 0.1*0 + (-5) = -5
     // p = 1 / (1 + exp(-5)) ≈ 0.9933
     expect(result.fraudScoreFloat).toBeCloseTo(0.9933, 3);
@@ -444,7 +464,7 @@ describe('Platt scaling', () => {
   });
 
   it('uses default Platt parameters when no active version exists', async () => {
-    (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue(null);
+    (prismaMock.fraudModelVersion.findMany as jest.Mock).mockResolvedValue([]);
 
     (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
     (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]);
@@ -452,11 +472,80 @@ describe('Platt scaling', () => {
     (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
 
     const result = await assessFraud(baseInput());
-    
+
     // Default parameters: A=1, B=0 (identity transformation)
     // With rawScore=0: p = 1 / (1 + exp(0)) = 0.5
     expect(result.fraudScoreFloat).toBeCloseTo(0.5, 3);
     expect(result.fraudScore).toBe(50);
+  });
+
+  it('reuses a cached Redis snapshot instead of querying the database', async () => {
+    (redisMock.get as jest.Mock).mockResolvedValue(
+      JSON.stringify({
+        active: { id: 'model-1', plattA: 0.1, plattB: -5, featureSchemaVersion: 1 },
+        candidate: null,
+      }),
+    );
+
+    (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
+    (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]);
+    (prismaMock.kYCSubmission.count as jest.Mock).mockResolvedValue(0);
+    (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
+
+    const result = await assessFraud(baseInput());
+
+    expect(result.fraudScoreFloat).toBeCloseTo(0.9933, 3);
+    expect(prismaMock.fraudModelVersion.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Shadow (A/B) scoring ────────────────────────────────────────────────────
+
+describe('shadow scoring', () => {
+  it('does not issue any additional fraudModelVersion queries when no shadow candidate exists', async () => {
+    (prismaMock.fraudModelVersion.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'model-1',
+        plattA: 1,
+        plattB: 0,
+        isActive: true,
+        shadowMode: false,
+        featureSchemaVersion: 1,
+      },
+    ]);
+    (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
+    (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]);
+    (prismaMock.kYCSubmission.count as jest.Mock).mockResolvedValue(0);
+    (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
+
+    const result = await assessFraud(baseInput());
+
+    expect(prismaMock.fraudModelVersion.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.kYCSubmission.update).not.toHaveBeenCalled();
+    expect(result.shadowScore).toBeUndefined();
+  });
+
+  it('scores under the candidate version and persists shadowScore, without changing the decision score', async () => {
+    (prismaMock.fraudModelVersion.findMany as jest.Mock).mockResolvedValue([
+      { id: 'model-1', plattA: 1, plattB: 0, isActive: true, shadowMode: false, featureSchemaVersion: 1 },
+      { id: 'model-2', plattA: 0.1, plattB: -5, isActive: false, shadowMode: true, featureSchemaVersion: 1 },
+    ]);
+    (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
+    (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]);
+    (prismaMock.kYCSubmission.count as jest.Mock).mockResolvedValue(0);
+    (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
+    (prismaMock.kYCSubmission.update as jest.Mock).mockResolvedValue({});
+
+    const result = await assessFraud(baseInput());
+
+    // Decision score still comes from the active version (A=1, B=0 -> p=0.5 at rawScore=0)
+    expect(result.fraudScoreFloat).toBeCloseTo(0.5, 3);
+    // Shadow score comes from the candidate (A=0.1, B=-5 -> p≈0.9933 at rawScore=0)
+    expect(result.shadowScore).toBeCloseTo(0.9933, 3);
+    expect(prismaMock.kYCSubmission.update).toHaveBeenCalledWith({
+      where: { id: 'sub-1' },
+      data: { shadowScore: result.shadowScore },
+    });
   });
 });
 
@@ -470,6 +559,7 @@ describe('createFraudLabel', () => {
       plattA: 0.1,
       plattB: -5,
       isActive: true,
+      featureSchemaVersion: 1,
       calibratedAt: new Date(),
     };
 
@@ -504,6 +594,7 @@ describe('createFraudLabel', () => {
         reviewedBy: 'user-1',
         reviewedAt: expect.any(Date),
         featureSnapshot: mockAssessment.featureSnapshot,
+        featureSchemaVersion: 1,
         fraudScore: 75,
         fraudScoreFloat: 0.75,
       },
