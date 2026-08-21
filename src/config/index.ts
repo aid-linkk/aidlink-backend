@@ -166,6 +166,39 @@ export const config = {
     thirdPartyTimeoutMs: parseInt(process.env.KYC_FRAUD_THIRD_PARTY_TIMEOUT_MS || '5000', 10),
   },
 
+  fraudRecalibration: {
+    /**
+     * Minimum labels of each class (APPROVED and REJECTED) required before
+     * the re-calibration job attempts a fit.  Default: 50.
+     */
+    minCalibrationSamples: parseInt(process.env.FRAUD_MIN_CALIBRATION_SAMPLES || '50', 10),
+
+    /**
+     * If the Platt-fitted model's validation ECE exceeds this threshold, the
+     * job falls back to isotonic regression.  Default: 0.05.
+     */
+    isotonicEceThreshold: parseFloat(process.env.FRAUD_ISOTONIC_ECE_THRESHOLD || '0.05'),
+
+    /**
+     * Cron expression for the periodic recalibration job.
+     * Default: 0 3 * * * (3 AM UTC daily).
+     */
+    cron: process.env.FRAUD_RECALIBRATION_CRON || '0 3 * * *',
+
+    /**
+     * Number of new labels (since last calibration) that trigger an
+     * immediate recalibration job enqueue.  Default: 200.
+     */
+    labelTrigger: parseInt(process.env.FRAUD_RECALIBRATION_LABEL_TRIGGER || '200', 10),
+
+    /**
+     * Redis cache TTL for the active model version parameters, in seconds.
+     * After a version swap the worker invalidates the cache immediately;
+     * this TTL only applies to cache misses under Redis failure.  Default: 300 s.
+     */
+    cacheTtlSeconds: parseInt(process.env.FRAUD_MODEL_CACHE_TTL_SECONDS || '300', 10),
+  },
+
   analytics: {
     // Cron patterns for rollup jobs (configurable via env vars)
     hourlyRollupCron: process.env.ANALYTICS_HOURLY_CRON || '5 * * * *',
