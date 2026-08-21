@@ -1,5 +1,6 @@
 /// <reference types="jest" />
 
+import { Prisma } from '@prisma/client';
 import { SearchService } from '../../src/services/search.service';
 import prisma from '../../src/config/database';
 
@@ -222,6 +223,125 @@ describe('Search Performance Tests', () => {
       // Global search may be slightly slower due to cross-entity queries,
       // but should still be within reasonable bounds
       expect(p99Time).toBeLessThanOrEqual(PERFORMANCE_THRESHOLD_MS * 2); // Allow 2x for cross-entity
+    });
+  });
+
+  /**
+   * Regression coverage for #194: cursor pagination over word_similarity-ranked
+   * results must not duplicate or skip rows, even when many rows share the exact
+   * same rounded score. This only reproduces against a real Postgres — word_similarity's
+   * float4 output and Postgres's float4/numeric type promotion can't be faithfully
+   * mocked, which is exactly how the original bug (WHERE (score, id) < (...) comparing
+   * a real column against a numeric-bound parameter) went undetected by unit tests.
+   */
+  describe('cursor pagination stability against real word_similarity scores', () => {
+    let organizationId: string;
+    let userId: string;
+
+    beforeAll(async () => {
+      const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const owner = await prisma.user.create({
+        data: { email: `search-perf-owner-${suffix}@test.com`, role: 'ORGANIZATION' },
+      });
+      const organization = await prisma.organization.create({
+        data: { userId: owner.id, name: `Search Perf Org ${suffix}` },
+      });
+      userId = owner.id;
+      organizationId = organization.id;
+    });
+
+    afterAll(async () => {
+      await prisma.campaign.deleteMany({ where: { organizationId } });
+      await prisma.organization.delete({ where: { id: organizationId } }).catch(() => undefined);
+      await prisma.user.delete({ where: { id: userId } }).catch(() => undefined);
+    });
+
+    async function seedCampaigns(count: number, titleFactory: (i: number) => string) {
+      const rows = Array.from({ length: count }, (_, i) => ({
+        organizationId,
+        userId,
+        title: titleFactory(i),
+        description: 'Seeded for cursor pagination stability testing.',
+        targetAmount: new Prisma.Decimal(1000),
+        startDate: new Date(),
+        status: 'ACTIVE' as const,
+      }));
+      // createMany doesn't return rows/ids on Postgres in a portable way across
+      // Prisma versions, so create individually — this only runs a handful of times.
+      const created = [];
+      for (const row of rows) {
+        created.push(await prisma.campaign.create({ data: row }));
+      }
+      return created;
+    }
+
+    it('walks all pages of a 50-campaign match set with no duplicates and no gaps', async () => {
+      const campaigns = await seedCampaigns(50, (i) => `Cursor Stability Relief Fund ${i}`);
+      const expectedIds = new Set(campaigns.map((c) => c.id));
+
+      const seenIds: string[] = [];
+      let cursor: string | undefined;
+      let guard = 0;
+
+      do {
+        const result = await SearchService.searchCampaigns({
+          query: 'cursor stability relief fund',
+          sortBy: 'relevance',
+          limit: 10,
+          cursor,
+        });
+        const pageIds = result.data
+          .map((c: any) => c.id)
+          .filter((id: string) => expectedIds.has(id));
+        seenIds.push(...pageIds);
+        cursor = result.pagination.nextCursor;
+        guard++;
+      } while (cursor && guard < 20);
+
+      expect(seenIds).toHaveLength(seenIds.length ? new Set(seenIds).size : 0);
+      expect(new Set(seenIds).size).toBe(seenIds.length); // no duplicates across pages
+      expect(new Set(seenIds)).toEqual(expectedIds); // no gaps — every seeded campaign was returned
+    }, 30000);
+
+    it('partitions 20 identically-scored campaigns across two pages by id descending, with no overlap', async () => {
+      const campaigns = await seedCampaigns(20, () => 'Emergency Food Relief Tiebreak');
+      const expectedIds = campaigns.map((c) => c.id).sort().reverse(); // id DESC, matches ORDER BY score DESC, id DESC
+
+      const page1 = await SearchService.searchCampaigns({
+        query: 'emergency food relief tiebreak',
+        sortBy: 'relevance',
+        limit: 10,
+      });
+      expect(page1.pagination.nextCursor).toBeTruthy();
+
+      const page2 = await SearchService.searchCampaigns({
+        query: 'emergency food relief tiebreak',
+        sortBy: 'relevance',
+        limit: 10,
+        cursor: page1.pagination.nextCursor,
+      });
+
+      const page1Ids = page1.data.map((c: any) => c.id);
+      const page2Ids = page2.data.map((c: any) => c.id).filter((id: string) => expectedIds.includes(id));
+
+      expect(page1Ids).toHaveLength(10);
+      expect(page1Ids.every((id: string) => !page2Ids.includes(id))).toBe(true);
+      expect([...page1Ids, ...page2Ids].sort()).toEqual([...expectedIds].sort());
+    }, 30000);
+
+    it('rejects a manipulated cursor score gracefully instead of exposing extra rows', async () => {
+      const forgedCursor = Buffer.from(
+        JSON.stringify({ v: 2, score: -1, id: 'nonexistent-campaign-id' })
+      ).toString('base64');
+
+      await expect(
+        SearchService.searchCampaigns({
+          query: 'cursor stability relief fund',
+          sortBy: 'relevance',
+          limit: 10,
+          cursor: forgedCursor,
+        })
+      ).resolves.toMatchObject({ data: [] });
     });
   });
 });
