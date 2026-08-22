@@ -2,9 +2,11 @@ import prisma from '../config/database';
 import redis from '../config/redis';
 import logger from '../config/logger';
 import { config } from '../config';
+import { Prisma } from '@prisma/client';
 import { stripDonorPII } from '../utils/anonymity';
 import { AppError } from '../middleware/error';
 import { toCsv } from '../utils/csv';
+import { CACHE_PREFIX_STATS, CACHE_PREFIX_DONORS_HLL } from '../constants/cacheKeys';
 import {
   TrendingCampaignFilters,
   TrendingCampaign,
@@ -15,9 +17,57 @@ import {
   PaginationParams,
 } from '../types';
 
-// Redis cache key prefixes
-const CACHE_PREFIX_STATS = 'campaign:stats:';
+// Non-prefixed constant — just a namespace for trending data (not a stats key)
 const CACHE_PREFIX_TRENDING_DATA = 'campaigns:trending:data';
+
+/**
+ * Scale factor used when storing monetary amounts in Redis as integers.
+ *
+ * The DB column is DECIMAL(20,8), so we multiply by 10^8 to preserve all 8
+ * decimal places as an integer.  On read, divide by AMOUNT_SCALE to recover
+ * the decimal value.
+ *
+ * Using HINCRBY (integer) instead of HINCRBYFLOAT (IEEE-754 float) eliminates
+ * accumulated rounding error across thousands of increments.
+ *
+ * Maximum representable amount at this scale:
+ *   9,223,372,036,854,775,807 (int64 max) ÷ 10^8 ≈ 92,233,720,368 base units
+ *   — far beyond any plausible campaign target.
+ */
+const AMOUNT_SCALE = 100_000_000; // 10^8
+
+/**
+ * Convert a Prisma.Decimal (or any decimal-compatible value) to an integer
+ * scaled by AMOUNT_SCALE, returned as a JavaScript number safe for ioredis
+ * HINCRBY.
+ *
+ * Critically, this never routes through `Number(amount)` as an intermediate,
+ * which would lose precision for values with > 15 significant digits.
+ * Instead it uses Prisma.Decimal arithmetic to produce an exact integer string
+ * and converts that to BigInt (lossless for the int64 range we care about).
+ *
+ * @throws {RangeError} if the scaled value exceeds Number.MAX_SAFE_INTEGER
+ *   (ioredis HINCRBY expects a `number` — an out-of-range value would silently
+ *   corrupt the counter).
+ */
+function toScaledInt(amount: Prisma.Decimal.Value): number {
+  const scaledStr = new Prisma.Decimal(amount).mul(AMOUNT_SCALE).toFixed(0);
+  const scaled = BigInt(scaledStr);
+  if (scaled > BigInt(Number.MAX_SAFE_INTEGER) || scaled < BigInt(Number.MIN_SAFE_INTEGER)) {
+    throw new RangeError(
+      `Scaled amount ${scaledStr} exceeds safe integer range for ioredis HINCRBY`,
+    );
+  }
+  return Number(scaled);
+}
+
+/**
+ * Convert an integer-scaled totalRaised value (as stored in Redis) back to a
+ * human-readable decimal string with 8 decimal places.
+ */
+function fromScaledInt(scaledValue: string | number): string {
+  return new Prisma.Decimal(scaledValue).div(AMOUNT_SCALE).toFixed(8);
+}
 
 export const EXPORT_REPORT_TYPES = ['campaign', 'donor', 'organization', 'platform'] as const;
 export type ExportReportType = (typeof EXPORT_REPORT_TYPES)[number];
@@ -465,21 +515,49 @@ export class AnalyticsService {
 
   /**
    * Get campaign stats from Redis cache, falling back to DB if cache miss.
+   *
+   * `uniqueDonors` is always sourced from the HyperLogLog PFCOUNT rather than
+   * from the stats hash field.  This ensures it is updated in real time on
+   * every confirmed donation (via PFADD in incrementDonationStats) instead of
+   * only at the hourly reconciliation boundary.
+   *
+   * The HyperLogLog has a standard error of ≤ 0.81 %, which is acceptable for
+   * display purposes.  The hourly reconciliation job provides the exact DB
+   * count as a correctness backstop.
    */
   static async getCachedCampaignStats(campaignId: string): Promise<Record<string, string>> {
     const cacheKey = `${CACHE_PREFIX_STATS}${campaignId}`;
+    const hllKey = `${CACHE_PREFIX_DONORS_HLL}${campaignId}`;
+
+    let stats: Record<string, string> | null = null;
     try {
       const cached = await redis.hgetall(cacheKey);
       if (cached && Object.keys(cached).length > 0) {
-        return cached;
+        stats = cached;
       }
     } catch (err) {
       logger.warn(`Redis cache read failed for ${cacheKey}`, err);
     }
 
-    // Cache miss — build from DB and populate cache
-    const stats = await this.buildCampaignStats(campaignId);
-    await this.setCachedCampaignStats(campaignId, stats);
+    if (!stats) {
+      // Cache miss — build from DB and populate cache (also seeds the HLL)
+      const built = await this.buildCampaignStats(campaignId);
+      await this.setCachedCampaignStats(campaignId, built);
+      stats = built;
+    }
+
+    // Overlay uniqueDonors with the live HyperLogLog estimate.
+    // PFCOUNT is O(1) and provides a real-time approximate count that is
+    // updated on every donation confirmation, eliminating the stale window
+    // that existed when uniqueDonors was only refreshed by the hourly job.
+    try {
+      const hllCount = await redis.pfcount(hllKey);
+      stats = { ...stats, uniqueDonors: String(hllCount) };
+    } catch (err) {
+      logger.warn(`HLL PFCOUNT failed for ${hllKey}, using cached value`, err);
+      // Fall back to the value in the stats hash (set at last DB rebuild)
+    }
+
     return stats;
   }
 
@@ -501,6 +579,15 @@ export class AnalyticsService {
 
   /**
    * Build campaign stats from raw database queries.
+   *
+   * totalRaised is stored as an integer-scaled value (× 10^8) so that
+   * subsequent HINCRBY increments on the live hash avoid IEEE-754 rounding
+   * error.  All callers that read totalRaised must divide by AMOUNT_SCALE
+   * (or call fromScaledInt) to recover the decimal representation.
+   *
+   * On every full rebuild we also (re)seed the HyperLogLog for this campaign
+   * with the exact set of confirmed donor user-IDs from the DB, so that the
+   * HLL is accurate immediately after a cache miss rather than starting empty.
    */
   static async buildCampaignStats(campaignId: string): Promise<Record<string, string>> {
     const campaign = await prisma.campaign.findUnique({
@@ -525,7 +612,7 @@ export class AnalyticsService {
       }),
     ]);
 
-    const uniqueDonors = await prisma.donation.groupBy({
+    const uniqueDonorRows = await prisma.donation.groupBy({
       by: ['userId'],
       where: { campaignId, status: 'CONFIRMED', userId: { not: null } },
     });
@@ -538,6 +625,28 @@ export class AnalyticsService {
     const currentAmount = Number(campaign.currentAmount) || 0;
     const progress = ((currentAmount / targetAmount) * 100).toFixed(2);
 
+    // Seed (or re-seed) the HyperLogLog with the current confirmed donor set so
+    // it is accurate immediately after a cache miss.  The HLL key shares the
+    // same TTL as the stats hash key so stale HLL entries don't accumulate
+    // after a campaign is archived.
+    const hllKey = `${CACHE_PREFIX_DONORS_HLL}${campaignId}`;
+    const donorUserIds = uniqueDonorRows
+      .map((r) => r.userId)
+      .filter((uid): uid is string => uid !== null);
+    if (donorUserIds.length > 0) {
+      try {
+        await redis.pfadd(hllKey, ...donorUserIds);
+        await redis.expire(hllKey, config.analytics.campaignStatsCacheTTL);
+      } catch (err) {
+        logger.warn(`HLL seed failed for campaign ${campaignId}`, err);
+      }
+    }
+
+    // Store totalRaised as an integer-scaled value to avoid float drift.
+    const rawTotalRaised = donationAgg._sum.amount
+      ? toScaledInt(donationAgg._sum.amount)
+      : 0;
+
     return {
       campaignId: campaign.id,
       title: campaign.title,
@@ -545,31 +654,114 @@ export class AnalyticsService {
       targetAmount: String(campaign.targetAmount),
       currentAmount: String(campaign.currentAmount),
       totalDonations: String(donationAgg._count),
-      totalRaised: String(donationAgg._sum.amount || '0'),
+      // Integer-scaled: divide by AMOUNT_SCALE (10^8) to get the decimal value.
+      totalRaised: String(rawTotalRaised),
       totalDistributions: String(distributionAgg._count),
       totalDistributed: String(distributionAgg._sum.amount || '0'),
-      uniqueDonors: String(uniqueDonors.length),
+      // uniqueDonors in the hash is a snapshot from DB at build time; live reads
+      // should call PFCOUNT on the HLL key (campaign:donors:hll:{id}) instead.
+      uniqueDonors: String(uniqueDonorRows.length),
       beneficiariesReached: String(beneficiaryCount),
       progressPercentage: progress,
     };
   }
 
   /**
-   * Incrementally update campaign stats cache after a donation event.
-   * Called by the analytics worker.
+   * Incrementally update campaign stats cache after a donation confirmation.
+   *
+   * Design decisions:
+   *  • totalRaised is incremented using HINCRBY with an integer-scaled value
+   *    (amount × 10^8) rather than HINCRBYFLOAT.  This avoids IEEE-754
+   *    rounding error that accumulates across thousands of float increments.
+   *    Readers must divide by AMOUNT_SCALE (10^8) to recover the decimal value.
+   *  • uniqueDonors is updated via PFADD on the HyperLogLog key
+   *    (campaign:donors:hll:{campaignId}).  The HLL provides an O(1) estimate
+   *    with ≤ 0.81 % standard error (Redis spec, PFADD/PFCOUNT) — sufficient
+   *    for display purposes.  This replaces the previous approach of only
+   *    updating uniqueDonors in the hourly reconciliation job, which left a
+   *    stale window of up to 59 minutes.
+   *
+   * Called fire-and-forget from dispatchPostConfirmationSideEffects; errors
+   * are logged but never propagated to the HTTP request path.
    */
-  static async incrementDonationStats(campaignId: string, amount: number): Promise<void> {
+  static async incrementDonationStats(
+    campaignId: string,
+    amount: Prisma.Decimal.Value,
+    userId?: string | null,
+  ): Promise<void> {
+    const cacheKey = `${CACHE_PREFIX_STATS}${campaignId}`;
+    const hllKey = `${CACHE_PREFIX_DONORS_HLL}${campaignId}`;
+    try {
+      const exists = await redis.exists(cacheKey);
+      if (exists) {
+        const scaledAmount = toScaledInt(amount);
+        await redis.hincrby(cacheKey, 'totalRaised', scaledAmount);
+        await redis.hincrby(cacheKey, 'totalDonations', 1);
+      }
+    } catch (err) {
+      logger.warn(`Redis increment failed for ${cacheKey}`, err);
+    }
+
+    // Update the HyperLogLog regardless of whether the stats hash exists.
+    // The HLL key has the same TTL as the stats hash so it expires together.
+    // Note: there is no PFDEL command in Redis, so if a user's only donation
+    // is later refunded, their userId remains in the HLL, causing a slight
+    // overcount.  The hourly reconciliation job provides the exact count.
+    if (userId) {
+      try {
+        await redis.pfadd(hllKey, userId);
+        // Keep the HLL key alive as long as the stats hash would live.
+        await redis.expire(hllKey, config.analytics.campaignStatsCacheTTL);
+      } catch (err) {
+        logger.warn(`HLL PFADD failed for ${hllKey}`, err);
+      }
+    }
+  }
+
+  /**
+   * Decrementally update campaign stats cache after a donation refund.
+   *
+   * Mirrors incrementDonationStats with negative HINCRBY values to keep the
+   * cache consistent without the race window that invalidateCampaignCache()
+   * introduced.
+   *
+   * The race with the old invalidation approach:
+   *   1. Refund sets status = REFUNDED
+   *   2. invalidateCampaignCache() deletes the key
+   *   3. A concurrent confirmation's incrementDonationStats() sees exists=0
+   *      and silently skips the increment
+   *   4. The key is later rebuilt from DB, but the increment from step 3 is lost
+   *
+   * With decrementDonationStats(), the key is never deleted; concurrent
+   * increments and decrements are serialised by Redis and produce the correct
+   * net result.
+   *
+   * HyperLogLog note: Redis has no PFDEL command, so we cannot remove a userId
+   * from the HLL on refund.  If the user has no other donations to this
+   * campaign they will remain counted in the HLL until the key expires.  This
+   * is an acceptable known overcount (documented here); the hourly
+   * reconciliation job (CACHE_RECONCILE) provides the exact DB count
+   * periodically and will correct any drift.
+   *
+   * Called fire-and-forget from refundDonation; errors are logged but never
+   * propagated to the HTTP request path.
+   */
+  static async decrementDonationStats(
+    campaignId: string,
+    amount: Prisma.Decimal.Value,
+    _userId?: string | null, // reserved — cannot remove from HLL (no PFDEL in Redis)
+  ): Promise<void> {
     const cacheKey = `${CACHE_PREFIX_STATS}${campaignId}`;
     try {
       const exists = await redis.exists(cacheKey);
       if (exists) {
-        await redis.hincrbyfloat(cacheKey, 'totalRaised', amount);
-        await redis.hincrby(cacheKey, 'totalDonations', 1);
-        // Note: uniqueDonors is NOT incremented here — it would inflate the count.
-        // The hourly reconciliation job sets the correct value from grouped queries.
+        const scaledAmount = toScaledInt(amount);
+        // Negative HINCRBY decrements the integer-scaled totalRaised
+        await redis.hincrby(cacheKey, 'totalRaised', -scaledAmount);
+        await redis.hincrby(cacheKey, 'totalDonations', -1);
       }
     } catch (err) {
-      logger.warn(`Redis increment failed for ${cacheKey}`, err);
+      logger.warn(`Redis decrement failed for ${cacheKey}`, err);
     }
   }
 
@@ -839,6 +1031,10 @@ export class AnalyticsService {
 
   /**
    * Get comprehensive impact metrics for a campaign, using cache when available.
+   *
+   * uniqueDonors is read from the HyperLogLog (PFCOUNT) rather than from the
+   * stats hash field or the DB, so it reflects real-time donation activity
+   * rather than the value frozen at the last hourly reconciliation run.
    */
   static async getCampaignImpactMetrics(campaignId: string): Promise<ImpactMetrics> {
     const campaign = await prisma.campaign.findUnique({
@@ -871,10 +1067,12 @@ export class AnalyticsService {
 
     if (cachedStats) {
       totalDonations = parseInt(cachedStats.totalDonations || '0', 10);
-      totalRaised = parseFloat(cachedStats.totalRaised || '0');
+      // totalRaised is stored as an integer-scaled value (× 10^8); divide back.
+      totalRaised = parseFloat(fromScaledInt(cachedStats.totalRaised || '0'));
       totalDistributions = parseInt(cachedStats.totalDistributions || '0', 10);
       totalDistributedAmount = parseFloat(cachedStats.totalDistributed || '0');
-      uniqueDonors = parseInt(cachedStats.uniqueDonors || '0', 10);
+      // uniqueDonors is NOT read from the hash field here — use HLL instead.
+      uniqueDonors = 0; // will be overwritten by PFCOUNT below
       beneficiariesReached = parseInt(cachedStats.beneficiariesReached || '0', 10);
     } else {
       // Fallback: aggregate from raw tables (cache miss)
@@ -903,9 +1101,20 @@ export class AnalyticsService {
       uniqueDonors = donorGrowth.length;
       beneficiariesReached = beneficiaryCount;
 
-      // Build and cache
+      // Build and cache (also seeds the HLL)
       const stats = await this.buildCampaignStats(campaignId);
       await this.setCachedCampaignStats(campaignId, stats);
+    }
+
+    // Always overlay uniqueDonors with the live HyperLogLog estimate so it
+    // reflects real-time donor activity instead of the last reconciliation
+    // snapshot.  Standard error: ≤ 0.81 % (Redis HyperLogLog spec).
+    const hllKey = `${CACHE_PREFIX_DONORS_HLL}${campaignId}`;
+    try {
+      uniqueDonors = await redis.pfcount(hllKey);
+    } catch (err) {
+      logger.warn(`HLL PFCOUNT failed for ${hllKey} in impact metrics, using DB/cache value`, err);
+      // uniqueDonors retains the value from the cache-hit or the DB fallback above
     }
 
     const targetAmount = Number(campaign.targetAmount) || 1;

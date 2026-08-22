@@ -1,28 +1,50 @@
 import { AnalyticsService } from './analytics.service';
 import prisma from '../config/database';
+import { Prisma } from '@prisma/client';
 
 // Mock Prisma
 jest.mock('../config/database');
 
-jest.mock('../config/redis', () => ({
-  __esModule: true,
-  default: {
+// ---------------------------------------------------------------------------
+// Redis mock — must include pfadd and pfcount for the HLL-based uniqueDonors
+// feature (Bug 3) and hincrby (integer-scaled totalRaised, Bug 2).
+//
+// jest.mock() factory runs before variable declarations so the mock object
+// must be defined inside the factory.  We then hold a reference to it via the
+// module exports so individual tests can call mockResolvedValueOnce() etc.
+// ---------------------------------------------------------------------------
+jest.mock('../config/redis', () => {
+  const mock = {
     hgetall: jest.fn().mockResolvedValue({}),
     hset: jest.fn().mockResolvedValue(1),
     expire: jest.fn().mockResolvedValue(1),
-    hincrbyfloat: jest.fn().mockResolvedValue(0),
     hincrby: jest.fn().mockResolvedValue(0),
+    // hincrbyfloat is no longer used in production code; kept here so any
+    // accidental regression (calling it instead of hincrby) is immediately
+    // detectable as "unexpected call".
+    hincrbyfloat: jest.fn().mockResolvedValue(0),
     exists: jest.fn().mockResolvedValue(0),
     del: jest.fn().mockResolvedValue(1),
     get: jest.fn().mockResolvedValue(null),
     setex: jest.fn().mockResolvedValue('OK'),
-  },
-}));
+    // HyperLogLog commands
+    pfadd: jest.fn().mockResolvedValue(1),
+    pfcount: jest.fn().mockResolvedValue(0),
+  };
+  return { __esModule: true, default: mock };
+});
+
+// Grab a live reference to the mock so tests can call mockResolvedValueOnce()
+import redisMockModule from '../config/redis';
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const redisMock = redisMockModule as any;
 
 describe('AnalyticsService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
+
+  // ─── getCampaignAnalytics ────────────────────────────────────────────────
 
   describe('getCampaignAnalytics', () => {
     it('should return campaign analytics', async () => {
@@ -63,6 +85,8 @@ describe('AnalyticsService', () => {
     });
   });
 
+  // ─── getDonorAnalytics ───────────────────────────────────────────────────
+
   describe('getDonorAnalytics', () => {
     it('should return donor analytics', async () => {
       const mockDonations = [
@@ -80,6 +104,8 @@ describe('AnalyticsService', () => {
       expect(result).toHaveProperty('campaignsSupported');
     });
   });
+
+  // ─── exportReport ────────────────────────────────────────────────────────
 
   describe('exportReport', () => {
     it('exports a campaign report as CSV with the expected columns and row', async () => {
@@ -199,6 +225,8 @@ describe('AnalyticsService', () => {
     });
   });
 
+  // ─── getPlatformAnalytics ────────────────────────────────────────────────
+
   describe('getPlatformAnalytics', () => {
     it('should return platform analytics', async () => {
       (prisma.user.count as jest.Mock).mockResolvedValue(100);
@@ -217,7 +245,241 @@ describe('AnalyticsService', () => {
       expect(result).toHaveProperty('recent');
     });
   });
+
+  // ─── incrementDonationStats — Bug 2 (integer scaling) ───────────────────
+
+  describe('incrementDonationStats', () => {
+    it('uses HINCRBY (not HINCRBYFLOAT) with integer-scaled amount', async () => {
+      redisMock.exists.mockResolvedValueOnce(1);
+
+      // 1.50000001 × 10^8 = 150000001 — exercises all 8 decimal places
+      await AnalyticsService.incrementDonationStats('camp1', new Prisma.Decimal('1.50000001'), 'user1');
+
+      // Must NOT call hincrbyfloat
+      expect(redisMock.hincrbyfloat).not.toHaveBeenCalled();
+
+      // Must call hincrby with the integer-scaled amount
+      expect(redisMock.hincrby).toHaveBeenCalledWith(
+        'campaign:stats:camp1',
+        'totalRaised',
+        150000001,
+      );
+      expect(redisMock.hincrby).toHaveBeenCalledWith(
+        'campaign:stats:camp1',
+        'totalDonations',
+        1,
+      );
+    });
+
+    it('calls PFADD on the HLL key when userId is provided', async () => {
+      redisMock.exists.mockResolvedValueOnce(1);
+
+      await AnalyticsService.incrementDonationStats('camp1', new Prisma.Decimal('10'), 'user42');
+
+      expect(redisMock.pfadd).toHaveBeenCalledWith('campaign:donors:hll:camp1', 'user42');
+    });
+
+    it('does not call PFADD when userId is null', async () => {
+      redisMock.exists.mockResolvedValueOnce(1);
+
+      await AnalyticsService.incrementDonationStats('camp1', new Prisma.Decimal('10'), null);
+
+      expect(redisMock.pfadd).not.toHaveBeenCalled();
+    });
+
+    it('skips HINCRBY when the stats key does not exist', async () => {
+      redisMock.exists.mockResolvedValueOnce(0);
+
+      await AnalyticsService.incrementDonationStats('camp1', new Prisma.Decimal('10'), 'user1');
+
+      expect(redisMock.hincrby).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'totalRaised',
+        expect.anything(),
+      );
+    });
+  });
+
+  // ─── decrementDonationStats — Bug 1 (refund path) ───────────────────────
+
+  describe('decrementDonationStats', () => {
+    it('uses negative HINCRBY with integer-scaled amount on refund', async () => {
+      redisMock.exists.mockResolvedValueOnce(1);
+
+      await AnalyticsService.decrementDonationStats('camp1', new Prisma.Decimal('1.50000001'), 'user1');
+
+      expect(redisMock.hincrby).toHaveBeenCalledWith(
+        'campaign:stats:camp1',
+        'totalRaised',
+        -150000001,
+      );
+      expect(redisMock.hincrby).toHaveBeenCalledWith(
+        'campaign:stats:camp1',
+        'totalDonations',
+        -1,
+      );
+    });
+
+    it('skips decrement when the stats key does not exist', async () => {
+      redisMock.exists.mockResolvedValueOnce(0);
+
+      await AnalyticsService.decrementDonationStats('camp1', new Prisma.Decimal('10'), 'user1');
+
+      expect(redisMock.hincrby).not.toHaveBeenCalled();
+    });
+
+    it('does NOT call PFADD or PFDEL (no PFDEL in Redis)', async () => {
+      redisMock.exists.mockResolvedValueOnce(1);
+
+      await AnalyticsService.decrementDonationStats('camp1', new Prisma.Decimal('5'), 'user1');
+
+      expect(redisMock.pfadd).not.toHaveBeenCalled();
+      // Redis has no pfDel — verify we don't attempt anything HLL-related on decrement
+      expect(redisMock.del).not.toHaveBeenCalledWith('campaign:donors:hll:camp1');
+    });
+  });
+
+  // ─── confirm → refund → re-confirm scenario — Bug 1 ────────────────────
+
+  describe('confirm → refund → re-confirm (no key deletion race)', () => {
+    /**
+     * Simulates the acceptance-criteria sequence using only the mocks.
+     *
+     * 1. increment for a donation (key exists)
+     * 2. decrement for a refund  (key still exists — not deleted)
+     * 3. increment for another donation (key still exists — no race window)
+     */
+    it('totalRaised net is correct after confirm → refund → confirm', async () => {
+      // All three operations see an existing key
+      redisMock.exists.mockResolvedValue(1);
+
+      const callLog: Array<{ field: string; delta: number }> = [];
+      redisMock.hincrby.mockImplementation((_key: string, field: string, delta: number) => {
+        callLog.push({ field, delta });
+        return Promise.resolve(delta);
+      });
+
+      const amount1 = new Prisma.Decimal('10.00000000'); // 1_000_000_000 scaled
+      const amount2 = new Prisma.Decimal('5.00000000');  //   500_000_000 scaled
+
+      await AnalyticsService.incrementDonationStats('camp1', amount1, 'user1');
+      await AnalyticsService.decrementDonationStats('camp1', amount1, 'user1'); // full refund
+      await AnalyticsService.incrementDonationStats('camp1', amount2, 'user2');
+
+      // Net totalRaised increments (scaled integers)
+      const netRaised = callLog
+        .filter((c) => c.field === 'totalRaised')
+        .reduce((sum, c) => sum + c.delta, 0);
+
+      const expectedNet = 500_000_000; // 5 × 10^8
+      expect(netRaised).toBe(expectedNet);
+    });
+  });
+
+  // ─── getCachedCampaignStats — Bug 3 (HLL uniqueDonors) ──────────────────
+
+  describe('getCachedCampaignStats', () => {
+    it('overlays uniqueDonors from PFCOUNT when cache hit', async () => {
+      redisMock.hgetall.mockResolvedValueOnce({
+        campaignId: 'camp1',
+        totalDonations: '5',
+        totalRaised: '500000000',
+        uniqueDonors: '3', // stale value from stats hash
+      });
+      redisMock.pfcount.mockResolvedValueOnce(7); // live HLL count
+
+      const stats = await AnalyticsService.getCachedCampaignStats('camp1');
+
+      expect(stats.uniqueDonors).toBe('7');
+    });
+
+    it('falls back to hash uniqueDonors when PFCOUNT throws', async () => {
+      redisMock.hgetall.mockResolvedValueOnce({
+        campaignId: 'camp1',
+        totalDonations: '5',
+        totalRaised: '500000000',
+        uniqueDonors: '3',
+      });
+      redisMock.pfcount.mockRejectedValueOnce(new Error('Redis unavailable'));
+
+      const stats = await AnalyticsService.getCachedCampaignStats('camp1');
+
+      // Falls back to the value already in the hash
+      expect(stats.uniqueDonors).toBe('3');
+    });
+
+    it('rebuilds from DB on cache miss and seeds HLL', async () => {
+      // First hgetall returns empty (cache miss); subsequent ones return built stats
+      redisMock.hgetall.mockResolvedValueOnce({});
+      redisMock.pfcount.mockResolvedValueOnce(2);
+
+      const mockCampaign = {
+        id: 'camp1',
+        title: 'Test',
+        targetAmount: '1000',
+        currentAmount: '200',
+        status: 'ACTIVE',
+      };
+      (prisma.campaign.findUnique as jest.Mock).mockResolvedValue(mockCampaign);
+      (prisma.donation.aggregate as jest.Mock).mockResolvedValue({
+        _count: 2,
+        _sum: { amount: new Prisma.Decimal('20.00000000') },
+      });
+      (prisma.distribution.aggregate as jest.Mock).mockResolvedValue({
+        _count: 0,
+        _sum: { amount: null },
+      });
+      (prisma.donation.groupBy as jest.Mock).mockResolvedValue([
+        { userId: 'u1' },
+        { userId: 'u2' },
+      ]);
+      (prisma.beneficiaryAssignment.count as jest.Mock).mockResolvedValue(1);
+
+      const stats = await AnalyticsService.getCachedCampaignStats('camp1');
+
+      // HLL should have been seeded with both user IDs
+      expect(redisMock.pfadd).toHaveBeenCalledWith(
+        'campaign:donors:hll:camp1',
+        'u1',
+        'u2',
+      );
+      // uniqueDonors from PFCOUNT should override DB count
+      expect(stats.uniqueDonors).toBe('2');
+    });
+  });
+
+  // ─── buildCampaignStats — integer-scaled totalRaised ────────────────────
+
+  describe('buildCampaignStats', () => {
+    it('stores totalRaised as integer-scaled value (× 10^8)', async () => {
+      const mockCampaign = {
+        id: 'camp1',
+        title: 'Test',
+        targetAmount: '1000',
+        currentAmount: '200',
+        status: 'ACTIVE',
+      };
+      (prisma.campaign.findUnique as jest.Mock).mockResolvedValue(mockCampaign);
+      (prisma.donation.aggregate as jest.Mock).mockResolvedValue({
+        _count: 1,
+        _sum: { amount: new Prisma.Decimal('12.34567890') },
+      });
+      (prisma.distribution.aggregate as jest.Mock).mockResolvedValue({
+        _count: 0,
+        _sum: { amount: null },
+      });
+      (prisma.donation.groupBy as jest.Mock).mockResolvedValue([]);
+      (prisma.beneficiaryAssignment.count as jest.Mock).mockResolvedValue(0);
+
+      const stats = await AnalyticsService.buildCampaignStats('camp1');
+
+      // 12.34567890 × 10^8 = 1234567890
+      expect(stats.totalRaised).toBe('1234567890');
+    });
+  });
 });
+
+// ─── runHourlyRollup — idempotency (existing test kept intact) ──────────────
 
 describe('runHourlyRollup', () => {
   it('produces identical upsert payloads when run twice for the same hour (idempotency)', async () => {

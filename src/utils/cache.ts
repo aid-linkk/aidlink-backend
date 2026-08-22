@@ -1,5 +1,6 @@
 import redis from '../config/redis';
 import logger from '../config/logger';
+import { CACHE_PREFIX_STATS } from '../constants/cacheKeys';
 
 // ─── Key builder ───────────────────────────────────────────────────────────────
 
@@ -51,8 +52,6 @@ export async function delCache(key: string): Promise<void> {
 }
 
 // ─── Invalidations ────────────────────────────────────────────────────────────
-
-const CACHE_PREFIX_STATS = 'campaign:stats:';
 
 /**
  * Invalidate all caches related to a campaign:

@@ -87,7 +87,7 @@ export class DonationService {
       isAnonymous,
     }).catch((err) => logger.error('Webhook dispatch error (donation.confirmed):', err));
 
-    AnalyticsService.incrementDonationStats(campaignId, Number(amount)).catch((err) =>
+    AnalyticsService.incrementDonationStats(campaignId, amount, userId).catch((err) =>
       logger.error('Analytics increment error (donation.confirmed):', err),
     );
 
@@ -423,9 +423,17 @@ export class DonationService {
 
     logger.info(`Donation refunded: ${id} by user ${userId}`);
 
-    AnalyticsService.invalidateCampaignCache(donation.campaignId).catch((err) =>
-      logger.error('Failed to invalidate campaign cache on refund', err),
-    );
+    // Decrement cache counters rather than invalidating the key entirely.
+    // Invalidation creates a race window: a concurrent confirmation arriving
+    // after the delete but before the next cache rebuild runs on a missing key
+    // (redis.exists() === 0) and its increment is silently lost.
+    // By decrementing in-place we avoid deleting the key and all concurrent
+    // operations remain atomic and correctly ordered by Redis.
+    AnalyticsService.decrementDonationStats(
+      donation.campaignId,
+      donation.amount,
+      donation.userId,
+    ).catch((err) => logger.error('Failed to decrement campaign cache on refund', err));
 
     return updated;
   }
