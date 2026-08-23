@@ -1683,7 +1683,6 @@ model FraudModelVersion {
   @@index([isActive])
   @@index([version])
   @@index([calibratedAt])
-  @@index([shadowMode])
 }
 
 // Ground truth labels for KYC submissions, used for model recalibration.
