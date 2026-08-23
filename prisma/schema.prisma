@@ -553,6 +553,7 @@ model Beneficiary {
   @@index([dateOfBirth])
   @@index([country, city])
   @@index([status, country])
+  @@unique([idDocumentNumber, nationality])
   @@index([firstName(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([lastName(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([idDocumentNumber(ops: raw("gin_trgm_ops"))], type: Gin)
