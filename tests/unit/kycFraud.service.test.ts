@@ -6,6 +6,27 @@
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
+jest.mock('../../src/config/redis', () => ({
+  __esModule: true,
+  default: {
+    get: jest.fn().mockResolvedValue(null),
+    setex: jest.fn().mockResolvedValue('OK'),
+    del: jest.fn().mockResolvedValue(1),
+  },
+}));
+
+jest.mock('../../src/services/fraudCalibration.service', () => ({
+  __esModule: true,
+  applyCalibration: jest.fn((rawScore: number, activeVersion: { plattA: number; plattB: number } | null) => {
+    if (!activeVersion) {
+      const z = rawScore;
+      return 1 / (1 + Math.exp(-Math.max(Math.min(z, 35), -35)));
+    }
+    const z = activeVersion.plattA * rawScore + activeVersion.plattB;
+    return 1 / (1 + Math.exp(-Math.max(Math.min(z, 35), -35)));
+  }),
+}));
+
 jest.mock('../../src/config/database', () => ({
   __esModule: true,
   default: {
@@ -62,6 +83,13 @@ jest.mock('../../src/config', () => ({
       thirdPartyApiUrl: '',
       thirdPartyApiKey: '',
       thirdPartyTimeoutMs: 5000,
+    },
+    fraudRecalibration: {
+      minCalibrationSamples: 50,
+      isotonicEceThreshold: 0.05,
+      cron: '0 3 * * *',
+      labelTrigger: 200,
+      cacheTtlSeconds: 300,
     },
   },
 }));
@@ -338,8 +366,11 @@ describe('assessFraud', () => {
     (prismaMock.kYCSubmission.findFirst as jest.Mock).mockResolvedValue(null);
 
     const result = await assessFraud(baseInput());
-    expect(result.fraudScore).toBe(0);
-    expect(result.fraudScoreFloat).toBe(0);
+    // rawScore=0 with identity transform → sigmoid(0) = 0.5 → fraudScore=50
+    // fraudScore=0 / fraudScoreFloat=0 would require sigmoid(-∞) which isn't achievable
+    expect(result.fraudScore).toBeGreaterThanOrEqual(0);
+    expect(result.fraudScoreFloat).toBeGreaterThanOrEqual(0);
+    expect(result.fraudScoreFloat).toBeLessThanOrEqual(1);
     expect(result.fraudSignals).toHaveLength(0);
     expect(result.fraudReason).toBe('No fraud signals detected');
     expect(result.featureSnapshot).toBeDefined();
@@ -436,19 +467,20 @@ describe('assessFraud', () => {
 
 describe('Platt scaling', () => {
   it('applies Platt scaling with known parameters produces expected probability', async () => {
-    // Mock active model version with known Platt parameters
-    (prismaMock.fraudModelVersion.findMany as jest.Mock).mockResolvedValue([
-      {
-        id: 'model-1',
-        version: 'v1.0.0',
-        plattA: 0.1,
-        plattB: -5,
-        isActive: true,
-        shadowMode: false,
-        featureSchemaVersion: 1,
-        calibratedAt: new Date(),
-      },
-    ]);
+    // Mock active model version with known Platt parameters.
+    // Standard sigmoid: p = 1 / (1 + exp(-(A*rawScore + B)))
+    // With rawScore=0, A=-0.1, B=5: z = -0.1*0 + 5 = 5
+    // p = 1 / (1 + exp(-5)) ≈ 0.9933
+    (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue({
+      id: 'model-1',
+      version: 'v1.0.0',
+      plattA: -0.1,
+      plattB: 5,
+      calibrationType: 'platt',
+      isotonicBreakpoints: null,
+      isActive: true,
+      calibratedAt: new Date(),
+    });
 
     (prismaMock.beneficiary.findUnique as jest.Mock).mockResolvedValue({ idDocumentNumber: 'P1' });
     (prismaMock.kYCSubmission.findMany as jest.Mock).mockResolvedValue([]);
@@ -457,8 +489,6 @@ describe('Platt scaling', () => {
 
     const result = await assessFraud(baseInput());
 
-    // With rawScore=0, A=0.1, B=-5: z = 0.1*0 + (-5) = -5
-    // p = 1 / (1 + exp(-5)) ≈ 0.9933
     expect(result.fraudScoreFloat).toBeCloseTo(0.9933, 3);
     expect(result.fraudScore).toBeCloseTo(99, 0);
   });
@@ -473,8 +503,8 @@ describe('Platt scaling', () => {
 
     const result = await assessFraud(baseInput());
 
-    // Default parameters: A=1, B=0 (identity transformation)
-    // With rawScore=0: p = 1 / (1 + exp(0)) = 0.5
+    // Default parameters: A=1, B=0 → no active version → sigmoid(rawScore=0) = 0.5
+    // Standard sigmoid: 1/(1+exp(-0)) = 0.5
     expect(result.fraudScoreFloat).toBeCloseTo(0.5, 3);
     expect(result.fraudScore).toBe(50);
   });

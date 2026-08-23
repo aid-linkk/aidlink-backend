@@ -13,6 +13,17 @@ jest.mock('../utils/cache', () => ({
   buildKey: jest.fn((namespace: string, key: string) => `${namespace}:${key}`),
 }));
 
+// Mirrors the private encodeCursor() in search.service.ts (v2 cursor format:
+// { v: 2, score, id }). Kept in sync manually since the encoder isn't exported.
+function buildCursor(score: number, id: string, overrides: Record<string, unknown> = {}): string {
+  return Buffer.from(JSON.stringify({ v: 2, score, id, ...overrides })).toString('base64');
+}
+
+// A pre-fix (v1, unversioned) cursor, as an old client might still be holding.
+function buildLegacyCursor(score: number, id: string): string {
+  return Buffer.from(JSON.stringify({ score, id })).toString('base64');
+}
+
 describe('SearchService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -773,7 +784,7 @@ describe('SearchService', () => {
     });
 
     it('uses cursor to fetch next page', async () => {
-      const cursor = Buffer.from(JSON.stringify({ score: 0.8, id: 'camp-2' })).toString('base64');
+      const cursor = buildCursor(0.8, 'camp-2');
 
       (prisma.$queryRaw as jest.Mock)
         .mockResolvedValueOnce([
@@ -893,6 +904,129 @@ describe('SearchService', () => {
       });
 
       expect(result.pagination).toHaveProperty('nextCursor');
+    });
+
+    it('round-trips a float4-precision-busting score through the cursor without corrupting it', async () => {
+      // word_similarity() returns a float4; widened to a JS double this looks like
+      // 0.5000001192092896 rather than a clean 0.5 — the exact scenario that broke
+      // the pre-fix cursor's JSON-number encoding and the WHERE-clause comparison.
+      const trickyScore = 0.5000001192092896;
+
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'camp-9', score: trickyScore }])
+        .mockResolvedValueOnce([{ count: 5 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        { id: 'camp-9', title: 'Relief', organization: { name: 'Org' }, _count: { donations: 0, beneficiaries: 0 } },
+      ]);
+
+      const page1 = await SearchService.searchCampaigns({
+        query: 'relief',
+        sortBy: 'relevance',
+        page: 1,
+        limit: 1,
+      });
+
+      const cursor = page1.pagination.nextCursor!;
+      const decoded = JSON.parse(Buffer.from(cursor, 'base64').toString('utf-8'));
+
+      // The score survives the encode/decode round trip bit-for-bit (JSON number
+      // round-tripping is lossless in JS; the bug was never really here, but this
+      // pins the behavior so a future encoding change can't silently reintroduce it).
+      expect(decoded.score).toBe(trickyScore);
+      expect(decoded.v).toBe(2);
+
+      (prisma.$queryRaw as jest.Mock).mockReset();
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'camp-8', score: 0.4 }])
+        .mockResolvedValueOnce([{ count: 5 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        { id: 'camp-8', title: 'Relief 2', organization: { name: 'Org' }, _count: { donations: 0, beneficiaries: 0 } },
+      ]);
+
+      await SearchService.searchCampaigns({
+        query: 'relief',
+        sortBy: 'relevance',
+        page: 2,
+        limit: 1,
+        cursor,
+      });
+
+      const rankedCall = (prisma.$queryRaw as jest.Mock).mock.calls[0][0] as {
+        text: string;
+        values: unknown[];
+      };
+
+      // The cursor value sent back to Postgres is the exact same double we decoded —
+      // no truncation or re-rounding on the way back into the query.
+      expect(rankedCall.values).toContain(trickyScore);
+      // Both sides of the comparison are explicitly cast to the same type, and the
+      // comparison is decomposed instead of relying on tuple-comparison promotion.
+      expect(rankedCall.text).toMatch(/CAST\(.*AS DOUBLE PRECISION\)/s);
+      expect(rankedCall.text).toMatch(/CAST\(\$\d+ AS DOUBLE PRECISION\)/);
+      expect(rankedCall.text).not.toMatch(/\(score, id\)/);
+    });
+
+    it('treats a pre-fix (unversioned) cursor as absent instead of misinterpreting its score', async () => {
+      const legacyCursor = buildLegacyCursor(0.8, 'camp-2');
+
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'camp-1', score: 0.9 }])
+        .mockResolvedValueOnce([{ count: 1 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        { id: 'camp-1', title: 'Test', organization: { name: 'Org' }, _count: { donations: 0, beneficiaries: 0 } },
+      ]);
+
+      await expect(
+        SearchService.searchCampaigns({
+          query: 'test',
+          sortBy: 'relevance',
+          page: 2,
+          limit: 1,
+          cursor: legacyCursor,
+        })
+      ).resolves.toBeDefined();
+
+      const rankedCall = (prisma.$queryRaw as jest.Mock).mock.calls[0][0] as { text: string; values: unknown[] };
+      // The legacy cursor's score never reaches the query — it's silently dropped,
+      // and the query runs as an unfiltered first page instead.
+      expect(rankedCall.values).not.toContain(0.8);
+      expect(rankedCall.text).not.toMatch(/OR \(/);
+    });
+
+    it('handles a manipulated cursor score without crashing or leaking extra rows', async () => {
+      const tamperedCursor = buildCursor(-1, 'camp-legit');
+
+      (prisma.$queryRaw as jest.Mock).mockResolvedValueOnce([]).mockResolvedValueOnce([{ count: 0 }]);
+
+      const result = await SearchService.searchCampaigns({
+        query: 'relief',
+        sortBy: 'relevance',
+        page: 2,
+        limit: 10,
+        cursor: tamperedCursor,
+      });
+
+      expect(result.data).toEqual([]);
+
+      const rankedCall = (prisma.$queryRaw as jest.Mock).mock.calls[0][0] as { text: string; values: unknown[] };
+      // The tampered value is bound as a parameter (never string-concatenated), and the
+      // score threshold filter (`> 0.2`) still applies regardless of the cursor.
+      expect(rankedCall.values).toContain(-1);
+      expect(rankedCall.text).toMatch(/> 0\.2/);
+    });
+
+    it('applies COALESCE around the description score for campaigns, matching donation search', async () => {
+      (prisma.$queryRaw as jest.Mock)
+        .mockResolvedValueOnce([{ id: 'camp-1', score: 0.5 }])
+        .mockResolvedValueOnce([{ count: 1 }]);
+      (prisma.campaign.findMany as jest.Mock).mockResolvedValue([
+        { id: 'camp-1', title: 'Test', organization: { name: 'Org' }, _count: { donations: 0, beneficiaries: 0 } },
+      ]);
+
+      await SearchService.searchCampaigns({ query: 'test', sortBy: 'relevance', page: 1, limit: 20 });
+
+      const rankedCall = (prisma.$queryRaw as jest.Mock).mock.calls[0][0] as { text: string };
+      expect(rankedCall.text).toMatch(/COALESCE\(\s*word_similarity\(\$\d+, description\),\s*0\s*\)/);
     });
   });
 });

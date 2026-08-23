@@ -927,8 +927,12 @@ model BlockchainTransaction {
   contractAddress String?
   functionName    String?
   parameters      Json?
+  /// PENDING | CONFIRMED | FAILED | ORPHANED
+  /// ORPHANED rows were on a minority fork and have been superseded by the
+  /// canonical ledger version. They are retained for audit purposes.
   status          String          @default("PENDING")
   blockNumber     BigInt?
+  ledgerHash      String?         // hash of the ledger that contained this tx
   timestamp       DateTime?
   indexed         Boolean         @default(false)
   createdAt       DateTime        @default(now())
@@ -939,6 +943,23 @@ model BlockchainTransaction {
   @@index([status])
   @@index([indexed])
   @@index([blockNumber])
+  @@index([ledgerHash])
+}
+
+// ============================================
+// INDEXER
+// ============================================
+
+/// Persists the indexer's cursor so that on restart it resumes from the
+/// last successfully processed ledger instead of re-scanning from tip-1000.
+/// There is exactly one row in this table (id = "singleton").
+model IndexerCheckpoint {
+  id            String   @id @default("singleton")
+  /// Ledger sequence number of the last successfully processed ledger
+  lastSequence  Int      @default(0)
+  /// Hash of the last successfully processed ledger (for reorg detection)
+  lastHash      String   @default("")
+  updatedAt     DateTime @updatedAt
 }
 
 model ContractEvent {
@@ -1644,12 +1665,12 @@ model FraudModelVersion {
   version              String   @unique // e.g., "v1.0.0"
   plattA               Float    // A parameter for Platt scaling
   plattB               Float    // B parameter for Platt scaling
+  /// "platt" | "isotonic" — which calibration layer is active for this version
+  calibrationType      String   @default("platt")
+  /// Non-null when calibrationType = "isotonic".
+  /// Serialised as [{ score: number, probability: number }, ...] in ascending score order.
+  isotonicBreakpoints  Json?
   isActive             Boolean  @default(true)
-  // true for a candidate being scored on live traffic but not yet used for decisions
-  shadowMode           Boolean  @default(false)
-  // Bumped when assessFraud()'s computed feature set changes; labels are only used to fit
-  // parameters for a version sharing the same featureSchemaVersion.
-  featureSchemaVersion Int      @default(1)
   calibratedAt         DateTime @default(now())
   calibratedBy         String?  // User who calibrated this version
   ece                  Float?   // Expected Calibration Error (from evaluation)
@@ -1657,7 +1678,7 @@ model FraudModelVersion {
   metadata             Json?    // Additional version metadata
   createdAt            DateTime @default(now())
 
-  fraudLabels          FraudLabel[]
+  fraudLabels     FraudLabel[]
 
   @@index([isActive])
   @@index([version])

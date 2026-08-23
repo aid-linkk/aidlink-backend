@@ -86,6 +86,44 @@ export const config = {
     networkPassphrase: process.env.SOROBAN_NETWORK_PASSPHRASE!,
     contractAddress: process.env.CONTRACT_ADDRESS,
   },
+
+  indexer: {
+    /**
+     * Horizon REST API base URL.
+     * Defaults to the public Stellar mainnet Horizon; override for testnet or
+     * a local standalone network.
+     */
+    horizonUrl: process.env.HORIZON_URL || 'https://horizon-testnet.stellar.org',
+
+    /**
+     * Maximum number of ledgers to process per indexLoop() tick when
+     * catching up after a gap.  Smaller values reduce per-tick DB write
+     * latency; larger values close gaps faster.
+     * Default: 50
+     */
+    batchSize: parseInt(process.env.SOROBAN_INDEXER_BATCH_SIZE || '50', 10),
+
+    /**
+     * Maximum Horizon / Soroban-RPC requests per second.
+     * The token-bucket rate limiter will block until a token is available.
+     * Default: 5 (conservative; Horizon public instances allow ~20 rps but
+     * we share bandwidth with other consumers).
+     */
+    rpsLimit: parseInt(process.env.SOROBAN_INDEXER_RPS_LIMIT || '5', 10),
+
+    /**
+     * How long to wait between normal (non-catch-up) loop ticks in ms.
+     * Default: 10 000 (10 s) — Stellar closes a new ledger every ~5 s so
+     * this is a 2× safety margin with minimal overhead.
+     */
+    pollIntervalMs: parseInt(process.env.SOROBAN_INDEXER_POLL_INTERVAL_MS || '10000', 10),
+
+    /**
+     * How long to wait after a fatal error before retrying the loop in ms.
+     * Default: 30 000
+     */
+    errorBackoffMs: parseInt(process.env.SOROBAN_INDEXER_ERROR_BACKOFF_MS || '30000', 10),
+  },
   
   rateLimit: {
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
@@ -164,6 +202,39 @@ export const config = {
     thirdPartyApiUrl: process.env.KYC_FRAUD_THIRD_PARTY_API_URL || '',
     thirdPartyApiKey: process.env.KYC_FRAUD_THIRD_PARTY_API_KEY || '',
     thirdPartyTimeoutMs: parseInt(process.env.KYC_FRAUD_THIRD_PARTY_TIMEOUT_MS || '5000', 10),
+  },
+
+  fraudRecalibration: {
+    /**
+     * Minimum labels of each class (APPROVED and REJECTED) required before
+     * the re-calibration job attempts a fit.  Default: 50.
+     */
+    minCalibrationSamples: parseInt(process.env.FRAUD_MIN_CALIBRATION_SAMPLES || '50', 10),
+
+    /**
+     * If the Platt-fitted model's validation ECE exceeds this threshold, the
+     * job falls back to isotonic regression.  Default: 0.05.
+     */
+    isotonicEceThreshold: parseFloat(process.env.FRAUD_ISOTONIC_ECE_THRESHOLD || '0.05'),
+
+    /**
+     * Cron expression for the periodic recalibration job.
+     * Default: 0 3 * * * (3 AM UTC daily).
+     */
+    cron: process.env.FRAUD_RECALIBRATION_CRON || '0 3 * * *',
+
+    /**
+     * Number of new labels (since last calibration) that trigger an
+     * immediate recalibration job enqueue.  Default: 200.
+     */
+    labelTrigger: parseInt(process.env.FRAUD_RECALIBRATION_LABEL_TRIGGER || '200', 10),
+
+    /**
+     * Redis cache TTL for the active model version parameters, in seconds.
+     * After a version swap the worker invalidates the cache immediately;
+     * this TTL only applies to cache misses under Redis failure.  Default: 300 s.
+     */
+    cacheTtlSeconds: parseInt(process.env.FRAUD_MODEL_CACHE_TTL_SECONDS || '300', 10),
   },
 
   analytics: {
