@@ -443,6 +443,22 @@ export const ErrorCodes = {
     solution: 'Verify the batch job ID.',
   },
 
+  // ── FRAUD (model version lifecycle) ────────────────────────────────
+  FRAUD_001: {
+    httpStatus: 400,
+    message: 'FRAUD_MODEL_VERSION_NOT_READY: candidate version does not meet promotion thresholds',
+    cause: 'promoteVersion() was called for a candidate whose ECE/AUC have not been computed yet, ' +
+      'or whose ECE >= 0.05 or AUC <= 0.75.',
+    solution: 'Run calibration evaluation on the candidate (see fraudCalibration.service) and retry ' +
+      'promotion only once ECE < 0.05 and AUC > 0.75.',
+  },
+  FRAUD_002: {
+    httpStatus: 404,
+    message: 'Fraud model version not found',
+    cause: 'No FraudModelVersion exists for the given ID.',
+    solution: 'Verify the version ID, e.g. the one returned by createCandidateVersion().',
+  },
+
   // ── USER (dashboard: profile, privacy, security) ──────────────────────
   USER_001: {
     httpStatus: 409,

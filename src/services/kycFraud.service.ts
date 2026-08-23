@@ -1,4 +1,5 @@
 import prisma from '../config/database';
+import redis from '../config/redis';
 import { config } from '../config';
 import logger from '../config/logger';
 import { getOrSet, delCache, buildKey } from '../utils/cache';
@@ -28,6 +29,9 @@ export interface FraudAssessment {
     signals: FraudSignal[];
     interactionFeatures: InteractionFeatures;
   };
+  // Calibrated probability from a shadow (candidate) FraudModelVersion, present only when
+  // one exists. Never used for the decision — that's always fraudScore/fraudScoreFloat.
+  shadowScore?: number;
 }
 
 export interface InteractionFeatures {
@@ -463,6 +467,22 @@ export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
       ? signals.map((s) => s.detail).join('; ')
       : 'No fraud signals detected';
 
+  // Shadow scoring: score under the candidate's Platt parameters for A/B comparison, but
+  // never use it for the decision. Short-circuits with zero extra work when no candidate
+  // is in shadow mode.
+  let shadowScore: number | undefined;
+  if (candidate) {
+    shadowScore = applyPlattScaling(rawScore, { A: candidate.plattA, B: candidate.plattB });
+    try {
+      await prisma.kYCSubmission.update({
+        where: { id: input.submissionId },
+        data: { shadowScore },
+      });
+    } catch (error) {
+      logger.warn('Failed to persist shadow score', { error, submissionId: input.submissionId });
+    }
+  }
+
   return {
     fraudScore,
     fraudScoreFloat,
@@ -473,6 +493,7 @@ export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
       signals,
       interactionFeatures,
     },
+    ...(shadowScore !== undefined ? { shadowScore } : {}),
   };
 }
 
@@ -515,6 +536,7 @@ export async function createFraudLabel(
         reviewedBy,
         reviewedAt: new Date(),
         featureSnapshot: assessment.featureSnapshot as any,
+        featureSchemaVersion: activeVersion.featureSchemaVersion,
         fraudScore: assessment.fraudScore,
         fraudScoreFloat: assessment.fraudScoreFloat,
       },
