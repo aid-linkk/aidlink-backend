@@ -54,6 +54,14 @@ export interface FraudInput {
   deviceFingerprint?: string | null;
   claimedCountry?: string | null;
   claimedCity?: string | null;
+  /**
+   * The createdAt timestamp of the current KYC submission.
+   * Used by checkGeoAnomaly() to compute time-delta against prior submissions
+   * using submission timestamps rather than Date.now(), so delayed fraud-detection
+   * jobs (e.g. queued during a worker outage) still see the correct delta.
+   * Defaults to Date.now() if not provided, but callers should always supply it.
+   */
+  submittedAt?: Date;
 }
 
 // ─── Document Reuse Detection ─────────────────────────────────────────────────
@@ -168,48 +176,146 @@ export async function checkDeviceFingerprint(input: FraudInput): Promise<FraudSi
 
 // ─── Geographic Anomaly Detection ─────────────────────────────────────────────
 
+/**
+ * Load country centroid data at module initialisation time.
+ * The JSON file is bundled in the repository so there is no external API call at
+ * assessment time — the entire lookup is an in-process object property access.
+ */
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const COUNTRY_CENTROIDS: Record<string, { lat: number; lng: number }> = require('../../data/country-centroids.json');
+
+/**
+ * Haversine great-circle distance between two lat/lng points (in km).
+ *
+ * Formula:
+ *   Δlat = lat2 − lat1  (radians)
+ *   Δlng = lng2 − lng1  (radians)
+ *   a    = sin²(Δlat/2) + cos(lat1)·cos(lat2)·sin²(Δlng/2)
+ *   c    = 2·atan2(√a, √(1−a))
+ *   d    = R·c           (R = 6371 km)
+ */
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * Check a single (from, to) country pair for impossible travel given the elapsed
+ * hours between them. Returns a FraudSignal or null.
+ *
+ * Priority:
+ * 1. Both countries have centroids → Haversine speed check (high/medium by speed).
+ * 2. One or both countries missing centroids → fall back to continent-level check
+ *    with severity capped at 'medium' (reduced precision).
+ */
+function checkCountryPair(
+  fromCountry: string,
+  toCountry: string,
+  hoursDiff: number,
+): FraudSignal | null {
+  if (fromCountry === toCountry) return null;
+
+  // Avoid division by zero; sub-second hops are treated as 0.001 h (~3.6 seconds)
+  const effectiveHours = Math.max(hoursDiff, 0.001);
+
+  const fromCentroid = COUNTRY_CENTROIDS[fromCountry.toUpperCase()];
+  const toCentroid = COUNTRY_CENTROIDS[toCountry.toUpperCase()];
+
+  if (fromCentroid && toCentroid) {
+    // Primary path: Haversine speed check
+    const distanceKm = haversineKm(fromCentroid.lat, fromCentroid.lng, toCentroid.lat, toCentroid.lng);
+    const speedKmh = distanceKm / effectiveHours;
+
+    if (speedKmh > config.kycFraud.geoMaxPlausibleSpeedKmh) {
+      return {
+        signal: 'geoAnomaly',
+        severity: 'high',
+        detail: `Impossible travel: ${fromCountry} → ${toCountry} in ${hoursDiff.toFixed(2)}h (~${Math.round(distanceKm)} km, ~${Math.round(speedKmh)} km/h)`,
+      };
+    }
+    return null;
+  }
+
+  // Fallback path: one or both country codes not in centroid dataset
+  // Use continent-level check with severity capped at 'medium'
+  const continentMap = buildContinentMap();
+  const fromContinent = continentMap[fromCountry.toUpperCase()];
+  const toContinent = continentMap[toCountry.toUpperCase()];
+
+  if (fromContinent && toContinent && fromContinent !== toContinent && hoursDiff < 2) {
+    return {
+      signal: 'geoAnomaly',
+      severity: 'medium',
+      detail: `Possible impossible travel (coarse check): ${fromCountry} → ${toCountry} in ${hoursDiff.toFixed(2)}h (centroid data unavailable)`,
+    };
+  }
+
+  if (hoursDiff < 0.5) {
+    return {
+      signal: 'geoAnomaly',
+      severity: 'medium',
+      detail: `Country changed from ${fromCountry} to ${toCountry} in ${(hoursDiff * 60).toFixed(0)} minutes (centroid data unavailable)`,
+    };
+  }
+
+  return null;
+}
+
 export async function checkGeoAnomaly(input: FraudInput): Promise<FraudSignal | null> {
   if (!input.claimedCountry) return null;
 
-  // Look at the most recent prior submission for this user that has a claimed country
-  const prior = await prisma.kYCSubmission.findFirst({
+  const { geoAnomalyLookback } = config.kycFraud;
+
+  // Retrieve the last N prior submissions (chronological order: oldest first)
+  const priors = await prisma.kYCSubmission.findMany({
     where: {
       userId: input.userId,
       id: { not: input.submissionId },
       beneficiary: { country: { not: '' } },
     },
     orderBy: { createdAt: 'desc' },
+    take: geoAnomalyLookback,
     include: { beneficiary: { select: { country: true } } },
   });
 
-  if (!prior?.beneficiary?.country) return null;
+  if (priors.length === 0) return null;
 
-  const priorCountry = prior.beneficiary.country;
-  if (priorCountry === input.claimedCountry) return null;
+  // Reverse to get chronological order (oldest → newest) for sequential pair iteration
+  const chronological = [...priors].reverse();
 
-  // Calculate time delta
-  const hoursDiff =
-    (Date.now() - new Date(prior.createdAt).getTime()) / (1000 * 60 * 60);
+  // The current submission's effective timestamp — use the passed-in submittedAt if available
+  // so that delayed fraud-detection jobs still see the correct delta.
+  const currentTs = input.submittedAt ?? new Date();
 
-  // Rough "impossible travel": different continents in under 2 hours
-  const continentMap: Record<string, string> = buildContinentMap();
-  const priorContinent = continentMap[priorCountry.toUpperCase()];
-  const currContinent = continentMap[input.claimedCountry.toUpperCase()];
+  // Build the full sequence: ...prior submissions... + current
+  // Each element: { country, createdAt }
+  const sequence: Array<{ country: string; createdAt: Date }> = [
+    ...chronological
+      .filter(p => p.beneficiary?.country)
+      .map(p => ({ country: p.beneficiary!.country!, createdAt: new Date(p.createdAt) })),
+    { country: input.claimedCountry, createdAt: currentTs },
+  ];
 
-  if (priorContinent && currContinent && priorContinent !== currContinent && hoursDiff < 2) {
-    return {
-      signal: 'geoAnomaly',
-      severity: 'high',
-      detail: `Impossible travel: ${priorCountry} → ${input.claimedCountry} in ${hoursDiff.toFixed(1)}h`,
-    };
-  }
+  // Check each consecutive pair in the sequence for impossible travel
+  for (let i = sequence.length - 2; i >= 0; i--) {
+    const from = sequence[i];
+    const to = sequence[i + 1];
 
-  if (priorCountry !== input.claimedCountry && hoursDiff < 0.5) {
-    return {
-      signal: 'geoAnomaly',
-      severity: 'medium',
-      detail: `Country changed from ${priorCountry} to ${input.claimedCountry} in ${(hoursDiff * 60).toFixed(0)} minutes`,
-    };
+    const hoursDiff =
+      (to.createdAt.getTime() - from.createdAt.getTime()) / (1000 * 60 * 60);
+
+    // Skip pairs where current entry is not later than prior (clock skew guard)
+    if (hoursDiff < 0) continue;
+
+    const signal = checkCountryPair(from.country, to.country, hoursDiff);
+    if (signal) return signal;
   }
 
   return null;
@@ -288,6 +394,11 @@ interface ActiveVersionCache {
   isotonicBreakpoints: unknown | null;
 }
 
+interface ModelVersionPair {
+  active: ActiveVersionCache;
+  candidate: { id: string; plattA: number; plattB: number } | null;
+}
+
 /** Default: identity Platt transform — maps raw score directly through sigmoid */
 const DEFAULT_VERSION_CACHE: ActiveVersionCache = {
   id: '',
@@ -298,23 +409,28 @@ const DEFAULT_VERSION_CACHE: ActiveVersionCache = {
 };
 
 /**
- * Fetch the active FraudModelVersion, backed by Redis.
+ * Fetch the active FraudModelVersion and optional shadow candidate, backed by Redis.
  * TTL is config.fraudRecalibration.cacheTtlSeconds (default 300 s).
  *
- * On cache miss the DB is queried; on Redis failure the DB is used directly.
+ * Returns both the active version (used for the decision) and a candidate version
+ * in shadow mode (used for A/B scoring only — never affects the decision).
+ *
+ * On cache miss the DB is queried via findMany; on Redis failure the DB is used directly.
  * After a recalibration version swap the worker calls
  * delCache(FRAUD_MODEL_PARAMS_CACHE_KEY) to force an immediate refresh.
  */
-async function getActiveModelVersion(): Promise<ActiveVersionCache> {
+async function getModelVersions(): Promise<ModelVersionPair> {
   const ttl = config.fraudRecalibration.cacheTtlSeconds;
 
-  return getOrSet<ActiveVersionCache>(
+  return getOrSet<ModelVersionPair>(
     FRAUD_MODEL_PARAMS_CACHE_KEY,
     ttl,
     async () => {
       try {
-        const v = await prisma.fraudModelVersion.findFirst({
-          where: { isActive: true },
+        const versions = await prisma.fraudModelVersion.findMany({
+          where: {
+            OR: [{ isActive: true }, { shadowMode: true }],
+          },
           orderBy: { calibratedAt: 'desc' },
           select: {
             id: true,
@@ -322,25 +438,44 @@ async function getActiveModelVersion(): Promise<ActiveVersionCache> {
             plattB: true,
             calibrationType: true,
             isotonicBreakpoints: true,
+            isActive: true,
+            shadowMode: true,
           },
         });
 
-        if (v) {
-          return {
-            id: v.id,
-            plattA: v.plattA,
-            plattB: v.plattB,
-            calibrationType: v.calibrationType,
-            isotonicBreakpoints: v.isotonicBreakpoints,
-          };
-        }
-      } catch (error) {
-        logger.warn('Failed to fetch active model version, using defaults', { error });
-      }
+        const activeRow = versions.find((v: any) => v.isActive);
+        const candidateRow = versions.find((v: any) => v.shadowMode && !v.isActive);
 
-      return DEFAULT_VERSION_CACHE;
+        const active: ActiveVersionCache = activeRow
+          ? {
+              id: activeRow.id,
+              plattA: activeRow.plattA,
+              plattB: activeRow.plattB,
+              calibrationType: activeRow.calibrationType,
+              isotonicBreakpoints: activeRow.isotonicBreakpoints,
+            }
+          : DEFAULT_VERSION_CACHE;
+
+        const candidate = candidateRow
+          ? { id: candidateRow.id, plattA: candidateRow.plattA, plattB: candidateRow.plattB }
+          : null;
+
+        return { active, candidate };
+      } catch (error) {
+        logger.warn('Failed to fetch model versions, using defaults', { error });
+        return { active: DEFAULT_VERSION_CACHE, candidate: null };
+      }
     },
   );
+}
+
+/**
+ * Fetch just the active model version (used by routeCalibration).
+ * Delegates to getModelVersions() so we only hit the DB once per cache window.
+ */
+async function getActiveModelVersion(): Promise<ActiveVersionCache> {
+  const pair = await getModelVersions();
+  return pair.active;
 }
 
 /**
@@ -349,6 +484,16 @@ async function getActiveModelVersion(): Promise<ActiveVersionCache> {
  */
 export async function invalidateFraudModelCache(): Promise<void> {
   await delCache(FRAUD_MODEL_PARAMS_CACHE_KEY);
+}
+
+/**
+ * Apply Platt sigmoid scaling to a raw score.
+ * p = 1 / (1 + exp(-(A * rawScore + B)))
+ */
+function applyPlattScaling(rawScore: number, params: { A: number; B: number }): number {
+  const z = params.A * rawScore + params.B;
+  const clampedZ = Math.max(Math.min(z, 35), -35);
+  return 1 / (1 + Math.exp(-clampedZ));
 }
 
 // ─── Third-Party Fraud Service ────────────────────────────────────────────────
@@ -455,7 +600,7 @@ export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
   rawScore = Math.max(0, Math.min(rawScore, 100));
 
   // Apply calibration — routes to Platt or isotonic based on the active version
-  const activeVersion = await getActiveModelVersion();
+  const { active: activeVersion, candidate } = await getModelVersions();
   const calibratedProbability = routeCalibration(rawScore, activeVersion.id ? activeVersion : null);
 
   // Convert to integer score for UI compatibility (0-100)
