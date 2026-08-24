@@ -495,44 +495,39 @@ export class SearchService {
     
     const whereSql = conditions.length ? Prisma.join(conditions, ' AND ') : Prisma.sql`TRUE`;
 
-    // Use word_similarity for trigram-based relevance scoring. word_similarity() returns
-    // a float4 (real); explicitly casting to double precision makes every occurrence of
-    // this expression (SELECT, threshold filter, cursor comparison) compare in the same
-    // Postgres type, and makes the value we hand back to JS the same one we compare
-    // against on the next page — see decodeCursor/encodeCursor above.
-    const scoreExpr = Prisma.sql`CAST(GREATEST(
-      word_similarity(${query}, title),
-      COALESCE(word_similarity(${query}, description), 0)
-    ) AS DOUBLE PRECISION)`;
+    // Build weighted relevance score using LIKE patterns
+    // Title is weighted higher than description for better relevance
+    const patterns = buildLikePatterns(query);
+    const titleScore = likeScoreCase('title', CAMPAIGN_FIELD_WEIGHTS.title, patterns);
+    const descScore = likeScoreCase('description', CAMPAIGN_FIELD_WEIGHTS.description, patterns);
+    const scoreExpr = Prisma.sql`(${titleScore} + ${descScore})`;
 
-    // Build cursor condition if provided. Postgres does not allow referencing a SELECT-list
-    // alias (e.g. bare "score") from the same query's WHERE clause, so the expression is
-    // repeated rather than aliased. The (score, id) < (x, y) row-comparison form is also
-    // avoided in favor of an explicit OR, so both operands of every comparison have a
-    // known, matching type instead of relying on implicit tuple-comparison promotion.
+    // Build cursor condition if provided
     let cursorCondition = Prisma.sql``;
     const decodedCursor = safeDecodeCursor(cursor);
     if (decodedCursor) {
       const { score: lastScore, id: lastId } = decodedCursor;
       cursorCondition = Prisma.sql` AND (
-        ${scoreExpr} < CAST(${lastScore} AS DOUBLE PRECISION)
-        OR (${scoreExpr} = CAST(${lastScore} AS DOUBLE PRECISION) AND id < ${lastId})
+        ${scoreExpr} < ${lastScore}
+        OR (${scoreExpr} = ${lastScore} AND id < ${lastId})
       )`;
     }
 
+    // Only return results with score > 0 (at least one match)
     const [rankedRows, countRows] = await Promise.all([
       prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
         SELECT id, ${scoreExpr} AS score
         FROM "Campaign"
         WHERE ${whereSql}
-          AND (${scoreExpr} > 0.2${cursorCondition})
+          AND ${scoreExpr} > 0
+          ${cursorCondition}
         ORDER BY score DESC, id DESC
         LIMIT ${normalizedLimit}
       `),
       prisma.$queryRaw<Array<{ count: number }>>(Prisma.sql`
         SELECT COUNT(*)::int AS count
         FROM "Campaign"
-        WHERE ${whereSql} AND ${scoreExpr} > 0.2
+        WHERE ${whereSql} AND ${scoreExpr} > 0
       `),
     ]);
     
@@ -592,38 +587,38 @@ export class SearchService {
     
     const whereSql = conditions.length ? Prisma.join(conditions, ' AND ') : Prisma.sql`TRUE`;
 
-    // See searchCampaignsByRelevance for why the score is cast to double precision and
-    // why the cursor comparison repeats the expression via an explicit OR instead of
-    // referencing the "score" alias or using tuple comparison.
-    const scoreExpr = Prisma.sql`CAST(GREATEST(
-      COALESCE(word_similarity(${query}, memo), 0),
-      COALESCE(word_similarity(${query}, "fromWallet"), 0),
-      COALESCE(word_similarity(${query}, "donorMessage"), 0)
-    ) AS DOUBLE PRECISION)`;
+    // Build weighted relevance score using LIKE patterns
+    const patterns = buildLikePatterns(query);
+    const memoScore = likeScoreCase('memo', DONATION_FIELD_WEIGHTS.memo, patterns);
+    const walletScore = likeScoreCase('"fromWallet"', DONATION_FIELD_WEIGHTS.fromWallet, patterns);
+    const messageScore = likeScoreCase('"donorMessage"', DONATION_FIELD_WEIGHTS.donorMessage, patterns);
+    const scoreExpr = Prisma.sql`(${memoScore} + ${walletScore} + ${messageScore})`;
 
     let cursorCondition = Prisma.sql``;
     const decodedCursor = safeDecodeCursor(cursor);
     if (decodedCursor) {
       const { score: lastScore, id: lastId } = decodedCursor;
       cursorCondition = Prisma.sql` AND (
-        ${scoreExpr} < CAST(${lastScore} AS DOUBLE PRECISION)
-        OR (${scoreExpr} = CAST(${lastScore} AS DOUBLE PRECISION) AND id < ${lastId})
+        ${scoreExpr} < ${lastScore}
+        OR (${scoreExpr} = ${lastScore} AND id < ${lastId})
       )`;
     }
 
+    // Only return results with score > 0 (at least one match)
     const [rankedRows, countRows] = await Promise.all([
       prisma.$queryRaw<Array<{ id: string; score: number }>>(Prisma.sql`
         SELECT id, ${scoreExpr} AS score
         FROM "Donation"
         WHERE ${whereSql}
-          AND (${scoreExpr} > 0.2${cursorCondition})
+          AND ${scoreExpr} > 0
+          ${cursorCondition}
         ORDER BY score DESC, id DESC
         LIMIT ${normalizedLimit}
       `),
       prisma.$queryRaw<Array<{ count: number }>>(Prisma.sql`
         SELECT COUNT(*)::int AS count
         FROM "Donation"
-        WHERE ${whereSql} AND ${scoreExpr} > 0.2
+        WHERE ${whereSql} AND ${scoreExpr} > 0
       `),
     ]);
     
