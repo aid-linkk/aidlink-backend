@@ -54,6 +54,7 @@ export interface FraudInput {
   deviceFingerprint?: string | null;
   claimedCountry?: string | null;
   claimedCity?: string | null;
+  submittedAt?: Date;
 }
 
 // ─── Document Reuse Detection ─────────────────────────────────────────────────
@@ -168,55 +169,37 @@ export async function checkDeviceFingerprint(input: FraudInput): Promise<FraudSi
 
 // ─── Geographic Anomaly Detection ─────────────────────────────────────────────
 
-export async function checkGeoAnomaly(input: FraudInput): Promise<FraudSignal | null> {
-  if (!input.claimedCountry) return null;
+import countryCentroids from '../../data/country-centroids.json';
 
-  // Look at the most recent prior submission for this user that has a claimed country
-  const prior = await prisma.kYCSubmission.findFirst({
-    where: {
-      userId: input.userId,
-      id: { not: input.submissionId },
-      beneficiary: { country: { not: '' } },
-    },
-    orderBy: { createdAt: 'desc' },
-    include: { beneficiary: { select: { country: true } } },
-  });
+const GEO_ANOMALY_LOOKBACK = parseInt(process.env.GEO_ANOMALY_LOOKBACK || '5', 10);
+const EARTH_RADIUS_KM = 6371;
 
-  if (!prior?.beneficiary?.country) return null;
+interface CountryCentroid {
+  lat: number;
+  lng: number;
+}
 
-  const priorCountry = prior.beneficiary.country;
-  if (priorCountry === input.claimedCountry) return null;
+function toRadians(deg: number): number {
+  return deg * (Math.PI / 180);
+}
 
-  // Calculate time delta
-  const hoursDiff =
-    (Date.now() - new Date(prior.createdAt).getTime()) / (1000 * 60 * 60);
+function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const dLat = toRadians(lat2 - lat1);
+  const dLng = toRadians(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_KM * c;
+}
 
-  // Rough "impossible travel": different continents in under 2 hours
-  const continentMap: Record<string, string> = buildContinentMap();
-  const priorContinent = continentMap[priorCountry.toUpperCase()];
-  const currContinent = continentMap[input.claimedCountry.toUpperCase()];
-
-  if (priorContinent && currContinent && priorContinent !== currContinent && hoursDiff < 2) {
-    return {
-      signal: 'geoAnomaly',
-      severity: 'high',
-      detail: `Impossible travel: ${priorCountry} → ${input.claimedCountry} in ${hoursDiff.toFixed(1)}h`,
-    };
-  }
-
-  if (priorCountry !== input.claimedCountry && hoursDiff < 0.5) {
-    return {
-      signal: 'geoAnomaly',
-      severity: 'medium',
-      detail: `Country changed from ${priorCountry} to ${input.claimedCountry} in ${(hoursDiff * 60).toFixed(0)} minutes`,
-    };
-  }
-
-  return null;
+function getCentroid(countryCode: string): CountryCentroid | null {
+  const code = countryCode.toUpperCase();
+  const centroid = (countryCentroids as Record<string, CountryCentroid>)[code];
+  return centroid ?? null;
 }
 
 function buildContinentMap(): Record<string, string> {
-  // Partial map of ISO-3166 alpha-2 codes to continents for anomaly detection
   const map: Record<string, string> = {};
   const continents: [string, string[]][] = [
     ['AF', ['DZ','AO','BJ','BW','BF','BI','CM','CV','CF','TD','KM','CD','CG','CI','DJ','EG','GQ','ER','ET','GA','GM','GH','GN','GW','KE','LS','LR','LY','MG','MW','ML','MR','MU','YT','MA','MZ','NA','NE','NG','RW','ST','SN','SL','SO','ZA','SS','SD','SZ','TZ','TG','TN','UG','EH','ZM','ZW']],
@@ -230,6 +213,112 @@ function buildContinentMap(): Record<string, string> {
     for (const code of codes) map[code] = continent;
   }
   return map;
+}
+
+interface GeoHopResult {
+  impossible: boolean;
+  severity: 'high' | 'medium' | null;
+  detail: string | null;
+}
+
+function checkGeoHop(
+  priorCountry: string,
+  currentCountry: string,
+  hoursDiff: number,
+  geoMaxSpeedKmh: number,
+): GeoHopResult {
+  if (priorCountry === currentCountry) {
+    return { impossible: false, severity: null, detail: null };
+  }
+
+  const priorCentroid = getCentroid(priorCountry);
+  const currCentroid = getCentroid(currentCountry);
+
+  if (priorCentroid && currCentroid) {
+    const distanceKm = haversineDistance(
+      priorCentroid.lat, priorCentroid.lng,
+      currCentroid.lat, currCentroid.lng,
+    );
+    const speedKmh = distanceKm / hoursDiff;
+
+    if (speedKmh > geoMaxSpeedKmh) {
+      return {
+        impossible: true,
+        severity: 'high',
+        detail: `Impossible travel: ${priorCountry} → ${currentCountry} (${distanceKm.toFixed(0)} km in ${hoursDiff.toFixed(1)}h, implied speed ${speedKmh.toFixed(0)} km/h)`,
+      };
+    }
+
+    return { impossible: false, severity: null, detail: null };
+  }
+
+  // Fallback to continent-level check when centroids are missing
+  const continentMap = buildContinentMap();
+  const priorContinent = continentMap[priorCountry.toUpperCase()];
+  const currContinent = continentMap[currentCountry.toUpperCase()];
+
+  if (priorContinent && currContinent && priorContinent !== currContinent) {
+    return {
+      impossible: true,
+      severity: 'medium',
+      detail: `Cross-continent travel (fallback): ${priorCountry} → ${currentCountry} in ${hoursDiff.toFixed(1)}h`,
+    };
+  }
+
+  return { impossible: false, severity: null, detail: null };
+}
+
+export async function checkGeoAnomaly(input: FraudInput): Promise<FraudSignal | null> {
+  if (!input.claimedCountry) return null;
+
+  const currentSubmissionTime = input.submittedAt ?? new Date();
+
+  // Retrieve the last N prior submissions for multi-hop analysis
+  const priorSubmissions = await prisma.kYCSubmission.findMany({
+    where: {
+      userId: input.userId,
+      id: { not: input.submissionId },
+      beneficiary: { country: { not: '' } },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: GEO_ANOMALY_LOOKBACK,
+    include: { beneficiary: { select: { country: true } } },
+  });
+
+  if (priorSubmissions.length === 0) return null;
+
+  // Reverse to chronological order
+  const sortedPriors = [...priorSubmissions].reverse();
+
+  const geoMaxSpeedKmh = config.kycFraud.geoMaxPlausibleSpeedKmh;
+
+  // Check each sequential pair for impossible travel
+  for (let i = 0; i < sortedPriors.length; i++) {
+    const prior = sortedPriors[i];
+    const priorCountry = prior.beneficiary?.country;
+    if (!priorCountry) continue;
+
+    const isLastHop = i === sortedPriors.length - 1;
+    const currentTime = isLastHop
+      ? currentSubmissionTime.getTime()
+      : new Date(sortedPriors[i + 1].createdAt).getTime();
+
+    const hoursDiff = (currentTime - new Date(prior.createdAt).getTime()) / (1000 * 60 * 60);
+
+    if (hoursDiff <= 0) continue;
+
+    const result = checkGeoHop(priorCountry, input.claimedCountry, hoursDiff, geoMaxSpeedKmh);
+
+    if (result.impossible && result.severity && result.detail) {
+      return {
+        signal: 'geoAnomaly',
+        severity: result.severity,
+        detail: result.detail,
+      };
+    }
+  }
+
+  return null;
 }
 
 // ─── Interaction Features ───────────────────────────────────────────────────────
