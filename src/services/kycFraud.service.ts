@@ -377,6 +377,11 @@ interface ActiveVersionCache {
   isotonicBreakpoints: unknown | null;
 }
 
+interface ModelVersionPair {
+  active: ActiveVersionCache;
+  candidate: { id: string; plattA: number; plattB: number } | null;
+}
+
 /** Default: identity Platt transform — maps raw score directly through sigmoid */
 const DEFAULT_VERSION_CACHE: ActiveVersionCache = {
   id: '',
@@ -387,23 +392,28 @@ const DEFAULT_VERSION_CACHE: ActiveVersionCache = {
 };
 
 /**
- * Fetch the active FraudModelVersion, backed by Redis.
+ * Fetch the active FraudModelVersion and optional shadow candidate, backed by Redis.
  * TTL is config.fraudRecalibration.cacheTtlSeconds (default 300 s).
  *
- * On cache miss the DB is queried; on Redis failure the DB is used directly.
+ * Returns both the active version (used for the decision) and a candidate version
+ * in shadow mode (used for A/B scoring only — never affects the decision).
+ *
+ * On cache miss the DB is queried via findMany; on Redis failure the DB is used directly.
  * After a recalibration version swap the worker calls
  * delCache(FRAUD_MODEL_PARAMS_CACHE_KEY) to force an immediate refresh.
  */
-async function getActiveModelVersion(): Promise<ActiveVersionCache> {
+async function getModelVersions(): Promise<ModelVersionPair> {
   const ttl = config.fraudRecalibration.cacheTtlSeconds;
 
-  return getOrSet<ActiveVersionCache>(
+  return getOrSet<ModelVersionPair>(
     FRAUD_MODEL_PARAMS_CACHE_KEY,
     ttl,
     async () => {
       try {
-        const v = await prisma.fraudModelVersion.findFirst({
-          where: { isActive: true },
+        const versions = await prisma.fraudModelVersion.findMany({
+          where: {
+            OR: [{ isActive: true }, { shadowMode: true }],
+          },
           orderBy: { calibratedAt: 'desc' },
           select: {
             id: true,
@@ -411,25 +421,44 @@ async function getActiveModelVersion(): Promise<ActiveVersionCache> {
             plattB: true,
             calibrationType: true,
             isotonicBreakpoints: true,
+            isActive: true,
+            shadowMode: true,
           },
         });
 
-        if (v) {
-          return {
-            id: v.id,
-            plattA: v.plattA,
-            plattB: v.plattB,
-            calibrationType: v.calibrationType,
-            isotonicBreakpoints: v.isotonicBreakpoints,
-          };
-        }
-      } catch (error) {
-        logger.warn('Failed to fetch active model version, using defaults', { error });
-      }
+        const activeRow = versions.find((v: any) => v.isActive);
+        const candidateRow = versions.find((v: any) => v.shadowMode && !v.isActive);
 
-      return DEFAULT_VERSION_CACHE;
+        const active: ActiveVersionCache = activeRow
+          ? {
+              id: activeRow.id,
+              plattA: activeRow.plattA,
+              plattB: activeRow.plattB,
+              calibrationType: activeRow.calibrationType,
+              isotonicBreakpoints: activeRow.isotonicBreakpoints,
+            }
+          : DEFAULT_VERSION_CACHE;
+
+        const candidate = candidateRow
+          ? { id: candidateRow.id, plattA: candidateRow.plattA, plattB: candidateRow.plattB }
+          : null;
+
+        return { active, candidate };
+      } catch (error) {
+        logger.warn('Failed to fetch model versions, using defaults', { error });
+        return { active: DEFAULT_VERSION_CACHE, candidate: null };
+      }
     },
   );
+}
+
+/**
+ * Fetch just the active model version (used by routeCalibration).
+ * Delegates to getModelVersions() so we only hit the DB once per cache window.
+ */
+async function getActiveModelVersion(): Promise<ActiveVersionCache> {
+  const pair = await getModelVersions();
+  return pair.active;
 }
 
 /**
@@ -438,6 +467,16 @@ async function getActiveModelVersion(): Promise<ActiveVersionCache> {
  */
 export async function invalidateFraudModelCache(): Promise<void> {
   await delCache(FRAUD_MODEL_PARAMS_CACHE_KEY);
+}
+
+/**
+ * Apply Platt sigmoid scaling to a raw score.
+ * p = 1 / (1 + exp(-(A * rawScore + B)))
+ */
+function applyPlattScaling(rawScore: number, params: { A: number; B: number }): number {
+  const z = params.A * rawScore + params.B;
+  const clampedZ = Math.max(Math.min(z, 35), -35);
+  return 1 / (1 + Math.exp(-clampedZ));
 }
 
 // ─── Third-Party Fraud Service ────────────────────────────────────────────────
@@ -544,7 +583,7 @@ export async function assessFraud(input: FraudInput): Promise<FraudAssessment> {
   rawScore = Math.max(0, Math.min(rawScore, 100));
 
   // Apply calibration — routes to Platt or isotonic based on the active version
-  const activeVersion = await getActiveModelVersion();
+  const { active: activeVersion, candidate } = await getModelVersions();
   const calibratedProbability = routeCalibration(rawScore, activeVersion.id ? activeVersion : null);
 
   // Convert to integer score for UI compatibility (0-100)

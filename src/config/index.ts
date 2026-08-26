@@ -187,6 +187,8 @@ export const config = {
     velocityMaxSubmissionsPerUser: parseInt(process.env.KYC_FRAUD_VELOCITY_MAX_PER_USER || '3', 10),
     // Geographic anomaly: max km/h travel speed considered plausible
     geoMaxPlausibleSpeedKmh: parseInt(process.env.KYC_FRAUD_GEO_MAX_SPEED_KMH || '900', 10),
+    // Number of prior submissions to look back when checking multi-hop impossible travel
+    geoAnomalyLookback: parseInt(process.env.GEO_ANOMALY_LOOKBACK || '5', 10),
     // Score at which a submission is considered high risk (triggers FRAUD_DETECTION job)
     highRiskThreshold: parseInt(process.env.KYC_FRAUD_HIGH_RISK_THRESHOLD || '50', 10),
     // Signal weights (must sum to 100)
