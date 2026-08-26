@@ -17,6 +17,20 @@ const CACHE_TTL_SECONDS = 30;
 const CACHE_KEY_PREFIX = 'ws-auth';
 
 /**
+ * Singleflight coalescing map for campaign authorization DB queries.
+ *
+ * When multiple sockets call authorizeCampaignJoin for the same campaignId
+ * within the same async turn (e.g., mass reconnect after network blip), only
+ * the first caller issues a DB query. All subsequent callers for the same key
+ * receive the same Promise and therefore the same result — at most 1 DB query
+ * per campaign per in-flight window.
+ *
+ * The entry is deleted from the map once the query resolves (success or error),
+ * so there is no memory leak for long-running processes with many campaigns.
+ */
+const campaignAuthInFlight = new Map<string, Promise<AuthorizationResult>>();
+
+/**
  * Validates a resource ID (campaignId, organizationId, beneficiaryId)
  * Guards against empty strings, overly large inputs, and prototype pollution
  */
@@ -56,7 +70,8 @@ function getCacheKey(userId: string, room: string): string {
 async function getCachedAuthorization(userId: string, room: string): Promise<boolean | null> {
   try {
     const cached = await redis.get(getCacheKey(userId, room));
-    if (cached !== null) {
+    // Guard against both null (cache miss) and undefined (e.g. mock not configured)
+    if (cached != null) {
       return cached === '1';
     }
   } catch (error) {
@@ -100,11 +115,49 @@ export async function invalidateCampaignAuthorizationCache(campaignId: string): 
 }
 
 /**
+ * Singleflight map for raw campaign DB rows (userId + status).
+ * Kept separate from campaignAuthInFlight (which would need to encode the
+ * full AuthorizationResult) so the coalescing can be reused regardless of
+ * caller role or userId.
+ */
+const campaignRowInFlight = new Map<
+  string,
+  Promise<{ userId: string; status: CampaignStatus } | null>
+>();
+
+function fetchCampaignRowCoalesced(
+  campaignId: string
+): Promise<{ userId: string; status: CampaignStatus } | null> {
+  const existing = campaignRowInFlight.get(campaignId);
+  if (existing) {
+    return existing;
+  }
+
+  const query = prisma.campaign
+    .findUnique({
+      where: { id: campaignId },
+      select: { userId: true, status: true },
+    })
+    .finally(() => {
+      // Always clean up — whether the query resolved or rejected — so there
+      // is no memory leak for processes that serve many campaigns over time.
+      campaignRowInFlight.delete(campaignId);
+    });
+
+  campaignRowInFlight.set(campaignId, query);
+  return query;
+}
+
+/**
  * Checks if a user is authorized to join a campaign room
  * Authorization rules:
  * - ADMIN/AUDITOR: always authorized
  * - ORGANIZATION: authorized if they own the campaign (Campaign.userId = userId)
  * - Any authenticated user: authorized if campaign status is ACTIVE or COMPLETED
+ *
+ * Thundering-herd mitigation: concurrent callers that share a cache miss for
+ * the same campaignId within the same async window are coalesced — at most
+ * one DB query is issued per campaign per in-flight window.
  */
 export async function authorizeCampaignJoin(
   context: AuthorizationContext,
@@ -123,29 +176,33 @@ export async function authorizeCampaignJoin(
     return { authorized: cached };
   }
 
-  // ADMIN and AUDITOR always have access
+  // ADMIN and AUDITOR always have access — skip DB query entirely
   if (context.userRole === Role.ADMIN || context.userRole === Role.AUDITOR) {
     await setCachedAuthorization(context.userId, room, true);
     return { authorized: true };
   }
 
-  // Fetch campaign from database
-  const campaign = await prisma.campaign.findUnique({
-    where: { id: campaignId },
-    select: { userId: true, status: true },
-  });
+  // Fetch campaign from database — coalesced so that concurrent cache misses
+  // for the same campaignId issue at most one DB query.
+  const campaign = await fetchCampaignRowCoalesced(campaignId);
 
   if (!campaign) {
     return { authorized: false, reason: 'not_found' };
   }
 
-  // ORGANIZATION users can join if they own the campaign
-  if (context.userRole === Role.ORGANIZATION && campaign.userId === context.userId) {
-    await setCachedAuthorization(context.userId, room, true);
-    return { authorized: true };
+  // ORGANIZATION users can join if they own the campaign — denied otherwise,
+  // even for ACTIVE campaigns (orgs should only see their own campaigns).
+  if (context.userRole === Role.ORGANIZATION) {
+    if (campaign.userId === context.userId) {
+      await setCachedAuthorization(context.userId, room, true);
+      return { authorized: true };
+    }
+    await setCachedAuthorization(context.userId, room, false);
+    return { authorized: false, reason: 'forbidden' };
   }
 
-  // Any authenticated user can join if campaign is ACTIVE or COMPLETED (public read)
+  // Any other authenticated user (DONOR, BENEFICIARY, etc.) can join if the
+  // campaign is publicly readable: ACTIVE or COMPLETED.
   if (campaign.status === CampaignStatus.ACTIVE || campaign.status === CampaignStatus.COMPLETED) {
     await setCachedAuthorization(context.userId, room, true);
     return { authorized: true };

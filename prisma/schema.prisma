@@ -483,15 +483,16 @@ model Multiplier {
 // donation can be allocated at most once, which keeps the allocation path
 // idempotent under retries or a competing confirmation for the same donation.
 model MatchedFund {
-  id            String   @id @default(cuid())
-  donationId    String   @unique
+  id            String    @id @default(cuid())
+  donationId    String    @unique
   campaignId    String
   multiplierId  String
   matcherId     String?
-  donorAmount   Decimal  @db.Decimal(20, 8)
-  matchedAmount Decimal  @db.Decimal(20, 8)
-  totalAmount   Decimal  @db.Decimal(20, 8)
-  createdAt     DateTime @default(now())
+  donorAmount   Decimal   @db.Decimal(20, 8)
+  matchedAmount Decimal   @db.Decimal(20, 8)
+  totalAmount   Decimal   @db.Decimal(20, 8)
+  createdAt     DateTime  @default(now())
+  refundedAt    DateTime?
 
   donation   Donation   @relation(fields: [donationId], references: [id], onDelete: Cascade)
   campaign   Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
@@ -553,6 +554,7 @@ model Beneficiary {
   @@index([dateOfBirth])
   @@index([country, city])
   @@index([status, country])
+  @@unique([idDocumentNumber, nationality])
   @@index([firstName(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([lastName(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([idDocumentNumber(ops: raw("gin_trgm_ops"))], type: Gin)
@@ -1683,7 +1685,6 @@ model FraudModelVersion {
   @@index([isActive])
   @@index([version])
   @@index([calibratedAt])
-  @@index([shadowMode])
 }
 
 // Ground truth labels for KYC submissions, used for model recalibration.

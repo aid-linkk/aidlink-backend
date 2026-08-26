@@ -2,10 +2,10 @@ import Redis from 'ioredis';
 import { config } from './index';
 
 const redis = new Redis({
-  host: config.redis.host,
-  port: config.redis.port,
-  password: config.redis.password,
-  db: config.redis.db,
+  host: config.redis?.host ?? 'localhost',
+  port: config.redis?.port ?? 6379,
+  password: config.redis?.password,
+  db: config.redis?.db ?? 0,
   retryStrategy: (times) => {
     const delay = Math.min(times * 50, 2000);
     return delay;

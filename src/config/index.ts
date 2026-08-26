@@ -251,6 +251,17 @@ export const config = {
     // Number of trending campaigns to track
     trendingCampaignsCount: parseInt(process.env.ANALYTICS_TRENDING_COUNT || '20', 10),
   },
+
+  bulk: {
+    /**
+     * Maximum number of rows accepted in a single CSV beneficiary import.
+     * Requests exceeding this limit are rejected with HTTP 413 before any
+     * database operations are attempted.  1 000 rows at ~5 ms RTT = ~10 ms
+     * for the two batch inserts, well within a 30 s request timeout.
+     * Raise via BULK_IMPORT_MAX_ROWS env var when deploying on faster infra.
+     */
+    importMaxRows: parseInt(process.env.BULK_IMPORT_MAX_ROWS || '1000', 10),
+  },
 };
 
 export default config;

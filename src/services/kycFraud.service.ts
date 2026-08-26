@@ -54,13 +54,6 @@ export interface FraudInput {
   deviceFingerprint?: string | null;
   claimedCountry?: string | null;
   claimedCity?: string | null;
-  /**
-   * The createdAt timestamp of the current KYC submission.
-   * Used by checkGeoAnomaly() to compute time-delta against prior submissions
-   * using submission timestamps rather than Date.now(), so delayed fraud-detection
-   * jobs (e.g. queued during a worker outage) still see the correct delta.
-   * Defaults to Date.now() if not provided, but callers should always supply it.
-   */
   submittedAt?: Date;
 }
 
@@ -176,153 +169,37 @@ export async function checkDeviceFingerprint(input: FraudInput): Promise<FraudSi
 
 // ─── Geographic Anomaly Detection ─────────────────────────────────────────────
 
-/**
- * Load country centroid data at module initialisation time.
- * The JSON file is bundled in the repository so there is no external API call at
- * assessment time — the entire lookup is an in-process object property access.
- */
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const COUNTRY_CENTROIDS: Record<string, { lat: number; lng: number }> = require('../../data/country-centroids.json');
+import countryCentroids from '../../data/country-centroids.json';
 
-/**
- * Haversine great-circle distance between two lat/lng points (in km).
- *
- * Formula:
- *   Δlat = lat2 − lat1  (radians)
- *   Δlng = lng2 − lng1  (radians)
- *   a    = sin²(Δlat/2) + cos(lat1)·cos(lat2)·sin²(Δlng/2)
- *   c    = 2·atan2(√a, √(1−a))
- *   d    = R·c           (R = 6371 km)
- */
-function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+const GEO_ANOMALY_LOOKBACK = parseInt(process.env.GEO_ANOMALY_LOOKBACK || '5', 10);
+const EARTH_RADIUS_KM = 6371;
+
+interface CountryCentroid {
+  lat: number;
+  lng: number;
+}
+
+function toRadians(deg: number): number {
+  return deg * (Math.PI / 180);
+}
+
+function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const dLat = toRadians(lat2 - lat1);
+  const dLng = toRadians(lng2 - lng1);
   const a =
     Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_KM * c;
 }
 
-/**
- * Check a single (from, to) country pair for impossible travel given the elapsed
- * hours between them. Returns a FraudSignal or null.
- *
- * Priority:
- * 1. Both countries have centroids → Haversine speed check (high/medium by speed).
- * 2. One or both countries missing centroids → fall back to continent-level check
- *    with severity capped at 'medium' (reduced precision).
- */
-function checkCountryPair(
-  fromCountry: string,
-  toCountry: string,
-  hoursDiff: number,
-): FraudSignal | null {
-  if (fromCountry === toCountry) return null;
-
-  // Avoid division by zero; sub-second hops are treated as 0.001 h (~3.6 seconds)
-  const effectiveHours = Math.max(hoursDiff, 0.001);
-
-  const fromCentroid = COUNTRY_CENTROIDS[fromCountry.toUpperCase()];
-  const toCentroid = COUNTRY_CENTROIDS[toCountry.toUpperCase()];
-
-  if (fromCentroid && toCentroid) {
-    // Primary path: Haversine speed check
-    const distanceKm = haversineKm(fromCentroid.lat, fromCentroid.lng, toCentroid.lat, toCentroid.lng);
-    const speedKmh = distanceKm / effectiveHours;
-
-    if (speedKmh > config.kycFraud.geoMaxPlausibleSpeedKmh) {
-      return {
-        signal: 'geoAnomaly',
-        severity: 'high',
-        detail: `Impossible travel: ${fromCountry} → ${toCountry} in ${hoursDiff.toFixed(2)}h (~${Math.round(distanceKm)} km, ~${Math.round(speedKmh)} km/h)`,
-      };
-    }
-    return null;
-  }
-
-  // Fallback path: one or both country codes not in centroid dataset
-  // Use continent-level check with severity capped at 'medium'
-  const continentMap = buildContinentMap();
-  const fromContinent = continentMap[fromCountry.toUpperCase()];
-  const toContinent = continentMap[toCountry.toUpperCase()];
-
-  if (fromContinent && toContinent && fromContinent !== toContinent && hoursDiff < 2) {
-    return {
-      signal: 'geoAnomaly',
-      severity: 'medium',
-      detail: `Possible impossible travel (coarse check): ${fromCountry} → ${toCountry} in ${hoursDiff.toFixed(2)}h (centroid data unavailable)`,
-    };
-  }
-
-  if (hoursDiff < 0.5) {
-    return {
-      signal: 'geoAnomaly',
-      severity: 'medium',
-      detail: `Country changed from ${fromCountry} to ${toCountry} in ${(hoursDiff * 60).toFixed(0)} minutes (centroid data unavailable)`,
-    };
-  }
-
-  return null;
-}
-
-export async function checkGeoAnomaly(input: FraudInput): Promise<FraudSignal | null> {
-  if (!input.claimedCountry) return null;
-
-  const { geoAnomalyLookback } = config.kycFraud;
-
-  // Retrieve the last N prior submissions (chronological order: oldest first)
-  const priors = await prisma.kYCSubmission.findMany({
-    where: {
-      userId: input.userId,
-      id: { not: input.submissionId },
-      beneficiary: { country: { not: '' } },
-    },
-    orderBy: { createdAt: 'desc' },
-    take: geoAnomalyLookback,
-    include: { beneficiary: { select: { country: true } } },
-  });
-
-  if (priors.length === 0) return null;
-
-  // Reverse to get chronological order (oldest → newest) for sequential pair iteration
-  const chronological = [...priors].reverse();
-
-  // The current submission's effective timestamp — use the passed-in submittedAt if available
-  // so that delayed fraud-detection jobs still see the correct delta.
-  const currentTs = input.submittedAt ?? new Date();
-
-  // Build the full sequence: ...prior submissions... + current
-  // Each element: { country, createdAt }
-  const sequence: Array<{ country: string; createdAt: Date }> = [
-    ...chronological
-      .filter(p => p.beneficiary?.country)
-      .map(p => ({ country: p.beneficiary!.country!, createdAt: new Date(p.createdAt) })),
-    { country: input.claimedCountry, createdAt: currentTs },
-  ];
-
-  // Check each consecutive pair in the sequence for impossible travel
-  for (let i = sequence.length - 2; i >= 0; i--) {
-    const from = sequence[i];
-    const to = sequence[i + 1];
-
-    const hoursDiff =
-      (to.createdAt.getTime() - from.createdAt.getTime()) / (1000 * 60 * 60);
-
-    // Skip pairs where current entry is not later than prior (clock skew guard)
-    if (hoursDiff < 0) continue;
-
-    const signal = checkCountryPair(from.country, to.country, hoursDiff);
-    if (signal) return signal;
-  }
-
-  return null;
+function getCentroid(countryCode: string): CountryCentroid | null {
+  const code = countryCode.toUpperCase();
+  const centroid = (countryCentroids as Record<string, CountryCentroid>)[code];
+  return centroid ?? null;
 }
 
 function buildContinentMap(): Record<string, string> {
-  // Partial map of ISO-3166 alpha-2 codes to continents for anomaly detection
   const map: Record<string, string> = {};
   const continents: [string, string[]][] = [
     ['AF', ['DZ','AO','BJ','BW','BF','BI','CM','CV','CF','TD','KM','CD','CG','CI','DJ','EG','GQ','ER','ET','GA','GM','GH','GN','GW','KE','LS','LR','LY','MG','MW','ML','MR','MU','YT','MA','MZ','NA','NE','NG','RW','ST','SN','SL','SO','ZA','SS','SD','SZ','TZ','TG','TN','UG','EH','ZM','ZW']],
@@ -336,6 +213,112 @@ function buildContinentMap(): Record<string, string> {
     for (const code of codes) map[code] = continent;
   }
   return map;
+}
+
+interface GeoHopResult {
+  impossible: boolean;
+  severity: 'high' | 'medium' | null;
+  detail: string | null;
+}
+
+function checkGeoHop(
+  priorCountry: string,
+  currentCountry: string,
+  hoursDiff: number,
+  geoMaxSpeedKmh: number,
+): GeoHopResult {
+  if (priorCountry === currentCountry) {
+    return { impossible: false, severity: null, detail: null };
+  }
+
+  const priorCentroid = getCentroid(priorCountry);
+  const currCentroid = getCentroid(currentCountry);
+
+  if (priorCentroid && currCentroid) {
+    const distanceKm = haversineDistance(
+      priorCentroid.lat, priorCentroid.lng,
+      currCentroid.lat, currCentroid.lng,
+    );
+    const speedKmh = distanceKm / hoursDiff;
+
+    if (speedKmh > geoMaxSpeedKmh) {
+      return {
+        impossible: true,
+        severity: 'high',
+        detail: `Impossible travel: ${priorCountry} → ${currentCountry} (${distanceKm.toFixed(0)} km in ${hoursDiff.toFixed(1)}h, implied speed ${speedKmh.toFixed(0)} km/h)`,
+      };
+    }
+
+    return { impossible: false, severity: null, detail: null };
+  }
+
+  // Fallback to continent-level check when centroids are missing
+  const continentMap = buildContinentMap();
+  const priorContinent = continentMap[priorCountry.toUpperCase()];
+  const currContinent = continentMap[currentCountry.toUpperCase()];
+
+  if (priorContinent && currContinent && priorContinent !== currContinent) {
+    return {
+      impossible: true,
+      severity: 'medium',
+      detail: `Cross-continent travel (fallback): ${priorCountry} → ${currentCountry} in ${hoursDiff.toFixed(1)}h`,
+    };
+  }
+
+  return { impossible: false, severity: null, detail: null };
+}
+
+export async function checkGeoAnomaly(input: FraudInput): Promise<FraudSignal | null> {
+  if (!input.claimedCountry) return null;
+
+  const currentSubmissionTime = input.submittedAt ?? new Date();
+
+  // Retrieve the last N prior submissions for multi-hop analysis
+  const priorSubmissions = await prisma.kYCSubmission.findMany({
+    where: {
+      userId: input.userId,
+      id: { not: input.submissionId },
+      beneficiary: { country: { not: '' } },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: GEO_ANOMALY_LOOKBACK,
+    include: { beneficiary: { select: { country: true } } },
+  });
+
+  if (priorSubmissions.length === 0) return null;
+
+  // Reverse to chronological order
+  const sortedPriors = [...priorSubmissions].reverse();
+
+  const geoMaxSpeedKmh = config.kycFraud.geoMaxPlausibleSpeedKmh;
+
+  // Check each sequential pair for impossible travel
+  for (let i = 0; i < sortedPriors.length; i++) {
+    const prior = sortedPriors[i];
+    const priorCountry = prior.beneficiary?.country;
+    if (!priorCountry) continue;
+
+    const isLastHop = i === sortedPriors.length - 1;
+    const currentTime = isLastHop
+      ? currentSubmissionTime.getTime()
+      : new Date(sortedPriors[i + 1].createdAt).getTime();
+
+    const hoursDiff = (currentTime - new Date(prior.createdAt).getTime()) / (1000 * 60 * 60);
+
+    if (hoursDiff <= 0) continue;
+
+    const result = checkGeoHop(priorCountry, input.claimedCountry, hoursDiff, geoMaxSpeedKmh);
+
+    if (result.impossible && result.severity && result.detail) {
+      return {
+        signal: 'geoAnomaly',
+        severity: result.severity,
+        detail: result.detail,
+      };
+    }
+  }
+
+  return null;
 }
 
 // ─── Interaction Features ───────────────────────────────────────────────────────

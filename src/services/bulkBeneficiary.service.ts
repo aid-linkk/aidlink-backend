@@ -6,12 +6,26 @@ import { BeneficiaryStatus, KYCStatus, DistributionMethod, BatchJobType, BatchJo
 import { NotificationService } from './notification.service';
 import { invalidateBeneficiaryCache } from '../utils/cache';
 import { toCsv } from '../utils/csv';
+import { CryptoUtils } from '../utils/crypto';
+import config from '../config';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
+/**
+ * The type field distinguishes a hard failure (VALIDATION, RUNTIME) from a
+ * soft deduplicate warning (DUPLICATE).  Callers may choose to treat DUPLICATE
+ * rows differently (e.g. show a warning rather than an error to the field
+ * worker).
+ */
+export type BatchErrorType = 'VALIDATION' | 'RUNTIME' | 'DUPLICATE';
+
 export interface BatchError {
     index: number;
+    /** Machine-readable error category. */
+    type?: BatchErrorType;
     message: string;
+    /** For DUPLICATE errors: the ID of the pre-existing beneficiary. */
+    existingBeneficiaryId?: string;
     data?: Record<string, unknown>;
 }
 
@@ -144,8 +158,21 @@ export class BulkBeneficiaryService {
 
     /**
      * Import beneficiaries from a CSV buffer.
-     * Each row creates a User (with a placeholder email) + Beneficiary.
-     * Rolls back all created records if rollback is triggered.
+     *
+     * Algorithm (O(1) round trips after parsing):
+     *   1. Guard: reject oversized imports with HTTP 413 before touching the DB.
+     *   2. Pre-import deduplication: query for any (idDocumentNumber, nationality)
+     *      pairs that already exist.  Matching rows are recorded as DUPLICATE
+     *      warnings and excluded from the batch insert.
+     *   3. Derive collision-resistant placeholder emails using
+     *      sha256(idDocumentNumber + nationality + jobId).slice(0, 16) so that
+     *      concurrent imports for the same beneficiary identity converge to the
+     *      same email and the ON CONFLICT DO NOTHING clause handles idempotency.
+     *   4. Single prisma.$transaction with two createMany calls:
+     *      - createMany users (skipDuplicates: true)
+     *      - createMany beneficiaries (skipDuplicates: true)
+     *   5. Recover created IDs with a findMany on the placeholder emails
+     *      (one extra round trip, still O(1) total).
      */
     static async importFromCSV(
         csvBuffer: Buffer,
@@ -157,6 +184,18 @@ export class BulkBeneficiaryService {
             throw AppError.from('BATCH_005');
         }
 
+        // ── 413 guard ────────────────────────────────────────────────────────
+        const maxRows = config.bulk.importMaxRows;
+        if (rows.length > maxRows) {
+            throw new AppError(
+                `CSV contains ${rows.length} rows which exceeds the maximum of ${maxRows}. ` +
+                `Split the file into smaller batches or raise BULK_IMPORT_MAX_ROWS.`,
+                413
+            );
+        }
+
+        // Create the batch job record first so we have a stable jobId to use
+        // in the placeholder email hash.
         const job = await createJob(
             BatchJobType.BENEFICIARY_IMPORT,
             organizationUserId,
@@ -165,61 +204,163 @@ export class BulkBeneficiaryService {
         );
 
         const errors: BatchError[] = [...parseErrors];
-        const createdBeneficiaryIds: string[] = [];
 
         // Build a set of row indices that already failed parse validation
         const failedIndices = new Set(parseErrors.map((e) => e.index));
 
-        for (let i = 0; i < rows.length; i++) {
-            if (failedIndices.has(i)) continue;
+        // Only process rows that passed validation
+        const validRows = rows
+            .map((row, index) => ({ row, index }))
+            .filter(({ index }) => !failedIndices.has(index));
 
-            const row = rows[i];
+        // ── Pre-import deduplication ──────────────────────────────────────────
+        // Query for existing beneficiaries matching any (idDocumentNumber, nationality)
+        // in the current batch.  We use OR clauses rather than an IN on a composite
+        // key because Prisma does not expose tuple IN syntax directly.
+        const lookupPairs = validRows.map(({ row }) => ({
+            idDocumentNumber: row.idDocumentNumber,
+            nationality: row.nationality,
+        }));
 
-            try {
-                // Derive a deterministic placeholder email so we can create a User record
-                const placeholderEmail = `beneficiary.import.${Date.now()}.${i}@placeholder.aidlink`;
+        const existingBeneficiaries = lookupPairs.length > 0
+            ? await prisma.beneficiary.findMany({
+                where: {
+                    OR: lookupPairs,
+                },
+                select: { id: true, idDocumentNumber: true, nationality: true },
+            })
+            : [];
 
-                const result = await prisma.$transaction(async (tx) => {
-                    const user = await tx.user.create({
-                        data: {
-                            email: placeholderEmail,
-                            role: 'BENEFICIARY',
-                            status: 'PENDING_VERIFICATION',
-                        },
-                    });
+        // Build a lookup map: `${docNumber}:${nationality}` → beneficiary id
+        const existingMap = new Map<string, string>(
+            existingBeneficiaries.map((b) => [
+                `${b.idDocumentNumber}:${b.nationality}`,
+                b.id,
+            ])
+        );
 
-                    const beneficiary = await tx.beneficiary.create({
-                        data: {
-                            userId: user.id,
-                            firstName: row.firstName,
-                            lastName: row.lastName,
-                            dateOfBirth: new Date(row.dateOfBirth),
-                            gender: row.gender,
-                            nationality: row.nationality,
-                            idDocumentType: row.idDocumentType,
-                            idDocumentNumber: row.idDocumentNumber,
-                            phoneNumber: row.phoneNumber,
-                            address: row.address,
-                            city: row.city,
-                            country: row.country,
-                            coordinates: row.coordinates ?? null,
-                            familySize: row.familySize ? parseInt(row.familySize) : 1,
-                            needsAssessment: row.needsAssessment ?? null,
-                            needsCategory: row.needsCategory ?? null,
-                            status: BeneficiaryStatus.PENDING,
-                        },
-                    });
-
-                    return beneficiary;
-                });
-
-                createdBeneficiaryIds.push(result.id);
-            } catch (err) {
+        // Partition valid rows into new vs duplicate
+        const newRows: Array<{ row: Record<string, string>; index: number }> = [];
+        for (const { row, index } of validRows) {
+            const key = `${row.idDocumentNumber}:${row.nationality}`;
+            if (existingMap.has(key)) {
                 errors.push({
-                    index: i,
-                    message: err instanceof Error ? err.message : String(err),
+                    index,
+                    type: 'DUPLICATE',
+                    message: `Beneficiary with idDocumentNumber '${row.idDocumentNumber}' and nationality '${row.nationality}' already exists`,
+                    existingBeneficiaryId: existingMap.get(key),
                     data: row as Record<string, unknown>,
                 });
+            } else {
+                newRows.push({ row, index });
+            }
+        }
+
+        const createdBeneficiaryIds: string[] = [];
+
+        if (newRows.length > 0) {
+            // ── Derive collision-resistant placeholder emails ──────────────────
+            // Email = import-{sha256(docNumber + nationality + jobId).slice(0,16)}@placeholder.aidlink
+            // • Deterministic per beneficiary identity + job — retrying the same
+            //   import produces the same email and skipDuplicates handles idempotency.
+            // • The jobId suffix scopes the hash to this import job, preventing
+            //   collisions when the same identity is imported across different jobs
+            //   (which would produce the same hash without the jobId suffix and would
+            //   be silently deduplicated by the User unique constraint on email).
+            const userPayloads = newRows.map(({ row }) => {
+                const hash = CryptoUtils.sha256(
+                    `${row.idDocumentNumber}${row.nationality}${job.id}`
+                ).slice(0, 16);
+                return {
+                    email: `import-${hash}@placeholder.aidlink`,
+                    role: 'BENEFICIARY' as const,
+                    status: 'PENDING_VERIFICATION' as const,
+                };
+            });
+
+            // ── Single transaction: two createMany calls ──────────────────────
+            try {
+                await prisma.$transaction(async (tx) => {
+                    // Step 1: batch insert users (ON CONFLICT DO NOTHING)
+                    await tx.user.createMany({
+                        data: userPayloads,
+                        skipDuplicates: true,
+                    });
+
+                    // Step 2: recover the inserted user IDs so we can wire up the
+                    // beneficiary foreign keys.  findMany on email IN (...) is one
+                    // round trip regardless of batch size.
+                    const emails = userPayloads.map((u) => u.email);
+                    const insertedUsers = await tx.user.findMany({
+                        where: { email: { in: emails } },
+                        select: { id: true, email: true },
+                    });
+
+                    const emailToUserId = new Map(insertedUsers.map((u) => [u.email, u.id]));
+
+                    // Step 3: build beneficiary payloads, skipping any rows whose
+                    // user email did not end up in the DB (should not happen given
+                    // skipDuplicates + prior deduplication, but guard defensively).
+                    const beneficiaryPayloads = newRows
+                        .map(({ row }) => {
+                            const hash = CryptoUtils.sha256(
+                                `${row.idDocumentNumber}${row.nationality}${job.id}`
+                            ).slice(0, 16);
+                            const email = `import-${hash}@placeholder.aidlink`;
+                            const userId = emailToUserId.get(email);
+                            if (!userId) return null;
+                            return {
+                                userId,
+                                firstName: row.firstName,
+                                lastName: row.lastName,
+                                dateOfBirth: new Date(row.dateOfBirth),
+                                gender: row.gender,
+                                nationality: row.nationality,
+                                idDocumentType: row.idDocumentType,
+                                idDocumentNumber: row.idDocumentNumber,
+                                phoneNumber: row.phoneNumber,
+                                address: row.address,
+                                city: row.city,
+                                country: row.country,
+                                coordinates: row.coordinates ?? null,
+                                familySize: row.familySize ? parseInt(row.familySize, 10) : 1,
+                                needsAssessment: row.needsAssessment ?? null,
+                                needsCategory: row.needsCategory ?? null,
+                                status: BeneficiaryStatus.PENDING,
+                            };
+                        })
+                        .filter((p): p is NonNullable<typeof p> => p !== null);
+
+                    // Step 4: batch insert beneficiaries (ON CONFLICT DO NOTHING)
+                    await tx.beneficiary.createMany({
+                        data: beneficiaryPayloads,
+                        skipDuplicates: true,
+                    });
+
+                    // Step 5: recover the inserted beneficiary IDs for rollback tracking.
+                    // Filter to only userIds we just inserted to avoid picking up any
+                    // pre-existing beneficiaries that share a userId.
+                    const insertedUserIds = Array.from(emailToUserId.values());
+                    const insertedBeneficiaries = await tx.beneficiary.findMany({
+                        where: { userId: { in: insertedUserIds } },
+                        select: { id: true },
+                    });
+
+                    for (const b of insertedBeneficiaries) {
+                        createdBeneficiaryIds.push(b.id);
+                    }
+                });
+            } catch (err) {
+                // The entire batch transaction failed — record as a runtime error
+                // for all rows in this batch rather than silently swallowing it.
+                for (const { row, index } of newRows) {
+                    errors.push({
+                        index,
+                        type: 'RUNTIME',
+                        message: err instanceof Error ? err.message : String(err),
+                        data: row as Record<string, unknown>,
+                    });
+                }
             }
         }
 
@@ -230,7 +371,7 @@ export class BulkBeneficiaryService {
             createdBeneficiaryIds,
         });
 
-        logger.info(`Bulk import job ${job.id}: ${successCount} created, ${failureCount} failed`);
+        logger.info(`Bulk import job ${job.id}: ${successCount} created, ${failureCount} errors (${errors.filter((e) => e.type === 'DUPLICATE').length} duplicates)`);
 
         return {
             jobId: job.id,
@@ -562,25 +703,26 @@ export class BulkBeneficiaryService {
         let rolledBack = 0;
 
         if (job.type === BatchJobType.BENEFICIARY_IMPORT) {
+            // rollbackData was saved as { createdBeneficiaryIds: string[] }
             const ids = (rollback.createdBeneficiaryIds ?? []) as string[];
-            // Delete beneficiaries + their auto-created user records
-            for (const beneficiaryId of ids) {
-                try {
-                    const b = await prisma.beneficiary.findUnique({
-                        where: { id: beneficiaryId },
-                        select: { userId: true },
-                    });
-                    if (b) {
-                        await prisma.user.delete({ where: { id: b.userId } });
-                        rolledBack++;
-                    }
-                } catch (err) {
-                    logger.warn(`Rollback: failed to delete beneficiary ${beneficiaryId}:`, err);
+            if (ids.length > 0) {
+                // Resolve user IDs for the beneficiaries created in this job, then
+                // delete the user records (cascades to beneficiary via onDelete: Cascade).
+                const beneficiaries = await prisma.beneficiary.findMany({
+                    where: { id: { in: ids } },
+                    select: { userId: true },
+                });
+                const userIds = beneficiaries.map((b) => b.userId);
+                if (userIds.length > 0) {
+                    const result = await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+                    rolledBack = result.count;
                 }
             }
         } else if (job.type === BatchJobType.BENEFICIARY_STATUS_UPDATE) {
-            const snapshots = (rollback as { previousStatuses?: Array<{ id: string; previousStatus: string }> })
-                .previousStatuses ?? [];
+            // rollbackData was saved as a plain Array<{id, previousStatus}> (not nested)
+            const snapshots = Array.isArray(rollback)
+                ? (rollback as Array<{ id: string; previousStatus: string }>)
+                : [];
             for (const snap of snapshots) {
                 try {
                     await prisma.beneficiary.update({

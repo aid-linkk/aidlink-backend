@@ -31,7 +31,6 @@ export const authenticateSocketToken = async (token: string): Promise<SocketAuth
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, role: true },
     });
 
     if (!user) {
@@ -350,11 +349,60 @@ export const sendCampaignSuspended = async (
   ownerId: string,
   payload: any
 ): Promise<void> => {
-  // Invalidate authorization cache for this campaign
+  const room = `campaign:${campaignId}`;
+
+  // Step 1 — Invalidate authorization cache so that any reconnect attempt
+  // re-queries the DB and finds the campaign suspended.
   await invalidateCampaignAuthorizationCache(campaignId);
-  
-  broadcastToCampaign(campaignId, 'campaign:suspended', payload);
+
+  // Step 2 — Broadcast campaign:suspended to everyone currently in the room
+  // *before* evicting them so clients know why they are being removed.
+  // Socket.IO emit() is synchronous in the send queue, so the event is
+  // enqueued before socketsLeave() runs.
+  if (io) {
+    io.in(room).emit('campaign:suspended', payload);
+  }
+
+  // Also notify the campaign owner via their personal user room.
   broadcastToUser(ownerId, 'campaign:suspended', payload);
+
+  // Step 3 — Collect the socket IDs currently in the room *before* eviction
+  // so we can send each one a personalised campaign:access_revoked event.
+  // We snapshot the Set now because socketsLeave will empty it.
+  const roomSockets = io
+    ? (io.sockets.adapter.rooms.get(room) ?? new Set<string>())
+    : new Set<string>();
+  const evictedSocketIds = [...roomSockets];
+
+  // Step 4 — Forcibly remove all sockets from the room.
+  // socketsLeave is the Socket.IO v4 API that works with all official adapters
+  // (in-memory, Redis, cluster) and atomically removes every socket in the
+  // room from that room.
+  if (io) {
+    io.in(room).socketsLeave(room);
+  }
+
+  // Step 5 — Emit campaign:access_revoked to each evicted socket's personal
+  // user room so the client can distinguish "campaign suspended" from
+  // "connection dropped".  We look up the socket's userId from socket.data.
+  if (io) {
+    for (const socketId of evictedSocketIds) {
+      const socket = io.sockets.sockets.get(socketId);
+      if (socket) {
+        const socketUserId: string = socket.data.userId as string;
+        if (socketUserId) {
+          io.to(`user:${socketUserId}`).emit('campaign:access_revoked', {
+            campaignId,
+            reason: 'suspended',
+          });
+        }
+      }
+    }
+  }
+
+  logger.info(
+    `Campaign ${campaignId} suspended: evicted ${evictedSocketIds.length} socket(s) from room ${room}`
+  );
 };
 
 export const sendCampaignReinstated = async (
@@ -362,8 +410,23 @@ export const sendCampaignReinstated = async (
   ownerId: string,
   payload: any
 ): Promise<void> => {
+  // Broadcast reinstatement to any sockets still in the room (e.g. ADMIN/
+  // AUDITOR who were not evicted on suspension).
   broadcastToCampaign(campaignId, 'campaign:reinstated', payload);
+
+  // Notify the campaign owner via their personal user room so that client
+  // code can listen on the user room and automatically re-emit join_campaign.
   broadcastToUser(ownerId, 'campaign:reinstated', payload);
+
+  // Emit campaign:access_restored to the campaign owner's personal user room.
+  // Previously-evicted clients should subscribe to this event on their own
+  // user room so they know it is now safe to call join_campaign again.
+  broadcastToUser(ownerId, 'campaign:access_restored', {
+    campaignId,
+    reason: 'reinstated',
+  });
+
+  logger.info(`Campaign ${campaignId} reinstated: notified owner ${ownerId}`);
 };
 
 export const sendAppealUpdate = (ownerId: string, payload: any): void => {
