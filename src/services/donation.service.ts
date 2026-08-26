@@ -408,6 +408,36 @@ export class DonationService {
         throw AppError.from('DONATION_004', 'Refund amount exceeds campaign current balance');
       }
 
+      // Handle matched fund reversal if the donation had a match
+      const matchedFund = await tx.matchedFund.findUnique({
+        where: { donationId: id },
+      });
+
+      if (matchedFund && matchedFund.refundedAt === null) {
+        // Mark the matched fund as refunded
+        await tx.matchedFund.update({
+          where: { id: matchedFund.id },
+          data: { refundedAt: new Date() },
+        });
+
+        // Atomically decrement Multiplier.matchedTotal using GREATEST guard
+        // to prevent going below zero (mirrors claimMatchCap pattern)
+        await tx.$queryRaw`
+          WITH locked AS (
+            SELECT "matchedTotal"
+            FROM   "Multiplier"
+            WHERE  id = ${matchedFund.multiplierId}
+            FOR UPDATE
+          )
+          UPDATE "Multiplier" m
+          SET    "matchedTotal" = GREATEST(m."matchedTotal" - ${matchedFund.matchedAmount.toString()}::numeric, 0)
+          FROM   locked
+          WHERE  m.id = ${matchedFund.multiplierId}
+        `;
+
+        logger.info(`Matched fund reversed: ${matchedFund.id} for donation ${id}`);
+      }
+
       // Return the updated donation for the response
       const updatedDonation = await tx.donation.findUniqueOrThrow({
         where: { id },
