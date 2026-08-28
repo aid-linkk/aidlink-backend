@@ -6,7 +6,6 @@ import { MilestoneController } from '../controllers/milestone.controller';
 import { RecoveryController } from '../controllers/recovery.controller';
 import { DatabaseController } from '../controllers/database.controller';
 import { AdminNotificationPreferenceController } from '../controllers/adminNotificationPreference.controller';
-import { MatchedFundVerificationController } from '../controllers/matchedFundVerification.controller';
 import { authenticate, authorize } from '../middleware/auth';
 import { z } from 'zod';
 import { validate } from '../middleware/validation';
@@ -357,46 +356,6 @@ router.post(
   authenticate,
   authorize('ADMIN', 'VERIFIER', 'AUDITOR'),
   AdminNotificationPreferenceController.flushDigest
-);
-
-// ─── Matched Fund Verification (Admin) ───────────────────────────────────────
-
-/**
- * @route   POST /api/v1/admin/matched-fund-verification/trigger
- * @desc    Enqueue an immediate (asynchronous) triggered verification job.
- *          Returns jobId for status polling.
- * @access  Private (ADMIN)
- */
-router.post(
-  '/matched-fund-verification/trigger',
-  authenticate,
-  authorize('ADMIN'),
-  MatchedFundVerificationController.triggerVerification,
-);
-
-/**
- * @route   GET /api/v1/admin/matched-fund-verification/jobs/:jobId
- * @desc    Get status and result of a specific verification job.
- * @access  Private (ADMIN)
- */
-router.get(
-  '/matched-fund-verification/jobs/:jobId',
-  authenticate,
-  authorize('ADMIN'),
-  MatchedFundVerificationController.getJobStatus,
-);
-
-/**
- * @route   POST /api/v1/admin/matched-fund-verification/run-sync
- * @desc    Run a verification synchronously and return the full result in the
- *          HTTP response. Use for small datasets or integration tests.
- * @access  Private (ADMIN)
- */
-router.post(
-  '/matched-fund-verification/run-sync',
-  authenticate,
-  authorize('ADMIN'),
-  MatchedFundVerificationController.runSynchronous,
 );
 
 export default router;

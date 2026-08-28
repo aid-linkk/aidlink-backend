@@ -200,14 +200,6 @@ const startServer = async (): Promise<void> => {
       .then(({ startRecoveryWorker }) => startRecoveryWorker())
       .catch((error) => logger.error('Failed to start recovery worker:', error));
 
-    // Start matched-fund verification worker (consistency checks + auto-repair)
-    if (config.matchedFundVerification.enabled) {
-      import('./workers/matchedFundVerification.worker.js')
-        .then(({ startMatchedFundVerificationWorker }) => startMatchedFundVerificationWorker())
-        .then(() => logger.info('Matched fund verification worker started'))
-        .catch((error) => logger.error('Failed to start matched fund verification worker:', error));
-    }
-
 
     startWebhookRetryProcessor();
     logger.info('Webhook retry processor started');
@@ -234,16 +226,6 @@ const gracefulShutdown = async (signal: string): Promise<void> => {
 
     // Stop recovery worker
     stopRecoveryWorker();
-
-    // Stop matched-fund verification worker (if running)
-    if (config.matchedFundVerification.enabled) {
-      try {
-        const { stopMatchedFundVerificationWorker } = await import('./workers/matchedFundVerification.worker.js');
-        await stopMatchedFundVerificationWorker();
-      } catch {
-        // Worker may not have been started; ignore
-      }
-    }
 
     // Disconnect from database
     await disconnectDatabase();
