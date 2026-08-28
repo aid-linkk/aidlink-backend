@@ -1,44 +1,34 @@
 /**
  * Matched Fund Verification Worker
  *
- * Registers three BullMQ job types against the `matched-fund-verification`
- * queue and sets up two recurring schedules:
+ * BullMQ-backed worker that runs three types of consistency verification jobs:
  *
- *   FULL_VERIFICATION    – daily (off-peak), scans every Multiplier row.
- *   SAMPLING_VERIFICATION – hourly, scans a random TABLESAMPLE subset.
+ *   FULL_VERIFICATION  — checks all Multiplier rows. Scheduled daily (or
+ *                        as configured by MATCHED_FUND_VERIFICATION_FULL_CRON).
  *
- * A third job type, TRIGGERED_VERIFICATION, is not scheduled — it is enqueued
- * on-demand via `enqueueTriggeredVerification()`.  Typical callers are:
- *   - Admin API handlers (after a manual data fix).
- *   - Post-deployment scripts.
- *   - External tooling that detects a suspected anomaly.
+ *   SAMPLE_VERIFICATION — checks a random TABLESAMPLE subset. Scheduled
+ *                         hourly (MATCHED_FUND_VERIFICATION_SAMPLE_CRON).
  *
- * ─── Feature flag ────────────────────────────────────────────────────────────
- * Everything is gated behind `config.matchedFundVerification.enabled`.  When
- * the flag is false the queue and worker are still created (so the BullMQ
- * dashboard shows an empty queue rather than a missing one) but no jobs are
- * scheduled and ad-hoc enqueues are rejected with a warning.
+ *   TRIGGERED_VERIFICATION — one-shot check enqueued on-demand (e.g. by the
+ *                            admin API or after a suspected anomaly). Treated
+ *                            like FULL but marked separately in logs/results.
  *
- * ─── Concurrency ─────────────────────────────────────────────────────────────
- * The worker uses concurrency=1 so that only one verification job runs at a
- * time.  This prevents two full-scan jobs from hammering the database
- * simultaneously if, for example, a previous job was delayed and two fire
- * close together.  The BullMQ `jobId` option on repeating jobs means that if a
- * repeat fires while the previous instance is still running, BullMQ will see
- * the job already in the queue and deduplicate it.
- *
- * ─── Retry behaviour ─────────────────────────────────────────────────────────
- * Each job gets 3 attempts with exponential backoff starting at 5 s.  A failed
- * job does not leave the system inconsistent — the next scheduled run will
- * pick up any remaining inconsistencies.
+ * Worker lifecycle mirrors analytics.worker.ts: the module exports the Queue
+ * (for enqueueing), a schedule function (for cron setup), and a start/stop
+ * function (for graceful shutdown). index.ts dynamically imports and starts
+ * it when the feature flag is enabled.
  */
 
 import { Worker, Queue, Job } from 'bullmq';
 import { config } from '../config';
-import { MatchedFundVerificationService } from '../services/matchedFundVerification.service';
+import {
+  MatchedFundVerificationService,
+  VerificationMode,
+  VerificationResult,
+} from '../services/matchedFundVerification.service';
 import logger from '../config/logger';
 
-// ─── BullMQ connection ────────────────────────────────────────────────────────
+export const QUEUE_NAME = 'matched-fund-verification-queue';
 
 const connection = {
   host: config.bullmq.redisHost,
@@ -46,224 +36,166 @@ const connection = {
   password: config.bullmq.redisPassword,
 };
 
-const QUEUE_NAME = 'matched-fund-verification';
+// ─── Producer / Queue ─────────────────────────────────────────────────────────
 
-// ─── Job payload shapes ───────────────────────────────────────────────────────
+export const matchedFundVerificationQueue = new Queue(QUEUE_NAME, { connection });
 
-export interface FullVerificationJobData {
-  type: 'FULL_VERIFICATION';
+export type VerificationJobType =
+  | 'FULL_VERIFICATION'
+  | 'SAMPLE_VERIFICATION'
+  | 'TRIGGERED_VERIFICATION';
+
+export interface VerificationJobData {
+  type: VerificationJobType;
+  /** For SAMPLE_VERIFICATION: percentage of rows to check (1–100). */
+  samplePct?: number;
+  /** Whether to auto-repair detected inconsistencies. Defaults to true. */
+  autoRepair?: boolean;
+  /** Optional correlation ID for tracing triggered jobs back to the request. */
+  correlationId?: string;
 }
-
-export interface SamplingVerificationJobData {
-  type: 'SAMPLING_VERIFICATION';
-  /** Override sampling percent for this specific run. */
-  samplingPercent?: number;
-}
-
-export interface TriggeredVerificationJobData {
-  type: 'TRIGGERED_VERIFICATION';
-  /** Specific Multiplier IDs to verify (empty = all). */
-  multiplierIds: string[];
-  /** When false, detect but do not repair. Defaults to true. */
-  repair?: boolean;
-}
-
-export type VerificationJobData =
-  | FullVerificationJobData
-  | SamplingVerificationJobData
-  | TriggeredVerificationJobData;
-
-// ─── Queue (producer) ─────────────────────────────────────────────────────────
-
-export const matchedFundVerificationQueue = new Queue<VerificationJobData>(QUEUE_NAME, {
-  connection,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5_000 },
-    removeOnComplete: true,
-    removeOnFail: 100,
-  },
-});
 
 /**
- * Enqueues a TRIGGERED_VERIFICATION job for the given multiplier IDs.
- * Throws if the verification feature flag is disabled.
- *
- * @param multiplierIds  List of Multiplier primary keys to verify.
- * @param repair         Whether to repair found inconsistencies. Default true.
+ * Enqueue a one-shot triggered verification. Called by the admin API route
+ * when an operator wants to run an immediate check outside the scheduled cadence.
  */
-export async function enqueueTriggeredVerification(
-  multiplierIds: string[],
-  repair = true,
-): Promise<void> {
-  if (!config.matchedFundVerification.enabled) {
-    logger.warn(
-      '[matchedFundVerification] enqueueTriggeredVerification called but feature is disabled; ' +
-        'set MATCHED_FUND_VERIFICATION_ENABLED=true to enable',
-    );
-    return;
-  }
-
-  const jobId = `triggered:${multiplierIds.sort().join(',')}:${Date.now()}`;
-
-  await matchedFundVerificationQueue.add(
+export async function enqueueTriggedVerification(opts: {
+  autoRepair?: boolean;
+  correlationId?: string;
+}): Promise<string> {
+  const job = await matchedFundVerificationQueue.add(
     'TRIGGERED_VERIFICATION',
     {
       type: 'TRIGGERED_VERIFICATION',
-      multiplierIds,
-      repair,
+      autoRepair: opts.autoRepair ?? true,
+      correlationId: opts.correlationId,
+    } satisfies VerificationJobData,
+    {
+      jobId: `triggered-verification:${opts.correlationId ?? Date.now()}`,
+      removeOnComplete: 50,
+      removeOnFail: 100,
+      attempts: 2,
+      backoff: { type: 'fixed', delay: 5_000 },
     },
-    { jobId },
   );
-
-  logger.info(
-    `[matchedFundVerification] Enqueued triggered verification for ` +
-      `${multiplierIds.length} multiplier(s)`,
-    { multiplierIds, repair },
-  );
+  return job.id!;
 }
 
-// ─── Scheduled job registration ───────────────────────────────────────────────
+// ─── Scheduler ───────────────────────────────────────────────────────────────
 
 /**
- * Registers the repeating full and sampling verification schedules.
- * Idempotent: BullMQ deduplicates by `jobId`, so calling this on every
- * startup is safe.
+ * Register the two recurring verification jobs.
+ * Safe to call multiple times — BullMQ deduplicates by jobId.
  */
 export async function scheduleVerificationJobs(): Promise<void> {
   if (!config.matchedFundVerification.enabled) {
-    logger.info(
-      '[matchedFundVerification] Verification worker disabled; skipping schedule registration',
-    );
+    logger.info('MatchedFundVerification: worker disabled; skipping schedule');
     return;
   }
 
-  // Daily full sweep
+  // Full verification (default: daily at 02:30 UTC)
   await matchedFundVerificationQueue.add(
     'FULL_VERIFICATION',
-    { type: 'FULL_VERIFICATION' },
+    { type: 'FULL_VERIFICATION', autoRepair: true } satisfies VerificationJobData,
     {
       repeat: { pattern: config.matchedFundVerification.fullVerificationCron },
       jobId: 'matched-fund-full-verification',
+      removeOnComplete: 10,
+      removeOnFail: 100,
     },
   );
 
-  // Hourly sampling pass
+  // Sample verification (default: hourly at :45)
   await matchedFundVerificationQueue.add(
-    'SAMPLING_VERIFICATION',
-    { type: 'SAMPLING_VERIFICATION' },
+    'SAMPLE_VERIFICATION',
     {
-      repeat: { pattern: config.matchedFundVerification.samplingVerificationCron },
-      jobId: 'matched-fund-sampling-verification',
+      type: 'SAMPLE_VERIFICATION',
+      autoRepair: true,
+      samplePct: config.matchedFundVerification.samplePercent,
+    } satisfies VerificationJobData,
+    {
+      repeat: { pattern: config.matchedFundVerification.sampleVerificationCron },
+      jobId: 'matched-fund-sample-verification',
+      removeOnComplete: 10,
+      removeOnFail: 100,
     },
   );
 
-  logger.info(
-    '[matchedFundVerification] Scheduled verification jobs: full (cron: ' +
-      config.matchedFundVerification.fullVerificationCron +
-      '), sampling (cron: ' +
-      config.matchedFundVerification.samplingVerificationCron +
-      ')',
-  );
+  logger.info('MatchedFundVerification: scheduled full and sample verification jobs', {
+    fullCron: config.matchedFundVerification.fullVerificationCron,
+    sampleCron: config.matchedFundVerification.sampleVerificationCron,
+  });
 }
 
-// ─── Worker (consumer) ────────────────────────────────────────────────────────
+// ─── Worker ──────────────────────────────────────────────────────────────────
 
-const matchedFundVerificationWorker = new Worker<VerificationJobData>(
+const matchedFundVerificationWorker = new Worker(
   QUEUE_NAME,
-  async (job: Job<VerificationJobData>) => {
-    const { type } = job.data;
+  async (job: Job<VerificationJobData>): Promise<VerificationResult> => {
+    const { type, autoRepair = true, samplePct, correlationId } = job.data;
 
-    logger.info(`[matchedFundVerification] Processing job id=${job.id} type=${type}`);
+    logger.info(`MatchedFundVerification: processing job ${job.id} (type=${type})`, {
+      correlationId,
+    });
 
+    let mode: VerificationMode;
     switch (type) {
-      case 'FULL_VERIFICATION': {
-        const result = await MatchedFundVerificationService.verify({
-          mode: 'full',
-          repair: true,
-        });
-
-        logger.info('[matchedFundVerification] Full verification complete', {
-          examined: result.examined,
-          inconsistentCount: result.inconsistentCount,
-          repairedCount: result.repairedCount,
-          repairFailureCount: result.repairFailureCount,
-          systemicAlert: result.systemicAlert,
-          durationMs: result.durationMs,
-        });
-
-        return result;
-      }
-
-      case 'SAMPLING_VERIFICATION': {
-        const data = job.data as SamplingVerificationJobData;
-        const result = await MatchedFundVerificationService.verify({
-          mode: 'sampling',
-          repair: true,
-          samplingPercent: data.samplingPercent,
-        });
-
-        logger.info('[matchedFundVerification] Sampling verification complete', {
-          examined: result.examined,
-          inconsistentCount: result.inconsistentCount,
-          repairedCount: result.repairedCount,
-          repairFailureCount: result.repairFailureCount,
-          systemicAlert: result.systemicAlert,
-          durationMs: result.durationMs,
-        });
-
-        return result;
-      }
-
-      case 'TRIGGERED_VERIFICATION': {
-        const data = job.data as TriggeredVerificationJobData;
-        const result = await MatchedFundVerificationService.verify({
-          mode: 'triggered',
-          multiplierIds: data.multiplierIds,
-          repair: data.repair !== false,
-        });
-
-        logger.info('[matchedFundVerification] Triggered verification complete', {
-          multiplierIds: data.multiplierIds,
-          examined: result.examined,
-          inconsistentCount: result.inconsistentCount,
-          repairedCount: result.repairedCount,
-          repairFailureCount: result.repairFailureCount,
-          durationMs: result.durationMs,
-        });
-
-        return result;
-      }
-
-      default: {
-        // TypeScript exhaustiveness guard
-        const exhaustive: never = type;
-        throw new Error(`Unknown verification job type: ${exhaustive}`);
-      }
+      case 'FULL_VERIFICATION':
+        mode = 'FULL';
+        break;
+      case 'SAMPLE_VERIFICATION':
+        mode = 'SAMPLE';
+        break;
+      case 'TRIGGERED_VERIFICATION':
+        mode = 'TRIGGERED';
+        break;
+      default:
+        throw new Error(`Unknown verification job type: ${type}`);
     }
+
+    const result = await MatchedFundVerificationService.verify(mode, autoRepair, samplePct);
+
+    // Surface key metrics in job output for BullMQ dashboard / log aggregation.
+    logger.info(`MatchedFundVerification: job ${job.id} finished`, {
+      mode,
+      durationMs: result.durationMs,
+      checkedCount: result.checkedCount,
+      inconsistentCount: result.inconsistentCount,
+      repairedCount: result.repairedCount,
+      failedRepairCount: result.failedRepairCount,
+      alertCount: result.alerts.length,
+      correlationId,
+    });
+
+    return result;
   },
   {
     connection,
-    // Concurrency=1 prevents two full scans from running simultaneously and
-    // avoids double-repairing the same rows if jobs queue up.
+    // Serialize verification runs — only one active at a time to prevent
+    // two simultaneous repair transactions from racing on the same multiplier.
     concurrency: 1,
   },
 );
 
 matchedFundVerificationWorker.on('completed', (job) => {
-  logger.info(`[matchedFundVerification] Job completed id=${job.id}`);
+  logger.info(`MatchedFundVerification: job completed: ${job.id}`);
 });
 
 matchedFundVerificationWorker.on('failed', (job, err) => {
-  logger.error(`[matchedFundVerification] Job failed id=${job?.id}`, {
-    jobType: job?.data?.type,
-    error: err.message,
-    stack: err.stack,
-  });
+  logger.error(`MatchedFundVerification: job failed: ${job?.id}`, err);
 });
 
-matchedFundVerificationWorker.on('error', (err) => {
-  logger.error('[matchedFundVerification] Worker error', { error: err.message });
-});
+// ─── Lifecycle ───────────────────────────────────────────────────────────────
+
+export async function startMatchedFundVerificationWorker(): Promise<void> {
+  await scheduleVerificationJobs();
+  logger.info('MatchedFundVerification: worker started');
+}
+
+export async function stopMatchedFundVerificationWorker(): Promise<void> {
+  await matchedFundVerificationWorker.close();
+  await matchedFundVerificationQueue.close();
+  logger.info('MatchedFundVerification: worker stopped');
+}
 
 export default matchedFundVerificationWorker;

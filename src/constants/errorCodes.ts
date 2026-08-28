@@ -484,6 +484,26 @@ export const ErrorCodes = {
     cause: 'No active session exists with the given ID for this account.',
     solution: 'Verify the session ID from the sessions list; it may have already expired or been revoked.',
   },
+
+  // ── MATCHED FUND VERIFICATION ────────────────────────────────────────────
+  VERIFICATION_001: {
+    httpStatus: 503,
+    message: 'Verification job could not be enqueued',
+    cause: 'The BullMQ queue for matched-fund verification was not reachable or rejected the job.',
+    solution: 'Check that the Redis connection is healthy and the matched-fund-verification worker is running.',
+  },
+  VERIFICATION_002: {
+    httpStatus: 404,
+    message: 'Verification job not found',
+    cause: 'No verification job exists with the given ID or the job has already been cleaned from the queue.',
+    solution: 'Use the trigger endpoint to start a new verification run.',
+  },
+  VERIFICATION_003: {
+    httpStatus: 400,
+    message: 'Invalid verification parameters',
+    cause: 'The request contained invalid values for mode, samplePct, or autoRepair.',
+    solution: 'Provide mode as FULL, SAMPLE, or TRIGGERED; samplePct between 1 and 100; autoRepair as boolean.',
+  },
 } as const satisfies Record<string, ErrorCodeDefinition>;
 
 export type ErrorCodeKey = keyof typeof ErrorCodes;

@@ -1,575 +1,471 @@
 /**
  * MatchedFundVerificationService
  *
- * ─── Purpose ─────────────────────────────────────────────────────────────────
- * Verifies and, where permitted, repairs the `matchedTotal` counter on every
- * `Multiplier` row.  `matchedTotal` is the running sum of all `matchedAmount`
- * values in the linked `MatchedFund` rows (excluding refunded ones).  It is
- * maintained atomically during allocation and refund, but several out-of-band
- * paths (migrations, admin scripts, connection faults) can cause it to drift
- * from the true sum.  This service is the correctness net that catches and
- * corrects such drift.
+ * ─── ADR: Consistency Verification and Repair for matchedTotal ─────────────
  *
- * ─── Verification algorithm ──────────────────────────────────────────────────
- * A single aggregation query computes the true sum for every Multiplier in one
- * round-trip:
+ * PROBLEM
+ * -------
+ * Multiplier.matchedTotal is a denormalized counter that must equal the sum of
+ * matchedAmount from all non-refunded MatchedFund rows (refundedAt IS NULL)
+ * for that multiplier. While the allocation and refund paths maintain this
+ * invariant transactionally, several out-of-band scenarios can cause drift:
+ *
+ *   1. Direct DB writes (migrations, admin fixes) that bypass the service.
+ *   2. Partial transaction failures where the MatchedFund INSERT commits but
+ *      the Multiplier UPDATE fails (theoretically impossible inside a single
+ *      TX, but can happen if connection is severed after the CTE fires).
+ *   3. Historical data: if the backfill in 20260727_add_multiplier_matched_total
+ *      was incomplete, pre-existing rows started from a wrong baseline.
+ *   4. Refund edge cases: donation status changed without matched-fund reversal.
+ *
+ * VERIFICATION STRATEGY
+ * ---------------------
+ * A single SQL query aggregates the ground truth for ALL multipliers at once:
  *
  *   SELECT m.id, m."matchedTotal",
- *          COALESCE(SUM(mf."matchedAmount"), 0) AS actual_sum
+ *          COALESCE(SUM(mf."matchedAmount"), 0) AS "actualSum"
  *   FROM "Multiplier" m
  *   LEFT JOIN "MatchedFund" mf
- *          ON mf."multiplierId" = m.id AND mf."refundedAt" IS NULL
+ *          ON mf."multiplierId" = m.id
+ *         AND mf."refundedAt" IS NULL
  *   GROUP BY m.id, m."matchedTotal"
- *   HAVING ABS(m."matchedTotal" - COALESCE(SUM(mf."matchedAmount"), 0)) > $threshold
+ *   HAVING ABS(m."matchedTotal" - COALESCE(SUM(mf."matchedAmount"), 0))
+ *          > <threshold>
  *
- * Refunded `MatchedFund` rows are excluded because `refundDonation` decrements
- * `matchedTotal` at the same time it sets `refundedAt`, keeping both sides of
- * the invariant in sync.
+ * This runs server-side, never loads individual rows into Node.js memory, and
+ * scales to millions of MatchedFund rows with a single index scan on
+ * (multiplierId) + (refundedAt).
  *
- * For sampling passes the query adds a TABLESAMPLE SYSTEM($pct) clause on the
- * Multiplier scan so the DB only examines a fraction of rows.  Note that
- * TABLESAMPLE operates on 8 KB pages, not individual rows, so the effective
- * sample fraction can differ from the nominal percentage; this is acceptable for
- * an early-warning signal where perfect coverage is not required.
+ * For SAMPLING mode we use TABLESAMPLE SYSTEM(pct) to check a random fraction
+ * of the Multiplier table — cheap for high-frequency checks.
  *
- * ─── Repair algorithm ────────────────────────────────────────────────────────
- * For each inconsistent row the service opens an interactive transaction and:
+ * REPAIR STRATEGY
+ * ---------------
+ * For each inconsistent multiplier:
+ *   1. Open an interactive transaction.
+ *   2. Lock the Multiplier row with FOR UPDATE (same lock used by claimMatchCap
+ *      and refundDonation, so repair is serialized against concurrent allocations).
+ *   3. Re-compute the true sum inside the transaction (avoids a TOCTOU between
+ *      the detection query and the repair UPDATE).
+ *   4. UPDATE Multiplier.matchedTotal to the recomputed sum.
+ *   5. Commit — releasing the lock immediately to minimize allocation latency.
  *
- *   1. Re-reads `matchedTotal` with FOR UPDATE (serialises against concurrent
- *      allocation/refund operations that also hold this lock).
- *   2. Re-computes the true sum from MatchedFund (inside the same tx so the
- *      snapshot is consistent with the locked row).
- *   3. Re-checks the discrepancy — if a concurrent transaction already corrected
- *      the value the repair is a no-op (idempotent).
- *   4. Writes the corrected value.
+ * The two-step detect-then-repair pattern is safe because:
+ *   - The FOR UPDATE in step 2 prevents concurrent allocations from modifying
+ *     matchedTotal between the re-read in step 3 and the UPDATE in step 4.
+ *   - If a concurrent allocation commits between detection and repair, the
+ *     re-read in step 3 already sees the incremented matchedTotal, so the
+ *     repair sets the correct value and does not accidentally roll it back.
  *
- * The repair FOR UPDATE lock participates in the same lock-ordering protocol as
- * claimMatchCap (Multiplier lock first), so no deadlock is possible between
- * normal allocation and repair.
+ * ALERTING THRESHOLDS
+ * -------------------
+ * Two alert conditions are checked after each verification run:
+ *   - Systemic threshold: >X% of checked multipliers are inconsistent.
+ *   - Large discrepancy: any single multiplier exceeds Y absolute difference.
+ * Both are configurable via environment variables.
  *
- * ─── Alerting ────────────────────────────────────────────────────────────────
- * Three alert conditions are checked and logged at ERROR level:
+ * PRECISION
+ * ---------
+ * All arithmetic uses Prisma.Decimal (decimal.js). The detection threshold is
+ * also a Decimal to avoid floating-point noise in the comparison.
  *
- *   • systemic_inconsistency: ratio of inconsistent rows > alertInconsistencyRateThreshold
- *     — aborts the repair phase entirely to avoid patching widespread corruption.
- *   • large_discrepancy: |discrepancy| > alertLargeDiscrepancyThreshold for a single row.
- *   • repair_failure: the repair transaction failed after all retries.
- *
- * In production these log lines should be forwarded to an alerting backend
- * (PagerDuty, Datadog, etc.) by the log shipper.  The service does not integrate
- * with any alerting SDK directly — that concern belongs at the infrastructure
- * layer.
- *
- * ─── Concurrency safety ──────────────────────────────────────────────────────
- * Verification (read-only) is safe to run at any time — it holds no locks and
- * does not interfere with concurrent allocation or refund transactions.
- *
- * Repair acquires an exclusive Multiplier row lock for the duration of each
- * single-row transaction (≪1 s typical).  Concurrent allocations against the
- * same Multiplier row will block briefly and then proceed normally; the repair
- * does not prevent them from claiming capacity.
- *
- * ─── Idempotency ─────────────────────────────────────────────────────────────
- * Running verify+repair N times produces the same end-state as running it once.
- * The re-read inside the repair transaction ensures that if the row was already
- * corrected by a previous pass, the no-op branch is taken.
- *
- * ─── Testing surface ─────────────────────────────────────────────────────────
- * The `prismaClient` parameter on all public methods allows callers to inject
- * a mock PrismaClient (or a transaction client) in unit tests.  The
- * `injectInconsistency` method is a test-only helper that directly writes a
- * stale `matchedTotal` so tests can simulate drift without needing real DB
- * concurrent writes.
+ * IDEMPOTENCY
+ * -----------
+ * Re-running verification is safe: the repair UPDATE is idempotent — setting
+ * matchedTotal to the current true sum is a no-op if it is already correct.
  */
 
 import { Prisma } from '@prisma/client';
 import prisma from '../config/database';
-import { config } from '../config';
 import logger from '../config/logger';
+import { config } from '../config';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Public types ─────────────────────────────────────────────────────────────
 
-/** One row returned by the aggregate verification query. */
-export interface InconsistentMultiplier {
-  /** Multiplier primary key. */
-  id: string;
-  /** The stale counter currently stored in the DB. */
-  storedTotal: Prisma.Decimal;
-  /** The true sum computed from MatchedFund rows. */
-  actualSum: Prisma.Decimal;
-  /** actualSum − storedTotal (can be negative). */
-  discrepancy: Prisma.Decimal;
-}
+export type VerificationMode = 'FULL' | 'SAMPLE' | 'TRIGGERED';
 
-/** Summary produced by a single verification run. */
-export interface VerificationResult {
-  /** Verification mode that produced this result. */
-  mode: 'full' | 'sampling' | 'triggered';
-  /** ISO-8601 timestamp when verification started. */
-  startedAt: string;
-  /** ISO-8601 timestamp when verification finished (after any repairs). */
-  finishedAt: string;
-  /** Total number of Multiplier rows examined. */
-  examined: number;
-  /** Number of rows found to be inconsistent. */
-  inconsistentCount: number;
-  /** Number of rows successfully repaired. */
-  repairedCount: number;
-  /** Number of rows that could not be repaired after all retries. */
-  repairFailureCount: number;
-  /** Details of each inconsistency found. */
-  inconsistencies: InconsistentMultiplier[];
-  /** True if the systemic-inconsistency threshold was breached. */
-  systemicAlert: boolean;
-  /** Duration of the verification + repair phase in milliseconds. */
-  durationMs: number;
-}
-
-/** Result of attempting to repair a single Multiplier row. */
-export interface RepairResult {
+export interface InconsistencyRecord {
   multiplierId: string;
-  /** Value of matchedTotal before repair. */
-  oldValue: Prisma.Decimal;
-  /** Value of matchedTotal after repair (equals actualSum). */
-  newValue: Prisma.Decimal;
-  /** newValue − oldValue. */
+  storedTotal: Prisma.Decimal;
+  actualSum: Prisma.Decimal;
+  /** actualSum − storedTotal (signed: positive means under-count, negative over-count) */
   delta: Prisma.Decimal;
+}
+
+export interface RepairRecord extends InconsistencyRecord {
+  repairedAt: Date;
   success: boolean;
-  /** Human-readable error message if success=false. */
   error?: string;
 }
 
-/** Options for the verify-and-repair call. */
-export interface VerifyOptions {
-  mode: 'full' | 'sampling' | 'triggered';
-  /**
-   * For mode='triggered': only verify these specific Multiplier IDs.
-   * For 'full' and 'sampling', this field is ignored.
-   */
-  multiplierIds?: string[];
-  /** Override the sampling percentage for this run (1–100). */
-  samplingPercent?: number;
-  /** When false, inconsistencies are logged but not repaired. */
-  repair?: boolean;
+export interface VerificationResult {
+  mode: VerificationMode;
+  startedAt: Date;
+  finishedAt: Date;
+  durationMs: number;
+  checkedCount: number;
+  inconsistentCount: number;
+  repairedCount: number;
+  failedRepairCount: number;
+  inconsistencies: InconsistencyRecord[];
+  repairs: RepairRecord[];
+  alerts: VerificationAlert[];
 }
 
-// ─── Row type returned by the raw aggregate query ────────────────────────────
+export interface VerificationAlert {
+  type: 'SYSTEMIC_INCONSISTENCY' | 'LARGE_DISCREPANCY' | 'REPAIR_FAILURE';
+  message: string;
+  details: Record<string, unknown>;
+}
 
-interface AggregateRow {
+// ─── Raw query result types ───────────────────────────────────────────────────
+
+interface InconsistencyRow {
   id: string;
-  storedTotal: string;
+  matchedTotal: string;
   actualSum: string;
-  discrepancy: string;
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+interface ActualSumRow {
+  actualSum: string;
 }
 
-// ─── Service ─────────────────────────────────────────────────────────────────
+// ─── Service ──────────────────────────────────────────────────────────────────
 
 export class MatchedFundVerificationService {
   /**
-   * Main entry point. Runs a full, sampling, or triggered verification pass
-   * and optionally repairs all inconsistent rows.
+   * Run the consistency check and optionally auto-repair inconsistencies.
    *
-   * @param opts  Verification options.
-   * @param db    Injectable Prisma client (defaults to the module-level singleton).
-   *              Pass a mock or a transaction client in tests.
+   * @param mode         FULL = all multipliers, SAMPLE = random subset,
+   *                     TRIGGERED = all multipliers (like FULL, used to
+   *                     distinguish the call source in logs/alerts).
+   * @param autoRepair   When true, repair detected inconsistencies.
+   * @param samplePct    Percentage of Multiplier rows to check in SAMPLE mode
+   *                     (1–100). Ignored for FULL/TRIGGERED.
    */
   static async verify(
-    opts: VerifyOptions,
-    db: typeof prisma = prisma,
+    mode: VerificationMode = 'FULL',
+    autoRepair = true,
+    samplePct?: number,
   ): Promise<VerificationResult> {
-    const cfg = config.matchedFundVerification;
     const startedAt = new Date();
-    const precisionThreshold = new Prisma.Decimal(cfg.precisionThreshold);
-    const largeDiscrepancyThreshold = new Prisma.Decimal(cfg.alertLargeDiscrepancyThreshold);
-    const doRepair = opts.repair !== false; // default true
+    const cfg = config.matchedFundVerification;
+    const threshold = new Prisma.Decimal(cfg.inconsistencyThreshold);
+    const effectiveSamplePct = samplePct ?? cfg.samplePercent;
 
-    logger.info(`[matchedFundVerification] Starting ${opts.mode} verification pass`, {
-      mode: opts.mode,
-      repair: doRepair,
-      samplingPercent: opts.samplingPercent ?? cfg.samplingPercent,
+    logger.info(`MatchedFundVerification: starting ${mode} verification`, {
+      autoRepair,
+      samplePct: mode === 'SAMPLE' ? effectiveSamplePct : undefined,
     });
 
-    // ── 1. Run the aggregation query ──────────────────────────────────────────
-    let rows: InconsistentMultiplier[];
-    let examined: number;
+    // ── 1. Detect inconsistencies ─────────────────────────────────────────────
+    const inconsistencies = await this.detectInconsistencies(mode, effectiveSamplePct, threshold);
+    const checkedCount = await this.countChecked(mode, effectiveSamplePct);
 
-    if (opts.mode === 'triggered' && opts.multiplierIds !== undefined) {
-      // For triggered mode, always use queryTriggered even with an empty list
-      // (queryTriggered short-circuits immediately for empty arrays).
-      ({ rows, examined } = await this.queryTriggered(
-        opts.multiplierIds,
-        precisionThreshold,
-        db,
-      ));
-    } else if (opts.mode === 'sampling') {
-      const pct = opts.samplingPercent ?? cfg.samplingPercent;
-      ({ rows, examined } = await this.querySampling(pct, precisionThreshold, db));
-    } else {
-      ({ rows, examined } = await this.queryFull(precisionThreshold, db));
-    }
+    logger.info(`MatchedFundVerification: found ${inconsistencies.length} inconsistencies in ${checkedCount} multipliers`);
 
-    logger.info(
-      `[matchedFundVerification] Query complete: examined=${examined} inconsistent=${rows.length}`,
-    );
-
-    // ── 2. Systemic-inconsistency alert ───────────────────────────────────────
-    const inconsistencyRate = examined > 0 ? rows.length / examined : 0;
-    const systemicAlert = inconsistencyRate > cfg.alertInconsistencyRateThreshold;
-
-    if (systemicAlert) {
-      logger.error('[matchedFundVerification] ALERT: systemic_inconsistency', {
-        alert: 'systemic_inconsistency',
-        inconsistentCount: rows.length,
-        examined,
-        inconsistencyRate,
-        threshold: cfg.alertInconsistencyRateThreshold,
-      });
-    }
-
-    // ── 3. Large-discrepancy alerts ───────────────────────────────────────────
-    for (const row of rows) {
-      if (row.discrepancy.abs().greaterThan(largeDiscrepancyThreshold)) {
-        logger.error('[matchedFundVerification] ALERT: large_discrepancy', {
-          alert: 'large_discrepancy',
-          multiplierId: row.id,
-          storedTotal: row.storedTotal.toString(),
-          actualSum: row.actualSum.toString(),
-          discrepancy: row.discrepancy.toString(),
-          threshold: largeDiscrepancyThreshold.toString(),
-        });
+    // ── 2. Repair ─────────────────────────────────────────────────────────────
+    const repairs: RepairRecord[] = [];
+    if (autoRepair && inconsistencies.length > 0) {
+      for (const inc of inconsistencies) {
+        const repair = await this.repairOne(inc);
+        repairs.push(repair);
       }
-    }
-
-    // ── 4. Repair phase ───────────────────────────────────────────────────────
-    let repairedCount = 0;
-    let repairFailureCount = 0;
-
-    if (doRepair && !systemicAlert && rows.length > 0) {
-      const batchLimit = cfg.repairBatchLimit;
-      const rowsToRepair = batchLimit > 0 ? rows.slice(0, batchLimit) : rows;
-
-      if (batchLimit > 0 && rows.length > batchLimit) {
-        logger.warn(
-          `[matchedFundVerification] repairBatchLimit=${batchLimit} reached; ` +
-            `${rows.length - batchLimit} inconsistencies deferred to next run`,
-        );
-      }
-
-      for (const inconsistent of rowsToRepair) {
-        const result = await this.repairOne(inconsistent, db);
-        if (result.success) {
-          repairedCount++;
-        } else {
-          repairFailureCount++;
-        }
-      }
-    } else if (doRepair && systemicAlert) {
-      logger.warn(
-        '[matchedFundVerification] Repair aborted due to systemic inconsistency alert; ' +
-          'manual investigation required',
-      );
     }
 
     const finishedAt = new Date();
-    const durationMs = finishedAt.getTime() - startedAt.getTime();
+    const repairedCount = repairs.filter((r) => r.success).length;
+    const failedRepairCount = repairs.filter((r) => !r.success).length;
+
+    // ── 3. Alerting ───────────────────────────────────────────────────────────
+    const alerts = this.buildAlerts({
+      checkedCount,
+      inconsistencies,
+      repairs,
+      cfg,
+      threshold,
+    });
+
+    for (const alert of alerts) {
+      logger.warn(`MatchedFundVerification ALERT [${alert.type}]: ${alert.message}`, alert.details);
+    }
 
     const result: VerificationResult = {
-      mode: opts.mode,
-      startedAt: startedAt.toISOString(),
-      finishedAt: finishedAt.toISOString(),
-      examined,
-      inconsistentCount: rows.length,
+      mode,
+      startedAt,
+      finishedAt,
+      durationMs: finishedAt.getTime() - startedAt.getTime(),
+      checkedCount,
+      inconsistentCount: inconsistencies.length,
       repairedCount,
-      repairFailureCount,
-      inconsistencies: rows,
-      systemicAlert,
-      durationMs,
+      failedRepairCount,
+      inconsistencies,
+      repairs,
+      alerts,
     };
 
-    logger.info('[matchedFundVerification] Pass complete', {
-      mode: opts.mode,
-      examined,
-      inconsistentCount: rows.length,
+    logger.info(`MatchedFundVerification: completed ${mode} in ${result.durationMs}ms`, {
+      checkedCount,
+      inconsistentCount: inconsistencies.length,
       repairedCount,
-      repairFailureCount,
-      systemicAlert,
-      durationMs,
+      failedRepairCount,
+      alertCount: alerts.length,
     });
 
     return result;
   }
 
-  // ─── Query helpers ──────────────────────────────────────────────────────────
+  // ─── Detection ──────────────────────────────────────────────────────────────
 
   /**
-   * Full verification: scan all Multiplier rows.
-   * Uses a single aggregation JOIN — no rows are loaded into Node memory.
+   * Single-query aggregation to find all multipliers whose matchedTotal
+   * deviates from the true sum of non-refunded MatchedFund.matchedAmount.
+   *
+   * For SAMPLE mode we use TABLESAMPLE SYSTEM(pct) which is fast (block-level
+   * random sampling, no full sequential scan) and good enough for high-
+   * frequency heartbeat checks.
+   *
+   * The HAVING clause filters server-side so only rows with actual drift are
+   * returned to Node.js — typically zero rows under normal operation.
    */
-  static async queryFull(
-    precisionThreshold: Prisma.Decimal,
-    db: typeof prisma = prisma,
-  ): Promise<{ rows: InconsistentMultiplier[]; examined: number }> {
-    // Count is read in a separate fast query (no JOIN) so the aggregate query
-    // only returns inconsistent rows, keeping the result set small.
-    const [countResult, aggRows] = await Promise.all([
-      db.$queryRaw<Array<{ total: bigint }>>(Prisma.sql`SELECT COUNT(*) AS total FROM "Multiplier"`),
-      db.$queryRaw<AggregateRow[]>(Prisma.sql`
+  private static async detectInconsistencies(
+    mode: VerificationMode,
+    samplePct: number,
+    threshold: Prisma.Decimal,
+  ): Promise<InconsistencyRecord[]> {
+    const thresholdStr = threshold.toString();
+
+    let rows: InconsistencyRow[];
+
+    if (mode === 'SAMPLE') {
+      // Clamp sample percent to [1, 100] to satisfy TABLESAMPLE constraint.
+      const pct = Math.max(1, Math.min(100, samplePct));
+      rows = await prisma.$queryRaw<InconsistencyRow[]>(Prisma.sql`
         SELECT
           m.id,
-          m."matchedTotal"::text               AS "storedTotal",
-          COALESCE(SUM(mf."matchedAmount"), 0)::text AS "actualSum",
-          (COALESCE(SUM(mf."matchedAmount"), 0) - m."matchedTotal")::text AS discrepancy
-        FROM "Multiplier" m
+          m."matchedTotal"::text           AS "matchedTotal",
+          COALESCE(SUM(mf."matchedAmount"), 0)::text AS "actualSum"
+        FROM   "Multiplier" TABLESAMPLE SYSTEM(${pct}) m
         LEFT JOIN "MatchedFund" mf
                ON mf."multiplierId" = m.id
               AND mf."refundedAt" IS NULL
         GROUP BY m.id, m."matchedTotal"
-        HAVING ABS(COALESCE(SUM(mf."matchedAmount"), 0) - m."matchedTotal")
-               > ${precisionThreshold.toString()}::numeric
-      `),
-    ]);
-
-    const examined = Number(countResult[0]?.total ?? 0);
-    return { rows: this.mapAggregateRows(aggRows), examined };
-  }
-
-  /**
-   * Sampling verification: scan a random TABLESAMPLE SYSTEM($pct) of rows.
-   * Fast early-warning pass; does not guarantee complete coverage.
-   */
-  static async querySampling(
-    samplingPercent: number,
-    precisionThreshold: Prisma.Decimal,
-    db: typeof prisma = prisma,
-  ): Promise<{ rows: InconsistentMultiplier[]; examined: number }> {
-    // Clamp to valid TABLESAMPLE range.
-    const pct = Math.min(Math.max(samplingPercent, 0.000001), 100);
-
-    // Because TABLESAMPLE cannot be used through Prisma's model API and
-    // pct is a server-computed number (not user input), we format it directly
-    // into the SQL.  pct is already clamped to [0.000001, 100] above.
-    const pctLiteral = Prisma.sql`${pct}`;
-
-    const [countResult, aggRows] = await Promise.all([
-      db.$queryRaw<Array<{ total: bigint }>>(
-        Prisma.sql`SELECT COUNT(*) AS total FROM "Multiplier" TABLESAMPLE SYSTEM(${pctLiteral})`,
-      ),
-      db.$queryRaw<AggregateRow[]>(Prisma.sql`
+        HAVING ABS(m."matchedTotal"
+                   - COALESCE(SUM(mf."matchedAmount"), 0)) > ${thresholdStr}::numeric
+      `);
+    } else {
+      // FULL / TRIGGERED: check every Multiplier row.
+      rows = await prisma.$queryRaw<InconsistencyRow[]>(Prisma.sql`
         SELECT
           m.id,
-          m."matchedTotal"::text               AS "storedTotal",
-          COALESCE(SUM(mf."matchedAmount"), 0)::text AS "actualSum",
-          (COALESCE(SUM(mf."matchedAmount"), 0) - m."matchedTotal")::text AS discrepancy
-        FROM "Multiplier" TABLESAMPLE SYSTEM(${pctLiteral}) m
+          m."matchedTotal"::text           AS "matchedTotal",
+          COALESCE(SUM(mf."matchedAmount"), 0)::text AS "actualSum"
+        FROM   "Multiplier" m
         LEFT JOIN "MatchedFund" mf
                ON mf."multiplierId" = m.id
               AND mf."refundedAt" IS NULL
         GROUP BY m.id, m."matchedTotal"
-        HAVING ABS(COALESCE(SUM(mf."matchedAmount"), 0) - m."matchedTotal")
-               > ${precisionThreshold.toString()}::numeric
-      `),
-    ]);
-
-    const examined = Number(countResult[0]?.total ?? 0);
-    return { rows: this.mapAggregateRows(aggRows), examined };
-  }
-
-  /**
-   * Triggered verification: verify only the specified Multiplier IDs.
-   * Used after a deployment, a manual fix, or when an allocation fails.
-   */
-  static async queryTriggered(
-    multiplierIds: string[],
-    precisionThreshold: Prisma.Decimal,
-    db: typeof prisma = prisma,
-  ): Promise<{ rows: InconsistentMultiplier[]; examined: number }> {
-    if (multiplierIds.length === 0) {
-      return { rows: [], examined: 0 };
+        HAVING ABS(m."matchedTotal"
+                   - COALESCE(SUM(mf."matchedAmount"), 0)) > ${thresholdStr}::numeric
+      `);
     }
 
-    const aggRows = await db.$queryRaw<AggregateRow[]>(Prisma.sql`
-      SELECT
-        m.id,
-        m."matchedTotal"::text               AS "storedTotal",
-        COALESCE(SUM(mf."matchedAmount"), 0)::text AS "actualSum",
-        (COALESCE(SUM(mf."matchedAmount"), 0) - m."matchedTotal")::text AS discrepancy
-      FROM "Multiplier" m
-      LEFT JOIN "MatchedFund" mf
-             ON mf."multiplierId" = m.id
-            AND mf."refundedAt" IS NULL
-      WHERE m.id = ANY(${multiplierIds}::text[])
-      GROUP BY m.id, m."matchedTotal"
-      HAVING ABS(COALESCE(SUM(mf."matchedAmount"), 0) - m."matchedTotal")
-             > ${precisionThreshold.toString()}::numeric
-    `);
+    return rows.map((row) => {
+      const storedTotal = new Prisma.Decimal(row.matchedTotal);
+      const actualSum = new Prisma.Decimal(row.actualSum);
+      return {
+        multiplierId: row.id,
+        storedTotal,
+        actualSum,
+        delta: actualSum.minus(storedTotal),
+      };
+    });
+  }
 
-    return { rows: this.mapAggregateRows(aggRows), examined: multiplierIds.length };
+  /**
+   * Returns the number of multipliers that were checked (for the
+   * inconsistency-rate alert calculation).
+   */
+  private static async countChecked(mode: VerificationMode, samplePct: number): Promise<number> {
+    if (mode === 'SAMPLE') {
+      // TABLESAMPLE is approximate; count separately so we can compute a rate.
+      const pct = Math.max(1, Math.min(100, samplePct));
+      const rows = await prisma.$queryRaw<[{ cnt: string }]>(
+        Prisma.sql`SELECT COUNT(*)::text AS cnt FROM "Multiplier" TABLESAMPLE SYSTEM(${pct})`,
+      );
+      return parseInt(rows[0].cnt, 10);
+    }
+    return prisma.multiplier.count();
   }
 
   // ─── Repair ─────────────────────────────────────────────────────────────────
 
   /**
-   * Attempts to repair a single inconsistent Multiplier row with retry logic.
-   * Returns a `RepairResult` describing the outcome.
+   * Repair a single inconsistent multiplier:
+   *   1. Lock the Multiplier row FOR UPDATE (serialized with claimMatchCap).
+   *   2. Re-aggregate the true sum *inside* the transaction (avoids TOCTOU).
+   *   3. UPDATE matchedTotal to the freshly computed true sum.
+   *   4. Commit.
    *
-   * Concurrency: the FOR UPDATE inside the transaction serialises against
-   * concurrent claimMatchCap and refundDonation calls on the same row.
+   * If the repair transaction fails (e.g. deadlock, connection error), the
+   * error is captured and returned in RepairRecord rather than thrown, so
+   * a single failure does not abort repairs for other multipliers.
    */
-  static async repairOne(
-    inconsistent: InconsistentMultiplier,
-    db: typeof prisma = prisma,
-  ): Promise<RepairResult> {
-    const cfg = config.matchedFundVerification;
-    const precisionThreshold = new Prisma.Decimal(cfg.precisionThreshold);
-    let lastError: string | undefined;
-
-    for (let attempt = 0; attempt <= cfg.repairMaxRetries; attempt++) {
-      if (attempt > 0) {
-        await sleep(cfg.repairRetryDelayMs);
-      }
-
-      try {
-        const repairResult = await db.$transaction(async (tx) => {
-          // Step 1: Lock the Multiplier row (same lock as claimMatchCap).
-          const locked = await tx.$queryRaw<Array<{ matchedTotal: string }>>(Prisma.sql`
-            SELECT "matchedTotal"::text AS "matchedTotal"
-            FROM "Multiplier"
-            WHERE id = ${inconsistent.id}
+  private static async repairOne(inc: InconsistencyRecord): Promise<RepairRecord> {
+    const repairedAt = new Date();
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          // Step 1: Lock the row. This serializes with claimMatchCap so no
+          // concurrent allocation can slip in between our re-read and our write.
+          await tx.$queryRaw(Prisma.sql`
+            SELECT "matchedTotal"
+            FROM   "Multiplier"
+            WHERE  id = ${inc.multiplierId}
             FOR UPDATE
           `);
 
-          if (locked.length === 0) {
-            throw new Error(`Multiplier ${inconsistent.id} not found during repair`);
-          }
+          // Step 2: Re-compute the true sum inside the transaction so we
+          // always write the post-lock accurate value, even if a concurrent
+          // allocation committed between our detection scan and this repair.
+          const rows = await tx.$queryRaw<ActualSumRow[]>(Prisma.sql`
+            SELECT COALESCE(SUM(mf."matchedAmount"), 0)::text AS "actualSum"
+            FROM   "MatchedFund" mf
+            WHERE  mf."multiplierId" = ${inc.multiplierId}
+              AND  mf."refundedAt" IS NULL
+          `);
+          const trueSum = new Prisma.Decimal(rows[0].actualSum);
 
-          const currentTotal = new Prisma.Decimal(locked[0].matchedTotal);
-
-          // Step 2: Re-compute true sum inside the transaction (consistent snapshot).
-          const sumRows = await tx.$queryRaw<Array<{ actual_sum: string }>>(Prisma.sql`
-            SELECT COALESCE(SUM("matchedAmount"), 0)::text AS actual_sum
-            FROM "MatchedFund"
-            WHERE "multiplierId" = ${inconsistent.id}
-              AND "refundedAt" IS NULL
+          // Step 3: Update to the recomputed value.
+          await tx.$queryRaw(Prisma.sql`
+            UPDATE "Multiplier"
+            SET    "matchedTotal" = ${trueSum.toString()}::numeric,
+                   "updatedAt"   = NOW()
+            WHERE  id = ${inc.multiplierId}
           `);
 
-          const actualSum = new Prisma.Decimal(sumRows[0].actual_sum);
-          const freshDiscrepancy = actualSum.minus(currentTotal).abs();
-
-          // Step 3: No-op if already consistent (concurrent repair or allocation fixed it).
-          if (freshDiscrepancy.lessThanOrEqualTo(precisionThreshold)) {
-            return {
-              multiplierId: inconsistent.id,
-              oldValue: currentTotal,
-              newValue: currentTotal,
-              delta: new Prisma.Decimal(0),
-              success: true,
-              alreadyConsistent: true,
-            };
-          }
-
-          // Step 4: Write the corrected value.
-          await tx.$queryRaw`
-            UPDATE "Multiplier"
-            SET "matchedTotal" = ${actualSum.toString()}::numeric
-            WHERE id = ${inconsistent.id}
-          `;
-
-          return {
-            multiplierId: inconsistent.id,
-            oldValue: currentTotal,
-            newValue: actualSum,
-            delta: actualSum.minus(currentTotal),
-            success: true,
-            alreadyConsistent: false,
-          };
-        });
-
-        const outcome: RepairResult = {
-          multiplierId: repairResult.multiplierId,
-          oldValue: repairResult.oldValue,
-          newValue: repairResult.newValue,
-          delta: repairResult.delta,
-          success: true,
-        };
-
-        // Log successful repairs (including no-ops) so the call site (verify)
-        // can also log at INFO without duplicating, and standalone callers get
-        // observability too.
-        if (!repairResult.alreadyConsistent) {
-          logger.info('[matchedFundVerification] Repaired multiplier', {
-            multiplierId: outcome.multiplierId,
-            oldValue: outcome.oldValue.toString(),
-            newValue: outcome.newValue.toString(),
-            delta: outcome.delta.toString(),
+          logger.info('MatchedFundVerification: repaired multiplier', {
+            multiplierId: inc.multiplierId,
+            oldValue: inc.storedTotal.toString(),
+            newValue: trueSum.toString(),
+            delta: inc.delta.toString(),
           });
-        }
+        },
+        {
+          // Keep the repair transaction short to minimise lock hold time.
+          timeout: config.matchedFundVerification.repairTimeoutMs,
+        },
+      );
 
-        return outcome;
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
-        logger.warn(
-          `[matchedFundVerification] Repair attempt ${attempt + 1}/${cfg.repairMaxRetries + 1} ` +
-            `failed for multiplier ${inconsistent.id}: ${lastError}`,
-        );
+      return {
+        ...inc,
+        repairedAt,
+        success: true,
+      };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      logger.error('MatchedFundVerification: repair failed', {
+        multiplierId: inc.multiplierId,
+        error,
+      });
+      return {
+        ...inc,
+        repairedAt,
+        success: false,
+        error,
+      };
+    }
+  }
+
+  // ─── Alerting ────────────────────────────────────────────────────────────────
+
+  private static buildAlerts({
+    checkedCount,
+    inconsistencies,
+    repairs,
+    cfg,
+    threshold: _threshold,
+  }: {
+    checkedCount: number;
+    inconsistencies: InconsistencyRecord[];
+    repairs: RepairRecord[];
+    cfg: typeof config.matchedFundVerification;
+    threshold: Prisma.Decimal;
+  }): VerificationAlert[] {
+    const alerts: VerificationAlert[] = [];
+
+    // Alert 1: systemic — too many multipliers inconsistent.
+    if (checkedCount > 0) {
+      const inconsistencyRate = inconsistencies.length / checkedCount;
+      if (inconsistencyRate > cfg.alertSystemicThreshold) {
+        alerts.push({
+          type: 'SYSTEMIC_INCONSISTENCY',
+          message: `${(inconsistencyRate * 100).toFixed(1)}% of checked multipliers are inconsistent — possible systemic drift`,
+          details: {
+            inconsistentCount: inconsistencies.length,
+            checkedCount,
+            rate: inconsistencyRate,
+            threshold: cfg.alertSystemicThreshold,
+          },
+        });
       }
     }
 
-    // All retries exhausted.
-    const failureResult: RepairResult = {
-      multiplierId: inconsistent.id,
-      oldValue: inconsistent.storedTotal,
-      newValue: inconsistent.storedTotal,
-      delta: new Prisma.Decimal(0),
-      success: false,
-      error: lastError,
-    };
+    // Alert 2: large discrepancy on any single multiplier.
+    const largeThreshold = new Prisma.Decimal(cfg.alertLargeDiscrepancyAmount);
+    for (const inc of inconsistencies) {
+      if (inc.delta.abs().greaterThan(largeThreshold)) {
+        alerts.push({
+          type: 'LARGE_DISCREPANCY',
+          message: `Multiplier ${inc.multiplierId} has a discrepancy of ${inc.delta.toString()} (threshold: ${cfg.alertLargeDiscrepancyAmount})`,
+          details: {
+            multiplierId: inc.multiplierId,
+            storedTotal: inc.storedTotal.toString(),
+            actualSum: inc.actualSum.toString(),
+            delta: inc.delta.toString(),
+          },
+        });
+      }
+    }
 
-    logger.error('[matchedFundVerification] ALERT: repair_failure', {
-      alert: 'repair_failure',
-      multiplierId: failureResult.multiplierId,
-      error: failureResult.error,
-    });
+    // Alert 3: repair failures.
+    const failed = repairs.filter((r) => !r.success);
+    for (const r of failed) {
+      alerts.push({
+        type: 'REPAIR_FAILURE',
+        message: `Repair failed for multiplier ${r.multiplierId}: ${r.error}`,
+        details: {
+          multiplierId: r.multiplierId,
+          storedTotal: r.storedTotal.toString(),
+          actualSum: r.actualSum.toString(),
+          error: r.error,
+        },
+      });
+    }
 
-    return failureResult;
+    return alerts;
   }
 
-  // ─── Test utilities ──────────────────────────────────────────────────────────
+  // ─── Utility ─────────────────────────────────────────────────────────────────
 
   /**
-   * TEST-ONLY: directly sets `matchedTotal` on a Multiplier row to simulate
-   * drift without needing concurrent transactions.  Must never be called in
-   * production code paths.
+   * Inject a test inconsistency by directly setting matchedTotal to a wrong
+   * value. ONLY safe to call in test environments — use to simulate drift
+   * without going through normal allocation paths.
    *
-   * @param multiplierId  Target row.
-   * @param value         The stale value to inject.
-   * @param db            Injectable DB client (defaults to module singleton).
+   * @throws {Error} if called outside a test environment.
    */
-  static async injectInconsistency(
+  static async injectInconsistencyForTesting(
     multiplierId: string,
-    value: Prisma.Decimal.Value,
-    db: typeof prisma = prisma,
+    wrongValue: Prisma.Decimal.Value,
   ): Promise<void> {
-    await db.$queryRaw`
+    if (process.env.NODE_ENV !== 'test') {
+      throw new Error('injectInconsistencyForTesting is only available in test environments');
+    }
+    await prisma.$queryRaw(Prisma.sql`
       UPDATE "Multiplier"
-      SET "matchedTotal" = ${new Prisma.Decimal(value).toString()}::numeric
-      WHERE id = ${multiplierId}
-    `;
-  }
-
-  // ─── Private helpers ─────────────────────────────────────────────────────────
-
-  private static mapAggregateRows(rows: AggregateRow[]): InconsistentMultiplier[] {
-    return rows.map((r) => ({
-      id: r.id,
-      storedTotal: new Prisma.Decimal(r.storedTotal),
-      actualSum: new Prisma.Decimal(r.actualSum),
-      discrepancy: new Prisma.Decimal(r.discrepancy),
-    }));
+      SET    "matchedTotal" = ${new Prisma.Decimal(wrongValue).toString()}::numeric
+      WHERE  id = ${multiplierId}
+    `);
   }
 }

@@ -265,77 +265,64 @@ export const config = {
 
   matchedFundVerification: {
     /**
-     * Feature flag. When false the worker still registers but never enqueues
-     * jobs, making it safe to deploy without activating the feature.
+     * Feature flag: set MATCHED_FUND_VERIFICATION_ENABLED=false to disable
+     * the worker entirely (useful in test environments or during migrations).
+     * Defaults to enabled.
      */
     enabled: process.env.MATCHED_FUND_VERIFICATION_ENABLED !== 'false',
 
     /**
-     * Cron for the full verification sweep (all Multiplier rows).
-     * Default: 02:00 UTC daily — off-peak for most campaigns.
+     * Cron pattern for the full verification job (checks all multipliers).
+     * Default: 30 2 * * * (02:30 UTC daily, off-peak).
      */
-    fullVerificationCron: process.env.MATCHED_FUND_FULL_VERIFICATION_CRON || '0 2 * * *',
+    fullVerificationCron: process.env.MATCHED_FUND_VERIFICATION_FULL_CRON || '30 2 * * *',
 
     /**
-     * Cron for the sampling pass (random subset of Multiplier rows).
-     * Default: every hour at :10 — frequent early-warning signal.
+     * Cron pattern for the sample verification job (checks a random subset).
+     * Default: 45 * * * * (hourly at :45).
      */
-    samplingVerificationCron: process.env.MATCHED_FUND_SAMPLING_CRON || '10 * * * *',
+    sampleVerificationCron: process.env.MATCHED_FUND_VERIFICATION_SAMPLE_CRON || '45 * * * *',
 
     /**
-     * Percentage of Multiplier rows to include in a TABLESAMPLE SYSTEM pass.
-     * 10 % is the default; raise to 100 for a targeted full-scan.
-     * Valid range: 0 < value ≤ 100.
+     * Percentage of Multiplier rows sampled in SAMPLE mode (1–100).
+     * Default: 10 (10%).
      */
-    samplingPercent: parseFloat(process.env.MATCHED_FUND_SAMPLING_PERCENT || '10'),
+    samplePercent: parseInt(process.env.MATCHED_FUND_VERIFICATION_SAMPLE_PCT || '10', 10),
 
     /**
-     * Minimum absolute discrepancy (in the matched-fund currency's smallest
-     * unit) before a Multiplier row is considered inconsistent. Protects
-     * against spurious alerts from floating-point representation differences.
-     * Stored as a string; the service converts it to Prisma.Decimal at runtime.
-     * Default: 0.00000001 (one satoshi-equivalent, i.e. 8 decimal places).
+     * Minimum absolute difference (in currency units) to treat a multiplier
+     * as inconsistent. Values at or below this threshold are considered
+     * precision noise and are ignored.
+     * Default: 0.00000001 (8 decimal places — one Satoshi-equivalent).
      */
-    precisionThreshold: process.env.MATCHED_FUND_PRECISION_THRESHOLD || '0.00000001',
+    inconsistencyThreshold: process.env.MATCHED_FUND_VERIFICATION_THRESHOLD || '0.00000001',
 
     /**
-     * If the ratio of inconsistent Multiplier rows to total rows exceeds this
-     * fraction, a systemic-inconsistency alert is emitted and all repair
-     * attempts are aborted to avoid silently patching widespread corruption.
-     * Default: 0.05 (5 %).
+     * Fraction of checked multipliers that, when inconsistent, triggers the
+     * SYSTEMIC_INCONSISTENCY alert. E.g. 0.05 means "alert if >5% are wrong".
+     * Default: 0.05.
      */
-    alertInconsistencyRateThreshold: parseFloat(
-      process.env.MATCHED_FUND_ALERT_INCONSISTENCY_RATE || '0.05',
+    alertSystemicThreshold: parseFloat(
+      process.env.MATCHED_FUND_VERIFICATION_SYSTEMIC_THRESHOLD || '0.05',
     ),
 
     /**
-     * If a single Multiplier's absolute discrepancy exceeds this amount, a
-     * large-discrepancy alert is emitted in addition to normal repair.
-     * Default: 1000 (e.g. 1 000 XLM/USD).
+     * Absolute discrepancy (in currency units) above which a single-multiplier
+     * LARGE_DISCREPANCY alert is emitted.
+     * Default: 1000 (one thousand units — e.g. USD 1,000).
      */
-    alertLargeDiscrepancyThreshold: process.env.MATCHED_FUND_ALERT_LARGE_DISCREPANCY || '1000',
+    alertLargeDiscrepancyAmount: process.env.MATCHED_FUND_VERIFICATION_LARGE_AMOUNT || '1000',
 
     /**
-     * Maximum number of times the worker will retry a failed repair for a
-     * single Multiplier row before logging a permanent failure and moving on.
-     * Default: 3.
+     * Maximum milliseconds the repair transaction may hold the FOR UPDATE lock
+     * on a single Multiplier row. Keeps repair latency bounded so normal
+     * allocation operations are not blocked for long.
+     * Default: 5000 ms.
      */
-    repairMaxRetries: parseInt(process.env.MATCHED_FUND_REPAIR_MAX_RETRIES || '3', 10),
-
-    /**
-     * Milliseconds to wait between repair retry attempts (constant backoff).
-     * Default: 500 ms — short enough to complete repairs quickly, long enough
-     * to let a concurrent allocation transaction commit.
-     */
-    repairRetryDelayMs: parseInt(process.env.MATCHED_FUND_REPAIR_RETRY_DELAY_MS || '500', 10),
-
-    /**
-     * Maximum number of Multiplier rows to repair per job invocation.
-     * Caps the blast radius if a bug produces widespread inconsistency.
-     * Set to 0 to disable the cap (repair all found in one pass).
-     * Default: 100.
-     */
-    repairBatchLimit: parseInt(process.env.MATCHED_FUND_REPAIR_BATCH_LIMIT || '100', 10),
+    repairTimeoutMs: parseInt(
+      process.env.MATCHED_FUND_VERIFICATION_REPAIR_TIMEOUT_MS || '5000',
+      10,
+    ),
   },
 };
 
