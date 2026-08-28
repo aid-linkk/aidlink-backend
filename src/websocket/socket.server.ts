@@ -1,3 +1,39 @@
+/**
+ * socket.server.ts
+ *
+ * Initialises the Socket.IO server and wires up the backpressure sub-system:
+ *
+ *   BackpressureMonitor      — inspects send-buffer sizes
+ *   FlowController           — wraps every broadcast with throttle/coalesce logic
+ *   ClientEvictionManager    — enforces slow/idle eviction and rate limiting
+ *   BackpressureObservability — periodic metrics logging + health snapshot API
+ *
+ * Public API (unchanged for existing callers)
+ * ────────────────────────────────────────────
+ *   initializeWebSocket(httpServer)     → SocketIOServer
+ *   getSocketIO()                       → SocketIOServer
+ *   broadcastToUser(userId, event, data)
+ *   broadcastToCampaign(campaignId, event, data)
+ *   broadcastToOrganization(organizationId, event, data)
+ *   broadcastToBeneficiary(beneficiaryId, event, data)
+ *   broadcastToAll(event, data)
+ *   sendCampaignUpdate(campaignId)
+ *   sendDonationUpdate(donationId)
+ *   sendDistributionUpdate(distributionId)
+ *   sendNotification(userId, notification)
+ *   sendNotificationWithCount(userId, notification, unreadCount)
+ *   sendUnreadCount(userId, unreadCount)
+ *   sendCampaignSuspended(campaignId, ownerId, payload)
+ *   sendCampaignReinstated(campaignId, ownerId, payload)
+ *   sendAppealUpdate(ownerId, payload)
+ *
+ * New API (backpressure)
+ * ──────────────────────
+ *   getBackpressureSnapshot()           → BackpressureSnapshot | null
+ *   shouldThrottleRoom(room)            → boolean
+ *   getBackpressureSystem()             → { monitor, flow, eviction, observability } | null
+ */
+
 import { Server as SocketIOServer } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import { Role } from '@prisma/client';
@@ -12,13 +48,31 @@ import {
   invalidateCampaignAuthorizationCache,
   AuthorizationContext,
 } from './authorization';
+import {
+  BackpressureMonitor,
+  FlowController,
+  ClientEvictionManager,
+  BackpressureObservability,
+  BackpressureSnapshot,
+} from './backpressure/index';
 
 let io: SocketIOServer;
+
+// ── Backpressure sub-system singletons ─────────────────────────────────────────
+
+let bpMonitor: BackpressureMonitor | null = null;
+let bpFlow: FlowController | null = null;
+let bpEviction: ClientEvictionManager | null = null;
+let bpObs: BackpressureObservability | null = null;
+
+// ── Auth types ─────────────────────────────────────────────────────────────────
 
 export interface SocketAuthResult {
   userId: string;
   userRole: Role;
 }
+
+// ── Auth helper (unchanged) ────────────────────────────────────────────────────
 
 export const authenticateSocketToken = async (token: string): Promise<SocketAuthResult> => {
   try {
@@ -43,6 +97,8 @@ export const authenticateSocketToken = async (token: string): Promise<SocketAuth
   }
 };
 
+// ── Initialise ─────────────────────────────────────────────────────────────────
+
 export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
   io = new SocketIOServer(httpServer, {
     cors: {
@@ -52,7 +108,27 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
     path: '/socket.io/',
   });
 
-  // Authentication middleware for Socket.IO
+  // ── Wire up backpressure sub-system ────────────────────────────────────────
+
+  bpMonitor  = new BackpressureMonitor(io);
+
+  // emitFn: the actual Socket.IO emit that FlowController will call after
+  // throttle/coalesce decisions have been made.
+  bpFlow = new FlowController(
+    bpMonitor,
+    (room, event, data) => {
+      io.to(room).emit(event, data);
+    },
+  );
+
+  bpEviction = new ClientEvictionManager(io, bpMonitor);
+  bpEviction.start();
+
+  bpObs = new BackpressureObservability(io, bpMonitor, bpFlow, bpEviction);
+  bpObs.start();
+
+  // ── Authentication middleware ──────────────────────────────────────────────
+
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token;
@@ -63,7 +139,7 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
 
       const { userId, userRole } = await authenticateSocketToken(token);
 
-      socket.data.userId = userId;
+      socket.data.userId   = userId;
       socket.data.userRole = userRole;
       next();
     } catch (error) {
@@ -71,14 +147,29 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
     }
   });
 
+  // ── Connection handler ─────────────────────────────────────────────────────
+
   io.on('connection', (socket) => {
     logger.info(`Client connected: ${socket.id}`);
 
+    const userId = socket.data.userId as string;
+
     // Join user's personal room
-    const userId = socket.data.userId;
     socket.join(`user:${userId}`);
 
-    // Handle campaign subscriptions
+    // ── Activity tracking for idle eviction ───────────────────────────────
+    // Wrap socket.on to record every inbound event as activity.
+    const originalOn = socket.on.bind(socket);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    socket.on = function (event: string, listener: (...args: any[]) => void) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return originalOn(event, (...args: any[]) => {
+        bpEviction?.recordActivity(socket.id);
+        listener(...args);
+      });
+    };
+
+    // ── Campaign subscriptions ────────────────────────────────────────────
     socket.on('join_campaign', async (campaignId: string) => {
       const authContext: AuthorizationContext = {
         userId,
@@ -110,7 +201,7 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
       logger.info(`User ${userId} left campaign ${campaignId}`);
     });
 
-    // Handle organization subscriptions
+    // ── Organisation subscriptions ────────────────────────────────────────
     socket.on('join_organization', async (organizationId: string) => {
       const authContext: AuthorizationContext = {
         userId,
@@ -139,7 +230,7 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
       logger.info(`User ${userId} left organization ${organizationId}`);
     });
 
-    // Handle beneficiary subscriptions
+    // ── Beneficiary subscriptions ─────────────────────────────────────────
     socket.on('join_beneficiary', async (beneficiaryId: string) => {
       const authContext: AuthorizationContext = {
         userId,
@@ -168,39 +259,33 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
       logger.info(`User ${userId} left beneficiary ${beneficiaryId}`);
     });
 
-    // Handle disconnect
+    // ── Disconnect ─────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
       logger.info(`Client disconnected: ${socket.id}`);
     });
 
-    // Send welcome message with initial unread count
+    // ── Welcome + initial unread count ────────────────────────────────────
     socket.emit('connected', {
       message: 'Successfully connected to AidLink real-time updates',
       userId,
     });
 
-    // Send initial unread notification count on connect
     prisma.notification
-      .count({
-        where: { userId, status: 'UNREAD' },
-      })
-      .then(function (count) {
+      .count({ where: { userId, status: 'UNREAD' } })
+      .then((count: number) => {
         socket.emit('notification:unread_count', { unreadCount: count });
       })
-      .catch(function (err) {
+      .catch((err: unknown) => {
         logger.error('Error fetching initial unread count:', err);
       });
 
-    // Handle unread count requests from clients
     socket.on('notification:get_unread_count', function () {
       prisma.notification
-        .count({
-          where: { userId, status: 'UNREAD' },
-        })
-        .then(function (count) {
+        .count({ where: { userId, status: 'UNREAD' } })
+        .then((count: number) => {
           socket.emit('notification:unread_count', { unreadCount: count });
         })
-        .catch(function (err) {
+        .catch((err: unknown) => {
           logger.error('Error fetching unread count:', err);
         });
     });
@@ -211,6 +296,8 @@ export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
   return io;
 };
 
+// ── Getters ────────────────────────────────────────────────────────────────────
+
 export const getSocketIO = (): SocketIOServer => {
   if (!io) {
     throw new Error('WebSocket not initialized');
@@ -218,46 +305,120 @@ export const getSocketIO = (): SocketIOServer => {
   return io;
 };
 
-// Helper functions to broadcast events
-export const broadcastToUser = (userId: string, event: string, data: any): void => {
+/**
+ * Returns the backpressure sub-system components for use in tests or admin
+ * endpoints.  Returns null before initializeWebSocket() has been called.
+ */
+export const getBackpressureSystem = (): {
+  monitor:     BackpressureMonitor;
+  flow:        FlowController;
+  eviction:    ClientEvictionManager;
+  observability: BackpressureObservability;
+} | null => {
+  if (!bpMonitor || !bpFlow || !bpEviction || !bpObs) return null;
+  return {
+    monitor:       bpMonitor,
+    flow:          bpFlow,
+    eviction:      bpEviction,
+    observability: bpObs,
+  };
+};
+
+/**
+ * Returns a current backpressure snapshot (for health endpoints / dashboards).
+ * Returns null before the system is initialised.
+ */
+export const getBackpressureSnapshot = (): BackpressureSnapshot | null => {
+  return bpObs?.captureSnapshot() ?? null;
+};
+
+/**
+ * Returns true if the named room is currently backpressured.
+ * Event generators can call this cheaply before doing expensive DB queries.
+ */
+export const shouldThrottleRoom = (room: string): boolean => {
+  return bpFlow?.shouldThrottle(room) ?? false;
+};
+
+// ── Internal broadcast primitive ───────────────────────────────────────────────
+
+/**
+ * Routes an event through the FlowController (backpressure / coalescing) when
+ * the system is initialised, or falls back to a direct emit otherwise.
+ *
+ * CRITICAL events (moderation) always call io.to().emit() directly, bypassing
+ * FlowController to guarantee delivery regardless of queue state.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function routedEmit(room: string, event: string, data: any): void {
+  if (!io) return;
+
+  // CRITICAL events skip FlowController entirely for maximum reliability.
+  if (bpFlow?.isCriticalBypass(event)) {
+    io.to(room).emit(event, data);
+    return;
+  }
+
+  if (bpFlow) {
+    bpFlow.emit(room, event, data);
+  } else {
+    io.to(room).emit(event, data);
+  }
+}
+
+// ── Broadcast helpers (backward-compatible public API) ─────────────────────────
+
+export const broadcastToUser = (userId: string, event: string, data: unknown): void => {
+  routedEmit(`user:${userId}`, event, data);
+};
+
+export const broadcastToCampaign = (campaignId: string, event: string, data: unknown): void => {
+  routedEmit(`campaign:${campaignId}`, event, data);
+};
+
+export const broadcastToOrganization = (organizationId: string, event: string, data: unknown): void => {
+  routedEmit(`organization:${organizationId}`, event, data);
+};
+
+export const broadcastToBeneficiary = (beneficiaryId: string, event: string, data: unknown): void => {
+  routedEmit(`beneficiary:${beneficiaryId}`, event, data);
+};
+
+export const broadcastToAll = (event: string, data: unknown): void => {
   if (io) {
-    io.to(`user:${userId}`).emit(event, data);
+    if (bpFlow?.isCriticalBypass(event)) {
+      io.emit(event, data);
+    } else if (bpFlow) {
+      // There is no single "all" room — emit directly but still check global
+      // backpressure for observability.
+      if (!bpMonitor?.isGlobalBackpressured()) {
+        io.emit(event, data);
+      } else {
+        logger.warn('broadcastToAll: global backpressure — event dropped', { event });
+      }
+    } else {
+      io.emit(event, data);
+    }
   }
 };
 
-export const broadcastToCampaign = (campaignId: string, event: string, data: any): void => {
-  if (io) {
-    io.to(`campaign:${campaignId}`).emit(event, data);
-  }
-};
+// ── Real-time update functions (unchanged public surface) ──────────────────────
 
-export const broadcastToOrganization = (organizationId: string, event: string, data: any): void => {
-  if (io) {
-    io.to(`organization:${organizationId}`).emit(event, data);
-  }
-};
-
-export const broadcastToBeneficiary = (beneficiaryId: string, event: string, data: any): void => {
-  if (io) {
-    io.to(`beneficiary:${beneficiaryId}`).emit(event, data);
-  }
-};
-
-export const broadcastToAll = (event: string, data: any): void => {
-  if (io) {
-    io.emit(event, data);
-  }
-};
-
-// Real-time update functions
 export const sendCampaignUpdate = async (campaignId: string): Promise<void> => {
+  // Check backpressure before doing the DB fetch.
+  const room = `campaign:${campaignId}`;
+  if (shouldThrottleRoom(room)) {
+    logger.debug('sendCampaignUpdate: room backpressured, skipping DB fetch', { campaignId });
+    return;
+  }
+
   try {
     const campaign = await prisma.campaign.findUnique({
       where: { id: campaignId },
       include: {
         _count: {
           select: {
-            donations: true,
+            donations:     true,
             beneficiaries: true,
             distributions: true,
           },
@@ -279,20 +440,17 @@ export const sendDonationUpdate = async (donationId: string): Promise<void> => {
       where: { id: donationId },
       include: {
         campaign: true,
-        user: true,
+        user:     true,
       },
     });
 
     if (donation) {
-      // Notify campaign subscribers
       broadcastToCampaign(donation.campaignId, 'donation:created', donation);
 
-      // Notify the donor
       if (donation.userId) {
         broadcastToUser(donation.userId, 'donation:created', donation);
       }
 
-      // Send updated campaign data
       await sendCampaignUpdate(donation.campaignId);
     }
   } catch (error) {
@@ -305,19 +463,15 @@ export const sendDistributionUpdate = async (distributionId: string): Promise<vo
     const distribution = await prisma.distribution.findUnique({
       where: { id: distributionId },
       include: {
-        campaign: true,
+        campaign:    true,
         beneficiary: true,
       },
     });
 
     if (distribution) {
-      // Notify campaign subscribers
       broadcastToCampaign(distribution.campaignId, 'distribution:updated', distribution);
-
-      // Notify the beneficiary
       broadcastToBeneficiary(distribution.beneficiaryId, 'distribution:updated', distribution);
 
-      // Send updated campaign data
       await sendCampaignUpdate(distribution.campaignId);
     }
   } catch (error) {
@@ -325,14 +479,14 @@ export const sendDistributionUpdate = async (distributionId: string): Promise<vo
   }
 };
 
-export const sendNotification = (userId: string, notification: any): void => {
+export const sendNotification = (userId: string, notification: unknown): void => {
   broadcastToUser(userId, 'notification:new', notification);
 };
 
 export const sendNotificationWithCount = (
   userId: string,
-  notification: any,
-  unreadCount: number
+  notification: unknown,
+  unreadCount: number,
 ): void => {
   broadcastToUser(userId, 'notification:new', notification);
   broadcastToUser(userId, 'notification:unread_count', { unreadCount });
@@ -342,54 +496,43 @@ export const sendUnreadCount = (userId: string, unreadCount: number): void => {
   broadcastToUser(userId, 'notification:unread_count', { unreadCount });
 };
 
-// ─── Moderation events ─────────────────────────────────────────
+// ── Moderation events (CRITICAL — always bypass flow control) ──────────────────
 
 export const sendCampaignSuspended = async (
   campaignId: string,
-  ownerId: string,
-  payload: any
+  ownerId:    string,
+  payload:    unknown,
 ): Promise<void> => {
   const room = `campaign:${campaignId}`;
 
-  // Step 1 — Invalidate authorization cache so that any reconnect attempt
-  // re-queries the DB and finds the campaign suspended.
+  // Invalidate authorization cache so reconnecting clients re-query the DB.
   await invalidateCampaignAuthorizationCache(campaignId);
 
-  // Step 2 — Broadcast campaign:suspended to everyone currently in the room
-  // *before* evicting them so clients know why they are being removed.
-  // Socket.IO emit() is synchronous in the send queue, so the event is
-  // enqueued before socketsLeave() runs.
+  // Broadcast suspension to room (CRITICAL — bypasses FlowController).
   if (io) {
     io.in(room).emit('campaign:suspended', payload);
   }
 
-  // Also notify the campaign owner via their personal user room.
+  // Notify the campaign owner's personal room.
   broadcastToUser(ownerId, 'campaign:suspended', payload);
 
-  // Step 3 — Collect the socket IDs currently in the room *before* eviction
-  // so we can send each one a personalised campaign:access_revoked event.
-  // We snapshot the Set now because socketsLeave will empty it.
+  // Snapshot room membership *before* eviction.
   const roomSockets = io
     ? (io.sockets.adapter.rooms.get(room) ?? new Set<string>())
     : new Set<string>();
   const evictedSocketIds = [...roomSockets];
 
-  // Step 4 — Forcibly remove all sockets from the room.
-  // socketsLeave is the Socket.IO v4 API that works with all official adapters
-  // (in-memory, Redis, cluster) and atomically removes every socket in the
-  // room from that room.
+  // Evict all sockets from the room.
   if (io) {
     io.in(room).socketsLeave(room);
   }
 
-  // Step 5 — Emit campaign:access_revoked to each evicted socket's personal
-  // user room so the client can distinguish "campaign suspended" from
-  // "connection dropped".  We look up the socket's userId from socket.data.
+  // Send campaign:access_revoked to each evicted socket's user room.
   if (io) {
     for (const socketId of evictedSocketIds) {
       const socket = io.sockets.sockets.get(socketId);
       if (socket) {
-        const socketUserId: string = socket.data.userId as string;
+        const socketUserId = socket.data.userId as string;
         if (socketUserId) {
           io.to(`user:${socketUserId}`).emit('campaign:access_revoked', {
             campaignId,
@@ -407,20 +550,12 @@ export const sendCampaignSuspended = async (
 
 export const sendCampaignReinstated = async (
   campaignId: string,
-  ownerId: string,
-  payload: any
+  ownerId:    string,
+  payload:    unknown,
 ): Promise<void> => {
-  // Broadcast reinstatement to any sockets still in the room (e.g. ADMIN/
-  // AUDITOR who were not evicted on suspension).
+  // CRITICAL — goes direct without FlowController.
   broadcastToCampaign(campaignId, 'campaign:reinstated', payload);
-
-  // Notify the campaign owner via their personal user room so that client
-  // code can listen on the user room and automatically re-emit join_campaign.
   broadcastToUser(ownerId, 'campaign:reinstated', payload);
-
-  // Emit campaign:access_restored to the campaign owner's personal user room.
-  // Previously-evicted clients should subscribe to this event on their own
-  // user room so they know it is now safe to call join_campaign again.
   broadcastToUser(ownerId, 'campaign:access_restored', {
     campaignId,
     reason: 'reinstated',
@@ -429,6 +564,6 @@ export const sendCampaignReinstated = async (
   logger.info(`Campaign ${campaignId} reinstated: notified owner ${ownerId}`);
 };
 
-export const sendAppealUpdate = (ownerId: string, payload: any): void => {
+export const sendAppealUpdate = (ownerId: string, payload: unknown): void => {
   broadcastToUser(ownerId, 'appeal:updated', payload);
 };
