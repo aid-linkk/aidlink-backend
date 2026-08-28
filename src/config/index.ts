@@ -262,6 +262,68 @@ export const config = {
      */
     importMaxRows: parseInt(process.env.BULK_IMPORT_MAX_ROWS || '1000', 10),
   },
+
+  matchedFundVerification: {
+    /**
+     * Feature flag: set MATCHED_FUND_VERIFICATION_ENABLED=false to disable
+     * the worker entirely (useful in test environments or during migrations).
+     * Defaults to enabled.
+     */
+    enabled: process.env.MATCHED_FUND_VERIFICATION_ENABLED !== 'false',
+
+    /**
+     * Cron pattern for the full verification job (checks all multipliers).
+     * Default: 30 2 * * * (02:30 UTC daily, off-peak).
+     */
+    fullVerificationCron: process.env.MATCHED_FUND_VERIFICATION_FULL_CRON || '30 2 * * *',
+
+    /**
+     * Cron pattern for the sample verification job (checks a random subset).
+     * Default: 45 * * * * (hourly at :45).
+     */
+    sampleVerificationCron: process.env.MATCHED_FUND_VERIFICATION_SAMPLE_CRON || '45 * * * *',
+
+    /**
+     * Percentage of Multiplier rows sampled in SAMPLE mode (1–100).
+     * Default: 10 (10%).
+     */
+    samplePercent: parseInt(process.env.MATCHED_FUND_VERIFICATION_SAMPLE_PCT || '10', 10),
+
+    /**
+     * Minimum absolute difference (in currency units) to treat a multiplier
+     * as inconsistent. Values at or below this threshold are considered
+     * precision noise and are ignored.
+     * Default: 0.00000001 (8 decimal places — one Satoshi-equivalent).
+     */
+    inconsistencyThreshold: process.env.MATCHED_FUND_VERIFICATION_THRESHOLD || '0.00000001',
+
+    /**
+     * Fraction of checked multipliers that, when inconsistent, triggers the
+     * SYSTEMIC_INCONSISTENCY alert. E.g. 0.05 means "alert if >5% are wrong".
+     * Default: 0.05.
+     */
+    alertSystemicThreshold: parseFloat(
+      process.env.MATCHED_FUND_VERIFICATION_SYSTEMIC_THRESHOLD || '0.05',
+    ),
+
+    /**
+     * Absolute discrepancy (in currency units) above which a single-multiplier
+     * LARGE_DISCREPANCY alert is emitted.
+     * Default: 1000 (one thousand units — e.g. USD 1,000).
+     */
+    alertLargeDiscrepancyAmount: process.env.MATCHED_FUND_VERIFICATION_LARGE_AMOUNT || '1000',
+
+    /**
+     * Maximum milliseconds the repair transaction may hold the FOR UPDATE lock
+     * on a single Multiplier row. Keeps repair latency bounded so normal
+     * allocation operations are not blocked for long.
+     * Default: 5000 ms.
+     */
+    repairTimeoutMs: parseInt(
+      process.env.MATCHED_FUND_VERIFICATION_REPAIR_TIMEOUT_MS || '5000',
+      10,
+    ),
+  },
 };
 
 export default config;
