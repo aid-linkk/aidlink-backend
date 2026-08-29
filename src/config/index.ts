@@ -239,6 +239,18 @@ export const config = {
     cacheTtlSeconds: parseInt(process.env.FRAUD_MODEL_CACHE_TTL_SECONDS || '300', 10),
   },
 
+  fraudDrift: {
+    // Runs in the recalibration worker only; it never affects scoring latency.
+    enabled: process.env.FRAUD_DRIFT_ENABLED !== 'false',
+    methods: (process.env.FRAUD_DRIFT_METHODS || 'ks,psi,chiSquared').split(',').map(method => method.trim()) as Array<'ks' | 'psi' | 'chiSquared'>,
+    significanceLevel: parseFloat(process.env.FRAUD_DRIFT_SIGNIFICANCE_LEVEL || '0.01'),
+    psiThreshold: parseFloat(process.env.FRAUD_DRIFT_PSI_THRESHOLD || '0.2'),
+    minSamples: parseInt(process.env.FRAUD_DRIFT_MIN_SAMPLES || '30', 10),
+    bins: parseInt(process.env.FRAUD_DRIFT_HISTOGRAM_BINS || '10', 10),
+    baselineWindowHours: parseInt(process.env.FRAUD_DRIFT_BASELINE_WINDOW_HOURS || '720', 10),
+    currentWindowHours: parseInt(process.env.FRAUD_DRIFT_CURRENT_WINDOW_HOURS || '168', 10),
+    detectionIntervalMinutes: parseInt(process.env.FRAUD_DRIFT_DETECTION_INTERVAL_MINUTES || '60', 10),
+  },
   analytics: {
     // Cron patterns for rollup jobs (configurable via env vars)
     hourlyRollupCron: process.env.ANALYTICS_HOURLY_CRON || '5 * * * *',

@@ -719,6 +719,28 @@ describe('runRecalibration', () => {
     expect(prismaMock.fraudModelVersion.create).not.toHaveBeenCalled();
   });
 
+  it('aborts recalibration when a candidate version would catastrophically forget the current model', async () => {
+    (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue({
+      id: 'old-v',
+      version: 'v1',
+      plattA: 1,
+      plattB: 0,
+      ece: 0.02,
+      auc: 0.9,
+    });
+
+    const labels = [
+      ...Array.from({ length: 60 }, () => ({ fraudScoreFloat: 0.5, outcome: 'REJECTED' })),
+      ...Array.from({ length: 40 }, () => ({ fraudScoreFloat: 0.5, outcome: 'APPROVED' })),
+    ];
+
+    (prismaMock.fraudLabel.findMany as jest.Mock).mockResolvedValue(labels);
+    const result = await runRecalibration();
+
+    expect(result).toBeNull();
+    expect(prismaMock.fraudModelVersion.create).not.toHaveBeenCalled();
+  });
+
   it('result includes correct ECE and AUC fields', async () => {
     (prismaMock.fraudModelVersion.findFirst as jest.Mock).mockResolvedValue({
       id: 'old-v',
