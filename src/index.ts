@@ -32,6 +32,7 @@ import blockchainRoutes from './routes/blockchain.routes';
 import { sorobanIndexer } from './blockchain/soroban.indexer';
 import { initializeWebSocket } from './websocket/socket.server';
 import { stopRecoveryWorker } from './workers/recovery.worker';
+import { startSagaRecoveryWorker, stopSagaRecoveryWorker } from './workers/saga.recovery.worker';
 import { EmailTemplateService } from './services/emailTemplate.service';
 import userRoutes from './routes/user.routes';
 import healthRoutes from './routes/health.routes';
@@ -200,6 +201,9 @@ const startServer = async (): Promise<void> => {
       .then(({ startRecoveryWorker }) => startRecoveryWorker())
       .catch((error) => logger.error('Failed to start recovery worker:', error));
 
+    // Start saga recovery worker (resume non-terminal sagas after crash)
+    startSagaRecoveryWorker();
+
     // Start matched-fund verification worker (consistency checks + auto-repair)
     if (config.matchedFundVerification.enabled) {
       import('./workers/matchedFundVerification.worker.js')
@@ -234,6 +238,9 @@ const gracefulShutdown = async (signal: string): Promise<void> => {
 
     // Stop recovery worker
     stopRecoveryWorker();
+
+    // Stop saga recovery worker
+    stopSagaRecoveryWorker();
 
     // Stop matched-fund verification worker (if running)
     if (config.matchedFundVerification.enabled) {

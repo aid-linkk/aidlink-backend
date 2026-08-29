@@ -6,6 +6,11 @@ import logger from '../config/logger';
 import { dispatchWebhookEvent } from '../controllers/webhook.controller';
 import { AnalyticsService } from './analytics.service';
 import { CampaignAuditService } from './campaignAudit.service';
+import { SagaOrchestrator } from '../saga/SagaOrchestrator';
+import {
+  distributionConfirmationSaga,
+  DistributionConfirmationInput,
+} from '../saga/sagas/distributionConfirmation.saga';
 
 export class DistributionService {
   static async createDistribution(
@@ -93,31 +98,27 @@ export class DistributionService {
       throw AppError.from('DISTRIBUTION_002', 'Distribution already completed');
     }
 
-    const updated = await prisma.$transaction(async (tx) => {
-      const dist = await tx.distribution.update({
-        where: { id },
-        data: {
-          status: DistributionStatus.COMPLETED,
-          blockchainTxHash: txHash,
-          distributedAt: new Date(),
-          distributedBy: userId,
-        },
-      });
+    const sagaInput: DistributionConfirmationInput = {
+      distributionId: id,
+      txHash,
+      userId,
+    };
 
-      // Decrement campaign currentAmount to reflect distributed funds
-      await tx.campaign.update({
-        where: { id: distribution.campaignId },
-        data: {
-          currentAmount: {
-            decrement: distribution.amount,
-          },
-        },
-      });
-
-      return dist;
+    // Transactional steps (status + campaign balance) run inside a single transaction.
+    const result = await prisma.$transaction(async (tx) => {
+      return SagaOrchestrator.execute(distributionConfirmationSaga, sagaInput, tx);
     });
 
-    logger.info(`Distribution confirmed: ${id} with tx ${txHash}`);
+    if (!result.success) {
+      throw result.error;
+    }
+
+    logger.info(
+      `Distribution confirmed via saga: ${id} with tx ${txHash} sagaId=${result.sagaId}`,
+    );
+
+    // Emit the campaign audit log (unchanged behaviour)
+    const updated = await prisma.distribution.findUniqueOrThrow({ where: { id } });
 
     CampaignAuditService.log({
       campaignId: distribution.campaignId,
@@ -141,15 +142,6 @@ export class DistributionService {
         },
       },
     });
-
-    dispatchWebhookEvent('DISTRIBUTION_COMPLETED', {
-      distributionId: id,
-      campaignId: distribution.campaignId,
-      beneficiaryId: distribution.beneficiaryId,
-      amount: updated.amount,
-      currency: updated.currency,
-      blockchainTxHash: txHash,
-    }).catch((err) => logger.error('Webhook dispatch error (distribution.completed):', err));
 
     return updated;
   }

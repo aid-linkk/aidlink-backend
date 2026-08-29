@@ -12,6 +12,11 @@ import {
   CampaignStatus,
 } from '@prisma/client';
 import { NotificationService } from './notification.service';
+import { SagaOrchestrator } from '../saga/SagaOrchestrator';
+import {
+  campaignSettlementSaga,
+  CampaignSettlementInput,
+} from '../saga/sagas/campaignSettlement.saga';
 
 const MAX_RETRIES = 3;
 // Exponential backoff delays in ms: 5m, 30m, 2h
@@ -455,6 +460,38 @@ export async function settleCancelledCampaign(
       throw AppError.from('RECOVERY_004', 'Target campaign not found or not active');
   }
 
+  // ─── REFUND_TO_DONOR: use the saga for durable, compensable execution ────
+  if (option === SettlementOption.REFUND_TO_DONOR) {
+    const sagaInput: CampaignSettlementInput = {
+      recoveryCaseId,
+      campaignId: rc.campaignId,
+      adminId,
+      notes,
+      settlementOption: option,
+    };
+
+    const result = await SagaOrchestrator.execute(campaignSettlementSaga, sagaInput);
+
+    if (!result.success) {
+      throw result.error;
+    }
+
+    await writeAuditLog(adminId, AuditAction.RECOVERY_SETTLED, 'RecoveryCase', rc.id, {
+      option,
+      notes,
+      sagaId: result.sagaId,
+    });
+
+    logger.info(
+      `Campaign settlement completed (REFUND_TO_DONOR): case ${rc.id} sagaId=${result.sagaId}`,
+    );
+
+    return prisma.recoveryCase.findUnique({ where: { id: rc.id } });
+  }
+
+  // ─── TRANSFER_TO_CAMPAIGN and RETAIN_IN_ESCROW remain synchronous ────────
+  // These don't involve iterating over many donations so saga wrapping is
+  // not necessary. They are kept as simple transactions for simplicity.
   const campaign = await prisma.campaign.findUnique({
     where: { id: rc.campaignId },
     include: {
@@ -464,30 +501,7 @@ export async function settleCancelledCampaign(
   if (!campaign) throw AppError.from('CAMPAIGN_002');
 
   await prisma.$transaction(async (tx) => {
-    if (option === SettlementOption.REFUND_TO_DONOR) {
-      // Mark each donation as refunded and notify donors
-      for (const donation of campaign.donations) {
-        await tx.donation.update({
-          where: { id: donation.id },
-          data: { status: DonationStatus.REFUNDED },
-        });
-        await tx.campaign.update({
-          where: { id: campaign.id },
-          data: { currentAmount: { decrement: donation.amount } },
-        });
-        if (donation.userId) {
-          await tx.notification.create({
-            data: {
-              userId: donation.userId,
-              type: NotificationType.CAMPAIGN_SETTLEMENT,
-              title: 'Campaign Cancelled – Refund Issued',
-              message: `Campaign "${campaign.title}" was cancelled. Your donation of ${donation.amount} ${donation.currency} has been refunded.`,
-              metadata: { recoveryCaseId: rc.id, campaignId: campaign.id },
-            },
-          });
-        }
-      }
-    } else if (option === SettlementOption.TRANSFER_TO_CAMPAIGN && targetCampaignId) {
+    if (option === SettlementOption.TRANSFER_TO_CAMPAIGN && targetCampaignId) {
       await tx.campaign.update({
         where: { id: targetCampaignId },
         data: { currentAmount: { increment: campaign.currentAmount } },

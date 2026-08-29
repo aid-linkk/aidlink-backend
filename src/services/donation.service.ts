@@ -10,6 +10,11 @@ import { AnalyticsService } from './analytics.service';
 import { sanitizeString } from '../utils/sanitization';
 import { sanitizeAnonymousInput, sanitizeDonorIdentity } from '../utils/anonymity';
 import { MatchedFundAllocationService } from './matchedFundAllocation.service';
+import { SagaOrchestrator } from '../saga/SagaOrchestrator';
+import {
+  donationConfirmationSaga,
+  DonationConfirmationInput,
+} from '../saga/sagas/donationConfirmation.saga';
 
 export interface CreateConfirmedDonationInput {
   campaignId: string;
@@ -184,55 +189,42 @@ export class DonationService {
 
     // IMPORTANT: multipliers must be applied at the time the payment is confirmed,
     // so the matched-funds ledger is auditable.
-    const updated = await prisma.$transaction(async (tx) => {
-      // Guard the state transition atomically: only one concurrent confirmation
-      // for this donation can win the update. A competing confirmation (or a
-      // retry of this same call) sees count === 0 and is rejected before any
-      // matched-fund allocation or balance update happens.
-      const confirmResult = await tx.donation.updateMany({
-        where: { id, status: { not: DonationStatus.CONFIRMED } },
-        data: {
-          status: DonationStatus.CONFIRMED,
-          blockchainTxHash: txHash,
-        },
-      });
-
-      if (confirmResult.count === 0) {
-        throw AppError.from('DONATION_002');
-      }
-
-      const updatedDonation = await tx.donation.findUniqueOrThrow({ where: { id } });
-
-      // Multiplier evaluation + matched-fund allocation + campaign balance
-      // update — shared with createConfirmedDonation (pledge worker) so the
-      // two confirmation paths can never drift apart.
-      const { matchedFund } = await DonationService.applyConfirmationEffects(tx, {
-        donationId: updatedDonation.id,
-        campaignId: donation.campaignId,
-        donorAmount: updatedDonation.amount,
-      });
-
-      // Backwards-compatible response: top-level donation fields
-      return {
-        ...updatedDonation,
-        matchedFund,
-        multiplierApplied: matchedFund?.multiplierId ?? null,
-      };
-    });
-
-    logger.info(`Donation confirmed: ${id} with tx ${txHash}`);
-
-    DonationService.dispatchPostConfirmationSideEffects({
+    //
+    // The saga orchestrator runs steps 1-4 (status transition, multiplier evaluation,
+    // matched-fund allocation, campaign balance) inside the caller's Prisma transaction,
+    // and steps 5-7 (webhook, analytics, receipt) as async fire-and-forget with
+    // automatic compensation on failure.
+    const sagaInput: DonationConfirmationInput = {
       donationId: id,
-      campaignId: donation.campaignId,
-      amount: updated.amount,
-      currency: updated.currency,
       txHash,
+      campaignId: donation.campaignId,
+      donorUserId: donation.userId,
       isAnonymous: donation.isAnonymous,
-      userId: donation.userId,
+    };
+
+    // Run transactional steps inside a single Prisma transaction so the
+    // status transition, multiplier evaluation, matched-fund allocation and
+    // campaign balance update all commit or roll back atomically.
+    const result = await prisma.$transaction(async (tx) => {
+      return SagaOrchestrator.execute(donationConfirmationSaga, sagaInput, tx);
     });
 
-    return updated;
+    if (!result.success) {
+      // The saga already compensated what it could — re-throw the original error.
+      throw result.error;
+    }
+
+    logger.info(`Donation confirmed via saga: ${id} with tx ${txHash} sagaId=${result.sagaId}`);
+
+    // Build a backwards-compatible response shape
+    const confirmedDonation = await prisma.donation.findUniqueOrThrow({ where: { id } });
+    const matchedFund = await prisma.matchedFund.findUnique({ where: { donationId: id } });
+
+    return {
+      ...confirmedDonation,
+      matchedFund,
+      multiplierApplied: matchedFund?.multiplierId ?? null,
+    };
   }
 
   static async getDonations(

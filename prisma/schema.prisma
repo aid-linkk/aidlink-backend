@@ -1649,6 +1649,89 @@ model RollupTracker {
   lastMonth              DateTime?
 }
 
+// ============================================
+// SAGA ORCHESTRATION
+// ============================================
+
+/// Terminal states: COMPLETED, COMPENSATED, FAILED
+/// Non-terminal states: STARTED, STEP_COMPLETED, COMPENSATING
+enum SagaStatus {
+  STARTED
+  STEP_COMPLETED
+  COMPENSATING
+  COMPLETED
+  COMPENSATED
+  FAILED
+}
+
+enum SagaStepStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  COMPENSATING
+  COMPENSATED
+  COMPENSATION_FAILED
+  SKIPPED
+}
+
+/// One row per saga execution. Persisted before any step executes so that
+/// a crash can be detected and the saga resumed from the last durable state.
+model SagaInstance {
+  id          String     @id @default(cuid())
+  /// Logical name of the saga (e.g. "DonationConfirmationSaga")
+  name        String
+  status      SagaStatus @default(STARTED)
+  /// Index of the step currently executing (0-based)
+  currentStep Int        @default(0)
+  /// Serialised initial input for recovery/replay
+  input       Json
+  /// Serialised final output (populated when status = COMPLETED)
+  output      Json?
+  /// Error message when status = FAILED
+  error       String?    @db.Text
+  /// How long compensation may run before the saga is marked FAILED (ms)
+  compensationTimeoutMs Int @default(30000)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  steps SagaStepExecution[]
+
+  @@index([name])
+  @@index([status])
+  @@index([createdAt])
+  /// Recovery query: find non-terminal sagas that need to be resumed
+  @@index([status, createdAt])
+}
+
+/// One row per step execution within a saga. A step may have multiple rows
+/// if it is retried after recovery (each attempt is a separate row).
+model SagaStepExecution {
+  id           String         @id @default(cuid())
+  sagaId       String
+  /// Name of the step as defined in the SagaDefinition
+  stepName     String
+  /// 0-based index within the saga's step array
+  stepIndex    Int
+  status       SagaStepStatus @default(PENDING)
+  /// Serialised input passed to the step's execute function
+  input        Json?
+  /// Serialised output returned by the step's execute function
+  output       Json?
+  /// Error message if the step failed
+  error        String?        @db.Text
+  executedAt   DateTime?
+  completedAt  DateTime?
+  compensatedAt DateTime?
+
+  saga SagaInstance @relation(fields: [sagaId], references: [id], onDelete: Cascade)
+
+  @@index([sagaId])
+  @@index([sagaId, stepIndex])
+  @@index([status])
+  @@index([executedAt])
+}
+
 // FRAUD DETECTION MODEL VERSIONING & LABELING
 // ============================================
 
