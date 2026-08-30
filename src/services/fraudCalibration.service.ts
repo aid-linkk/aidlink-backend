@@ -18,6 +18,41 @@
 import prisma from '../config/database';
 import logger from '../config/logger';
 import { config } from '../config';
+import { FraudDriftDetectionService, FraudDriftObservation, DriftBaseline } from './fraudDriftDetection.service';
+
+function driftObservation(label: { reviewedAt: Date; outcome: string; featureSnapshot: unknown }): FraudDriftObservation {
+  const snapshot = (label.featureSnapshot && typeof label.featureSnapshot === 'object' ? label.featureSnapshot : {}) as Record<string, unknown>;
+  const nested = (snapshot.interactionFeatures && typeof snapshot.interactionFeatures === 'object' ? snapshot.interactionFeatures : {}) as Record<string, unknown>;
+  const numeric: Record<string, number> = {};
+  const categorical: Record<string, string> = {};
+  for (const key of ['velocity', 'deviceFingerprintRisk', 'geographicAnomalyScore', 'externalFraudScore']) { const value = snapshot[key] ?? nested[key]; if (typeof value === 'number' && Number.isFinite(value)) numeric[key] = value; }
+  for (const key of ['deviceType', 'region', 'country', 'fraudProviderCategory']) { const value = snapshot[key] ?? nested[key]; if (typeof value === 'string' && value) categorical[key] = value; }
+  return { timestamp: label.reviewedAt, label: label.outcome === 'REJECTED' ? 1 : 0, numeric, categorical };
+}
+
+async function checkCalibrationDrift(active: { id: string; version: string; metadata: unknown }, rows: Array<{ reviewedAt: Date; outcome: string; featureSnapshot: unknown }>) {
+  const drift = (config as typeof config & { fraudDrift?: { enabled: boolean; currentWindowHours: number; detectionIntervalMinutes: number } }).fraudDrift;
+  if (!drift?.enabled) return undefined;
+  const metadata = (active.metadata && typeof active.metadata === 'object' ? active.metadata : {}) as Record<string, unknown>;
+  const lastChecked = typeof metadata.driftLastCheckedAt === 'string' ? new Date(metadata.driftLastCheckedAt) : undefined;
+  if (lastChecked && Date.now() - lastChecked.getTime() < drift.detectionIntervalMinutes * 60_000) return undefined;
+  const service = new FraudDriftDetectionService();
+  const observations = rows.map(driftObservation);
+  const currentStart = new Date(Date.now() - drift.currentWindowHours * 3_600_000);
+  const baseline = metadata.driftBaseline as DriftBaseline | undefined;
+  if (!baseline) {
+    const historical = observations.filter(row => row.timestamp < currentStart);
+    const established = service.establishBaseline(historical.length ? historical : observations);
+    await prisma.fraudModelVersion.update({ where: { id: active.id }, data: { metadata: { ...metadata, driftBaseline: established, driftLastCheckedAt: new Date().toISOString() } } });
+    logger.info('Fraud drift baseline established', { modelVersionId: active.id, sampleSize: established.labels.sampleSize });
+    return undefined;
+  }
+  const report = service.detect(baseline, observations.filter(row => row.timestamp >= currentStart), { baselineId: baseline.establishedAt, modelVersionId: active.id });
+  await prisma.fraudModelVersion.update({ where: { id: active.id }, data: { metadata: { ...metadata, driftLastCheckedAt: report.detectedAt.toISOString() } } });
+  logger.info('Fraud drift report', { modelVersionId: active.id, modelVersion: active.version, driftDetected: report.driftDetected, driftType: report.driftType, driftPattern: report.driftPattern, severity: report.severity, affectedFeatures: report.affectedFeatures, labelPValue: report.labelResult?.pValue, featureMetrics: report.featureResults.map(result => ({ feature: result.feature, method: result.method, pValue: result.pValue, psi: result.psi })) });
+  if (report.driftType === 'REAL') logger.warn('Fraud real drift alert: recalibration withheld pending review', { modelVersionId: active.id });
+  return report;
+}
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
@@ -489,6 +524,13 @@ export interface RecalibrationResult {
  *   g. Atomic transaction: new version isActive = true, old version isActive = false.
  *   h. Log the transition with old and new ECE/AUC.
  */
+function shouldRejectCatastrophicForgetting(current: { ece?: number | null; auc?: number | null }, candidate: { ece: number; auc: number }): boolean {
+  if (current.ece == null || current.auc == null) return false;
+  const eceDelta = candidate.ece - current.ece;
+  const aucDelta = current.auc - candidate.auc;
+  return eceDelta > 0.1 || aucDelta > 0.05;
+}
+
 export async function runRecalibration(): Promise<RecalibrationResult | null> {
   const { fraudRecalibration } = config;
   const isotonicThreshold = fraudRecalibration.isotonicEceThreshold;
@@ -518,6 +560,17 @@ export async function runRecalibration(): Promise<RecalibrationResult | null> {
     where: { modelVersionId: activeVersion.id },
     select: { fraudScoreFloat: true, outcome: true },
   });
+
+  // Keep the historical calibration query unchanged unless drift monitoring is enabled.
+  const driftEnabled = (config as typeof config & { fraudDrift?: { enabled: boolean } }).fraudDrift?.enabled === true;
+  if (driftEnabled) {
+    const [driftRows, versionState] = await Promise.all([
+      prisma.fraudLabel.findMany({ where: { modelVersionId: activeVersion.id }, select: { reviewedAt: true, outcome: true, featureSnapshot: true } }),
+      prisma.fraudModelVersion.findUnique({ where: { id: activeVersion.id }, select: { metadata: true } }),
+    ]);
+    const driftReport = await checkCalibrationDrift({ ...activeVersion, metadata: versionState?.metadata ?? null }, driftRows);
+    if (driftReport?.driftType === 'REAL') return null;
+  }
 
   const labels: LabelPoint[] = rawLabels.map((l: { fraudScoreFloat: number | null; outcome: string }) => ({
     score: l.fraudScoreFloat ?? 0,
@@ -580,6 +633,17 @@ export async function runRecalibration(): Promise<RecalibrationResult | null> {
     logger.info(
       `runRecalibration: isotonic ECE=${isoEce.toFixed(4)}, AUC=${isoAuc.toFixed(4)}`,
     );
+  }
+
+  if (shouldRejectCatastrophicForgetting(activeVersion, { ece: valEce, auc: valAuc })) {
+    logger.warn('runRecalibration: candidate calibration would catastrophically forget the active model; aborting', {
+      modelVersionId: activeVersion.id,
+      oldEce: activeVersion.ece,
+      oldAuc: activeVersion.auc,
+      newEce: valEce,
+      newAuc: valAuc,
+    });
+    return null;
   }
 
   // ── Step f: Create new inactive version ───────────────────────────────────
