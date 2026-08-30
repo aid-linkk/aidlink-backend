@@ -9,7 +9,7 @@ import { EmailPreferenceService } from './email-preference.service';
 import { sanitizeObject, sanitizeString } from '../utils/sanitization';
 import { classifyDeliveryError } from '../utils/deliveryErrors';
 import { AdminNotificationPreferenceService } from './adminNotificationPreference.service';
-
+import { CircuitBreaker, CircuitBreakerRegistry, FailFastFallback } from '../utils/circuitBreaker';
 const EMAIL_DELIVERY_MAX_ATTEMPTS = 3;
 const EMAIL_DELIVERY_BASE_DELAY_MS = 200;
 
@@ -180,21 +180,35 @@ export class NotificationService {
       attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>;
     } = {}
   ): Promise<void> {
-    try {
-      await this.transporter.sendMail({
-        from: options.from || config.email.from,
-        to,
-        subject,
-        html,
-        text: options.text,
-        attachments: options.attachments,
-      });
-
-      logger.info(`Email sent to ${to}`);
-    } catch (error) {
-      logger.error('Error sending email:', error);
-      throw error;
+    let cb = CircuitBreakerRegistry.get('email');
+    if (!cb) {
+      cb = new CircuitBreaker('email', {
+        failureRateThreshold: 0.5,
+        minimumRequests: 5,
+        latencyThresholdMs: 10000,
+        openTimeoutMs: 60000,
+        halfOpenMaxRequests: 3
+      }, new FailFastFallback());
+      CircuitBreakerRegistry.set('email', cb);
     }
+
+    return cb.execute(async () => {
+      try {
+        await this.transporter.sendMail({
+          from: options.from || config.email.from,
+          to,
+          subject,
+          html,
+          text: options.text,
+          attachments: options.attachments,
+        });
+
+        logger.info(`Email sent to ${to}`);
+      } catch (error) {
+        logger.error('Error sending email:', error);
+        throw error;
+      }
+    });
   }
 
   /**
