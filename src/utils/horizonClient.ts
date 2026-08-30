@@ -13,6 +13,7 @@
  */
 
 import logger from '../config/logger';
+import { CircuitBreaker, CircuitBreakerRegistry, FailFastFallback } from './circuitBreaker';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -115,27 +116,41 @@ export class HorizonClient {
   private async getJson<T>(url: string): Promise<T> {
     logger.debug(`HorizonClient GET ${url}`);
 
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        headers: { Accept: 'application/json' },
-      });
-    } catch (networkError) {
-      throw new HorizonError(url, 0, null, `Network error fetching ${url}: ${String(networkError)}`);
+    let cb = CircuitBreakerRegistry.get('horizon');
+    if (!cb) {
+      cb = new CircuitBreaker('horizon', {
+        failureRateThreshold: 0.5,
+        minimumRequests: 10,
+        latencyThresholdMs: 5000,
+        openTimeoutMs: 60000,
+        halfOpenMaxRequests: 5
+      }, new FailFastFallback());
+      CircuitBreakerRegistry.set('horizon', cb);
     }
 
-    if (!response.ok) {
-      const retryAfterHeader = response.headers.get('Retry-After');
-      const retryAfterMs = retryAfterHeader ? parseFloat(retryAfterHeader) * 1_000 : null;
+    return cb.execute(async () => {
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          headers: { Accept: 'application/json' },
+        });
+      } catch (networkError) {
+        throw new HorizonError(url, 0, null, `Network error fetching ${url}: ${String(networkError)}`);
+      }
 
-      throw new HorizonError(
-        url,
-        response.status,
-        retryAfterMs,
-        `Horizon returned HTTP ${response.status} for ${url}`,
-      );
-    }
+      if (!response.ok) {
+        const retryAfterHeader = response.headers.get('Retry-After');
+        const retryAfterMs = retryAfterHeader ? parseFloat(retryAfterHeader) * 1_000 : null;
 
-    return response.json() as Promise<T>;
+        throw new HorizonError(
+          url,
+          response.status,
+          retryAfterMs,
+          `Horizon returned HTTP ${response.status} for ${url}`,
+        );
+      }
+
+      return response.json() as Promise<T>;
+    });
   }
 }

@@ -20,6 +20,8 @@ import logger from '../../config/logger';
  * ever called) — see pledge.worker.ts. Do not rely on this provider alone
  * for idempotency.
  */
+import { CircuitBreaker, CircuitBreakerRegistry, FailFastFallback } from '../../utils/circuitBreaker';
+
 export class StellarProvider implements PaymentProvider {
   readonly name = 'stellar' as const;
   private server: Server;
@@ -30,43 +32,57 @@ export class StellarProvider implements PaymentProvider {
     this.server = new Server(networkUrl);
     this.escrowKeypair = Keypair.fromSecret(escrowSecretKey);
     this.networkPassphrase = networkPassphrase;
+    
+    if (!CircuitBreakerRegistry.has('stellar')) {
+      CircuitBreakerRegistry.set('stellar', new CircuitBreaker('stellar', {
+        failureRateThreshold: 0.5,
+        minimumRequests: 5,
+        latencyThresholdMs: 5000,
+        openTimeoutMs: 60000,
+        halfOpenMaxRequests: 3
+      }, new FailFastFallback()));
+    }
   }
 
   async charge(options: ChargeOptions): Promise<ChargeResult> {
-    try {
-      const account = await this.server.getAccount(this.escrowKeypair.publicKey());
+    const cb = CircuitBreakerRegistry.get('stellar')!;
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: this.networkPassphrase,
-      })
-        .addOperation(
-          Operation.payment({
-            destination: this.escrowKeypair.publicKey(),
-            asset: Asset.native(),
-            amount: options.amount.toFixed(7),
-          }),
-        )
-        .addMemo(Memo.text(options.idempotencyKey.slice(0, 28)))
-        .setTimeout(30)
-        .build();
+    return cb.execute(async () => {
+      try {
+        const account = await this.server.getAccount(this.escrowKeypair.publicKey());
 
-      tx.sign(this.escrowKeypair);
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: this.networkPassphrase,
+        })
+          .addOperation(
+            Operation.payment({
+              destination: this.escrowKeypair.publicKey(),
+              asset: Asset.native(),
+              amount: options.amount.toFixed(7),
+            }),
+          )
+          .addMemo(Memo.text(options.idempotencyKey.slice(0, 28)))
+          .setTimeout(30)
+          .build();
 
-      const result: any = await this.server.sendTransaction(tx);
+        tx.sign(this.escrowKeypair);
 
-      if (result.status === 'ERROR' || result.status === 'FAILED') {
-        throw new PaymentError(
-          `Stellar transaction failed (status: ${result.status}): ${JSON.stringify(result.errorResult ?? '')}`,
-          true,
-        );
+        const result: any = await this.server.sendTransaction(tx);
+
+        if (result.status === 'ERROR' || result.status === 'FAILED') {
+          throw new PaymentError(
+            `Stellar transaction failed (status: ${result.status}): ${JSON.stringify(result.errorResult ?? '')}`,
+            true,
+          );
+        }
+
+        return { providerReference: result.hash, provider: 'stellar', raw: result };
+      } catch (error: any) {
+        if (error instanceof PaymentError) throw error;
+        logger.error('Stellar charge failed', { pledgeId: options.pledgeId, error: error.message });
+        throw new PaymentError(error.message ?? 'Stellar charge failed', true);
       }
-
-      return { providerReference: result.hash, provider: 'stellar', raw: result };
-    } catch (error: any) {
-      if (error instanceof PaymentError) throw error;
-      logger.error('Stellar charge failed', { pledgeId: options.pledgeId, error: error.message });
-      throw new PaymentError(error.message ?? 'Stellar charge failed', true);
-    }
+    });
   }
 }

@@ -481,6 +481,8 @@ function applyPlattScaling(rawScore: number, params: { A: number; B: number }): 
 
 // ─── Third-Party Fraud Service ────────────────────────────────────────────────
 
+import { CircuitBreaker, CircuitBreakerRegistry, DefaultValueFallback } from '../utils/circuitBreaker';
+
 export async function getThirdPartyFraudScore(
   input: FraudInput,
 ): Promise<{ score: number; signals: FraudSignal[] } | null> {
@@ -493,41 +495,55 @@ export async function getThirdPartyFraudScore(
       return null;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), config.kycFraud.thirdPartyTimeoutMs);
-
-    const response = await fetch(config.kycFraud.thirdPartyApiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.kycFraud.thirdPartyApiKey}`,
-      },
-      body: JSON.stringify({
-        userId: input.userId,
-        ipAddress: input.ipAddress,
-        userAgent: input.userAgent,
-        deviceFingerprint: input.deviceFingerprint,
-        documentType: input.documentType,
-      }),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timer);
-
-    if (!response.ok) {
-      logger.warn(`Third-party fraud service returned ${response.status}`);
-      return null;
+    let cb = CircuitBreakerRegistry.get('kyc_fraud');
+    if (!cb) {
+      cb = new CircuitBreaker('kyc_fraud', {
+        failureRateThreshold: 0.5,
+        minimumRequests: 5,
+        latencyThresholdMs: 5000,
+        openTimeoutMs: 60000,
+        halfOpenMaxRequests: 3
+      }, new DefaultValueFallback<{ score: number; signals: FraudSignal[] } | null>(null));
+      CircuitBreakerRegistry.set('kyc_fraud', cb);
     }
 
-    const result = await response.json() as { score?: number; signals?: FraudSignal[] };
-    return {
-      score: result.score ?? 0,
-      signals: (result.signals ?? []).map((s: any) => ({
-        signal: s.signal ?? 'thirdPartyFlag',
-        severity: s.severity ?? 'medium',
-        detail: s.detail ?? 'Third-party fraud signal',
-      })),
-    };
+    return cb.execute(async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), config.kycFraud.thirdPartyTimeoutMs);
+
+      const response = await fetch(config.kycFraud.thirdPartyApiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${config.kycFraud.thirdPartyApiKey}`,
+        },
+        body: JSON.stringify({
+          userId: input.userId,
+          ipAddress: input.ipAddress,
+          userAgent: input.userAgent,
+          deviceFingerprint: input.deviceFingerprint,
+          documentType: input.documentType,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      if (!response.ok) {
+        logger.warn(`Third-party fraud service returned ${response.status}`);
+        throw new Error(`Third-party fraud service returned ${response.status}`);
+      }
+
+      const result = await response.json() as { score?: number; signals?: FraudSignal[] };
+      return {
+        score: result.score ?? 0,
+        signals: (result.signals ?? []).map((s: any) => ({
+          signal: s.signal ?? 'thirdPartyFlag',
+          severity: s.severity ?? 'medium',
+          detail: s.detail ?? 'Third-party fraud signal',
+        })),
+      };
+    });
   } catch (err: any) {
     logger.warn('Third-party fraud service unavailable, skipping', { error: err.message });
     return null;
