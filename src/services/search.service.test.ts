@@ -486,6 +486,234 @@ describe('SearchService', () => {
     });
   });
 
+  describe('searchDistributions', () => {
+    const mockDistributions = [
+      {
+        id: 'dist-1',
+        amount: 100,
+        status: 'COMPLETED',
+        campaign: { id: 'camp-1', title: 'Flood Relief' },
+        beneficiary: { id: 'ben-1', firstName: 'John', lastName: 'Doe', country: 'KE', city: 'Nairobi' },
+      },
+    ];
+
+    beforeEach(() => {
+      (prisma.distribution.findMany as jest.Mock).mockResolvedValue(mockDistributions);
+      (prisma.distribution.count as jest.Mock).mockResolvedValue(1);
+    });
+
+    it('returns data and pagination', async () => {
+      const result = await SearchService.searchDistributions({ page: 1, limit: 20 });
+
+      expect(result).toHaveProperty('data');
+      expect(result).toHaveProperty('pagination');
+      expect(result.data).toHaveLength(1);
+      expect(result.pagination).toEqual({ page: 1, limit: 20, total: 1, totalPages: 1 });
+    });
+
+    it('applies skip/take from page and limit', async () => {
+      (prisma.distribution.count as jest.Mock).mockResolvedValue(45);
+
+      await SearchService.searchDistributions({ page: 3, limit: 10 });
+
+      const findManyArgs = (prisma.distribution.findMany as jest.Mock).mock.calls[0][0];
+      expect(findManyArgs.skip).toBe(20);
+      expect(findManyArgs.take).toBe(10);
+    });
+
+    it('builds a where clause matching distribution id, tx hash, or transaction ref for distributionId', () => {
+      const where = SearchService.buildDistributionWhere({ distributionId: 'dist-1' });
+      expect(where.OR).toEqual([
+        { id: 'dist-1' },
+        { blockchainTxHash: 'dist-1' },
+        { transactionRef: 'dist-1' },
+      ]);
+    });
+
+    it('builds a where clause covering campaign/beneficiary joins, status, method, location, amount and date range', () => {
+      const dateFrom = new Date('2026-01-01');
+      const dateTo = new Date('2026-02-01');
+      const where = SearchService.buildDistributionWhere({
+        campaignId: 'camp-1',
+        campaignName: 'Flood',
+        beneficiaryId: 'ben-1',
+        beneficiaryName: 'Doe',
+        status: 'COMPLETED',
+        method: 'CASH',
+        location: 'Nairobi',
+        distributedBy: 'staff-1',
+        dateFrom,
+        dateTo,
+        minAmount: 10,
+        maxAmount: 500,
+      });
+
+      expect(where.campaignId).toBe('camp-1');
+      expect(where.campaign).toEqual({ title: { contains: 'Flood', mode: 'insensitive' } });
+      expect(where.beneficiaryId).toBe('ben-1');
+      expect(where.status).toBe('COMPLETED');
+      expect(where.method).toBe('CASH');
+      expect(where.distributedBy).toBe('staff-1');
+      expect(where.distributedAt).toEqual({ gte: dateFrom, lte: dateTo });
+      expect(where.amount).toEqual({ gte: 10, lte: 500 });
+      // beneficiaryName + location both contribute to beneficiary.OR
+      expect(where.beneficiary.OR).toEqual(
+        expect.arrayContaining([
+          { firstName: { contains: 'Doe', mode: 'insensitive' } },
+          { lastName: { contains: 'Doe', mode: 'insensitive' } },
+          { country: { contains: 'Nairobi', mode: 'insensitive' } },
+          { city: { contains: 'Nairobi', mode: 'insensitive' } },
+        ])
+      );
+    });
+
+    it('sorts by campaignName/beneficiaryName via relation, with an id tiebreaker', () => {
+      expect(SearchService.buildDistributionOrderBy('campaignName', 'asc')).toEqual([
+        { campaign: { title: 'asc' } },
+        { id: 'asc' },
+      ]);
+      expect(SearchService.buildDistributionOrderBy('beneficiaryName', 'desc')).toEqual([
+        { beneficiary: { firstName: 'desc' } },
+        { id: 'asc' },
+      ]);
+      expect(SearchService.buildDistributionOrderBy('amount', 'desc')).toEqual([
+        { amount: 'desc' },
+        { id: 'asc' },
+      ]);
+    });
+
+    it('falls back to createdAt desc for an unrecognized sort field', () => {
+      expect(SearchService.buildDistributionOrderBy('bogus' as any, 'asc')).toEqual([
+        { createdAt: 'desc' },
+        { id: 'asc' },
+      ]);
+    });
+  });
+
+  describe('searchAssignments', () => {
+    const mockAssignments = [
+      {
+        id: 'assign-1',
+        priority: 5,
+        assignedAt: new Date('2026-01-15'),
+        campaign: { id: 'camp-1', title: 'Flood Relief' },
+        beneficiary: {
+          id: 'ben-1',
+          firstName: 'John',
+          lastName: 'Doe',
+          country: 'KE',
+          city: 'Nairobi',
+          needsCategory: 'FOOD',
+        },
+      },
+    ];
+
+    beforeEach(() => {
+      (prisma.beneficiaryAssignment.findMany as jest.Mock).mockResolvedValue(mockAssignments);
+      (prisma.beneficiaryAssignment.count as jest.Mock).mockResolvedValue(1);
+    });
+
+    it('returns data and pagination', async () => {
+      const result = await SearchService.searchAssignments({ page: 1, limit: 20 });
+
+      expect(result).toHaveProperty('data');
+      expect(result).toHaveProperty('pagination');
+      expect(result.data).toHaveLength(1);
+      expect(result.pagination).toEqual({ page: 1, limit: 20, total: 1, totalPages: 1 });
+    });
+
+    it('applies skip/take from page and limit', async () => {
+      (prisma.beneficiaryAssignment.count as jest.Mock).mockResolvedValue(23);
+
+      await SearchService.searchAssignments({ page: 2, limit: 10 });
+
+      const findManyArgs = (prisma.beneficiaryAssignment.findMany as jest.Mock).mock.calls[0][0];
+      expect(findManyArgs.skip).toBe(10);
+      expect(findManyArgs.take).toBe(10);
+    });
+
+    it('builds a where clause covering id, campaign/beneficiary joins, needsCategory, location, priority range and date range', () => {
+      const dateFrom = new Date('2026-01-01');
+      const dateTo = new Date('2026-02-01');
+      const where = SearchService.buildAssignmentWhere({
+        assignmentId: 'assign-1',
+        campaignId: 'camp-1',
+        campaignName: 'Flood',
+        beneficiaryId: 'ben-1',
+        beneficiaryName: 'Doe',
+        needsCategory: 'FOOD',
+        location: 'Nairobi',
+        priorityMin: 1,
+        priorityMax: 10,
+        dateFrom,
+        dateTo,
+      });
+
+      expect(where.id).toBe('assign-1');
+      expect(where.campaignId).toBe('camp-1');
+      expect(where.campaign).toEqual({ title: { contains: 'Flood', mode: 'insensitive' } });
+      expect(where.beneficiaryId).toBe('ben-1');
+      expect(where.beneficiary.needsCategory).toBe('FOOD');
+      expect(where.beneficiary.OR).toEqual(
+        expect.arrayContaining([
+          { firstName: { contains: 'Doe', mode: 'insensitive' } },
+          { lastName: { contains: 'Doe', mode: 'insensitive' } },
+          { country: { contains: 'Nairobi', mode: 'insensitive' } },
+          { city: { contains: 'Nairobi', mode: 'insensitive' } },
+        ])
+      );
+      expect(where.priority).toEqual({ gte: 1, lte: 10 });
+      expect(where.assignedAt).toEqual({ gte: dateFrom, lte: dateTo });
+    });
+
+    it('matches free-text query against notes', () => {
+      const where = SearchService.buildAssignmentWhere({ query: 'urgent case' });
+      expect(where.notes).toEqual({ contains: 'urgent case', mode: 'insensitive' });
+    });
+
+    it('sorts by campaignName/beneficiaryName via relation, with an id tiebreaker', () => {
+      expect(SearchService.buildAssignmentOrderBy('campaignName', 'asc')).toEqual([
+        { campaign: { title: 'asc' } },
+        { id: 'asc' },
+      ]);
+      expect(SearchService.buildAssignmentOrderBy('priority', 'desc')).toEqual([
+        { priority: 'desc' },
+        { id: 'asc' },
+      ]);
+    });
+
+    it('falls back to assignedAt desc for an unrecognized sort field', () => {
+      expect(SearchService.buildAssignmentOrderBy('bogus' as any, 'asc')).toEqual([
+        { assignedAt: 'desc' },
+        { id: 'asc' },
+      ]);
+    });
+  });
+
+  describe('advancedSearch entity routing', () => {
+    it('routes entityType=distribution to searchDistributions', async () => {
+      (prisma.distribution.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.distribution.count as jest.Mock).mockResolvedValue(0);
+
+      await SearchService.advancedSearch({ entityType: 'distribution', campaignId: 'camp-1', page: 1, limit: 20 });
+
+      expect(prisma.distribution.findMany).toHaveBeenCalled();
+      const findManyArgs = (prisma.distribution.findMany as jest.Mock).mock.calls[0][0];
+      expect(findManyArgs.where.campaignId).toBe('camp-1');
+    });
+
+    it('routes entityType=assignments to searchAssignments', async () => {
+      (prisma.beneficiaryAssignment.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.beneficiaryAssignment.count as jest.Mock).mockResolvedValue(0);
+
+      await SearchService.advancedSearch({ entityType: 'assignments', beneficiaryId: 'ben-1', page: 1, limit: 20 });
+
+      expect(prisma.beneficiaryAssignment.findMany).toHaveBeenCalled();
+      const findManyArgs = (prisma.beneficiaryAssignment.findMany as jest.Mock).mock.calls[0][0];
+      expect(findManyArgs.where.beneficiaryId).toBe('ben-1');
+    });
+  });
+
   describe('globalSearch', () => {
     it('should throw error if query is not provided', async () => {
       await expect(SearchService.globalSearch({ page: 1, limit: 10 })).rejects.toThrow('Query is required');

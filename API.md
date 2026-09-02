@@ -11,8 +11,10 @@ All endpoints require authentication unless stated otherwise.
 | GET | `/campaigns` | Search campaigns with filtering, pagination and sorting |
 | GET | `/donations` | Search donations with filtering, pagination and sorting |
 | GET | `/beneficiaries` | Search beneficiaries with filtering, pagination, sorting and facets |
+| GET | `/distributions` | Search distribution history with filtering, pagination and sorting |
+| GET | `/assignments` | Search beneficiary assignment records with filtering, pagination and sorting |
 | GET | `/global` | Global search across all entities |
-| GET | `/advanced` | Advanced search with entity-type filtering |
+| GET | `/advanced` | Advanced search with entity-type filtering (`entityType=campaign\|donation\|beneficiary\|distribution\|assignment\|global`) |
 
 ### `GET /search/beneficiaries`
 
@@ -131,6 +133,96 @@ npx prisma migrate dev --name beneficiary_search_indexes
 # (the generated migration includes CREATE EXTENSION IF NOT EXISTS pg_trgm)
 ```
 
+### `GET /search/distributions`
+
+**Access:** Private — `ADMIN` and `VERIFIER` roles only (returns beneficiary-linked delivery records).
+
+Search distribution history with filtering, pagination and sorting.
+
+#### Query parameters
+
+| Param | Type | Default | Description |
+| --- | --- | --- | --- |
+| `q` | string | – | Free-text match on `transactionRef`, `notes`, `proofDocumentUrl` |
+| `distributionId` | string | – | Matches the distribution's `id`, `blockchainTxHash`, or `transactionRef` |
+| `campaignId` | string | – | Filter by exact campaign ID |
+| `campaignName` | string | – | Filter by campaign title (partial, case-insensitive) |
+| `beneficiaryId` | string | – | Filter by exact beneficiary ID |
+| `beneficiaryName` | string | – | Filter by beneficiary first/last name (partial, case-insensitive) |
+| `status` | enum | – | One of `PENDING`, `IN_PROGRESS`, `COMPLETED`, `FAILED`, `CANCELLED` |
+| `method` | enum | – | One of `CASH`, `BANK_TRANSFER`, `MOBILE_MONEY`, `CRYPTO`, `VOUCHER`, `IN_KIND` |
+| `location` | string | – | Matches the linked beneficiary's country or city (partial, case-insensitive) |
+| `distributedBy` | string | – | Filter by the staff/organization identifier that executed the distribution |
+| `dateFrom` / `dateTo` | ISO date | – | Filters on `distributedAt` |
+| `minAmount` / `maxAmount` | number | – | Filters on `amount` |
+| `page` | int | `1` | Page number (min `1`) |
+| `limit` | int | `20` | Page size (min `1`, max `100`) |
+| `sortBy` | enum | `createdAt` | One of `distributedAt`, `createdAt`, `amount`, `status`, `campaignName`, `beneficiaryName` |
+| `sortOrder` | enum | `desc` | `asc` or `desc` |
+
+Note: the `Distribution` model doesn't store an item/category or free-form
+location field directly — `method` is the closest existing field to "item
+distributed", and `location` is derived from the linked beneficiary's
+`country`/`city`.
+
+#### Example
+
+```
+GET /api/v1/search/distributions?campaignId=camp_123&status=COMPLETED&dateFrom=2026-01-01&sortBy=distributedAt&sortOrder=desc
+```
+
+#### Response shape
+
+Same envelope as the other search endpoints: `{ success, data: Distribution[], pagination }`.
+
+### `GET /search/assignments`
+
+**Access:** Private — `ADMIN` and `VERIFIER` roles only (returns beneficiary PII).
+
+Search beneficiary assignment records with filtering, pagination and sorting.
+
+#### Query parameters
+
+| Param | Type | Default | Description |
+| --- | --- | --- | --- |
+| `q` | string | – | Free-text match on `notes` |
+| `assignmentId` | string | – | Filter by exact assignment ID |
+| `campaignId` | string | – | Filter by exact campaign ID |
+| `campaignName` | string | – | Filter by campaign title (partial, case-insensitive) |
+| `beneficiaryId` | string | – | Filter by exact beneficiary ID |
+| `beneficiaryName` | string | – | Filter by beneficiary first/last name (partial, case-insensitive) |
+| `needsCategory` | string | – | Filter by the linked beneficiary's needs category |
+| `location` | string | – | Matches the linked beneficiary's country or city (partial, case-insensitive) |
+| `priorityMin` / `priorityMax` | int | – | Filters on `priority` |
+| `dateFrom` / `dateTo` | ISO date | – | Filters on `assignedAt` |
+| `page` | int | `1` | Page number (min `1`) |
+| `limit` | int | `20` | Page size (min `1`, max `100`) |
+| `sortBy` | enum | `assignedAt` | One of `assignedAt`, `priority`, `campaignName`, `beneficiaryName` |
+| `sortOrder` | enum | `desc` | `asc` or `desc` |
+
+Note: `BeneficiaryAssignment` doesn't currently track a status field
+(`ASSIGNED`/`COMPLETED`/etc.) or a `completedAt` timestamp, so status
+filtering/sorting isn't available for this endpoint — only the fields
+already present on the model (`priority`, `assignedAt`, `notes`) plus the
+linked campaign/beneficiary can be searched.
+
+#### Example
+
+```
+GET /api/v1/search/assignments?beneficiaryId=ben_123&needsCategory=FOOD&sortBy=priority&sortOrder=desc
+```
+
+#### Response shape
+
+Same envelope as the other search endpoints: `{ success, data: BeneficiaryAssignment[], pagination }`.
+
+#### Indexing / migration note
+
+`BeneficiaryAssignment.campaignId`/`beneficiaryId` were already indexed;
+`assignedAt` and `priority` are now indexed too (see migration
+`20260808223556_add_beneficiary_assignment_search_indexes`) since both are
+searchable/sortable fields. `Distribution` already had indexes covering
+`campaignId`, `beneficiaryId`, `status`, and `distributedAt`.
 
 ---
 
