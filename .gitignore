@@ -11,8 +11,6 @@ build/
 *.tsbuildinfo
 
 # Environment variables
-.env
-.env.local
 .env.*.local
 
 # Logs
@@ -24,7 +22,6 @@ yarn-error.log*
 lerna-debug.log*
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -58,3 +55,4 @@ temp/
 *.pem
 *.key
 *.crt
+config.bat
